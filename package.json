@@ -1,0 +1,19 @@
+{
+  "name": "bilibili-accelerator",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Safari-friendly Bilibili playback CDN accelerator.",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test",
+    "prepare": "npm run build"
+  },
+  "keywords": [
+    "bilibili",
+    "safari",
+    "cdn",
+    "userscript",
+    "webextension"
+  ],
+  "license": "MIT"
+}
