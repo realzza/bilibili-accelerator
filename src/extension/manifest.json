@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Bilibili Accelerator",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Rewrites slow Bilibili playback CDN URLs before Safari starts buffering.",
   "icons": {},
   "content_scripts": [

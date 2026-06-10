@@ -14,7 +14,7 @@ const userscriptHeader = `// ==UserScript==
 // @name         Bilibili Accelerator
 // @name:zh-CN   Bilibili Accelerator - B站海外播放加速
 // @namespace    https://github.com/realzza/bilibili-accelerator
-// @version      0.1.1
+// @version      0.1.2
 // @description  Rewrite slow Bilibili playback CDN URLs for smoother overseas playback.
 // @description:zh-CN 自动改写 B 站慢 CDN 播放地址，缓解海外用户看冷门视频时的卡顿。
 // @author       realzza

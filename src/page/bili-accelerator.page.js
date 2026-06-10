@@ -176,6 +176,7 @@
 
   function createSelect(options, value, onChange) {
     const select = document.createElement("select");
+    select.className = "ba-control";
     select.addEventListener("change", function handleChange() {
       onChange(select.value);
     });
@@ -196,15 +197,25 @@
   }
 
   function renderStatus() {
-    const status = document.getElementById("ba-status");
+    const host = document.getElementById(BUTTON_ID);
+    const status = host && host.shadowRoot && host.shadowRoot.getElementById("ba-status");
+    const count = host && host.shadowRoot && host.shadowRoot.getElementById("ba-count");
+    const indicator = host && host.shadowRoot && host.shadowRoot.getElementById("ba-indicator");
     if (!status) {
       return;
     }
 
     const last = state.rewrites[state.rewrites.length - 1];
+    if (count) {
+      count.textContent = String(state.rewriteCount);
+    }
+    if (indicator) {
+      indicator.textContent = config.enabled ? "On" : "Off";
+      indicator.className = config.enabled ? "ba-pill is-on" : "ba-pill";
+    }
     status.textContent = last
-      ? "Rewrites: " + state.rewriteCount + " | Last: " + last.reason + " -> " + last.targetHost
-      : "Rewrites: " + state.rewriteCount;
+      ? "Last rewrite: " + last.reason + " -> " + last.targetHost
+      : "Waiting for Bilibili playback URLs.";
   }
 
   function installUi() {
@@ -217,45 +228,125 @@
     const shadow = host.attachShadow({ mode: "open" });
     const style = document.createElement("style");
     style.textContent = [
-      ":host{position:fixed;right:16px;bottom:16px;z-index:2147483647;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;color:#17202a}",
+      ":host{position:fixed;right:18px;bottom:18px;z-index:2147483647;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#17202a}",
+      "*{box-sizing:border-box}",
       "button,input,select{font:inherit}",
-      ".ba-toggle{width:42px;height:34px;border:1px solid #8aa0b4;border-radius:8px;background:#ffffff;color:#17202a;box-shadow:0 4px 16px rgba(0,0,0,.18);cursor:pointer;font-weight:700}",
-      ".ba-panel{display:none;position:absolute;right:0;bottom:44px;width:min(320px,calc(100vw - 32px));padding:12px;border:1px solid #8aa0b4;border-radius:8px;background:#ffffff;box-shadow:0 10px 28px rgba(0,0,0,.24)}",
+      ".ba-toggle{display:inline-flex;align-items:center;gap:7px;height:36px;min-width:72px;border:1px solid rgba(23,32,42,.14);border-radius:999px;background:rgba(255,255,255,.92);color:#17202a;box-shadow:0 8px 24px rgba(21,32,43,.18),0 1px 0 rgba(255,255,255,.9) inset;backdrop-filter:saturate(180%) blur(14px);-webkit-backdrop-filter:saturate(180%) blur(14px);cursor:pointer;font-weight:700;padding:0 12px 0 9px;transition:transform .16s ease,box-shadow .16s ease,background .16s ease}",
+      ".ba-toggle:hover{transform:translateY(-1px);box-shadow:0 12px 30px rgba(21,32,43,.22),0 1px 0 rgba(255,255,255,.9) inset;background:#fff}",
+      ".ba-toggle:active{transform:translateY(0)}",
+      ".ba-mark{display:grid;place-items:center;width:22px;height:22px;border-radius:999px;background:#00aeec;color:#fff;box-shadow:0 4px 10px rgba(0,174,236,.34)}",
+      ".ba-mark svg{width:14px;height:14px;display:block}",
+      ".ba-toggle-text{font-size:12px;letter-spacing:0}",
+      ".ba-panel{display:none;position:absolute;right:0;bottom:48px;width:min(340px,calc(100vw - 36px));padding:14px;border:1px solid rgba(23,32,42,.12);border-radius:12px;background:rgba(255,255,255,.96);box-shadow:0 18px 46px rgba(21,32,43,.24);backdrop-filter:saturate(180%) blur(18px);-webkit-backdrop-filter:saturate(180%) blur(18px)}",
       ".ba-panel.open{display:block}",
-      ".ba-title{font-size:14px;font-weight:700;margin:0 0 10px}",
-      ".ba-field{display:grid;grid-template-columns:92px 1fr;align-items:center;gap:8px;margin:8px 0;font-size:12px}",
-      ".ba-field input[type=text],.ba-field select{min-width:0;border:1px solid #aab7c2;border-radius:6px;padding:6px;background:#fff;color:#17202a}",
-      ".ba-row{display:flex;align-items:center;gap:8px;margin:8px 0;font-size:12px}",
-      ".ba-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:10px}",
-      ".ba-actions button{border:1px solid #8aa0b4;border-radius:6px;background:#f7f9fb;color:#17202a;padding:6px 9px;cursor:pointer}",
-      ".ba-note{font-size:11px;line-height:1.4;color:#52606d;margin-top:8px}",
-      "#ba-status{font-size:11px;line-height:1.4;color:#34495e;margin-top:8px;word-break:break-word}"
+      ".ba-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:12px}",
+      ".ba-title{font-size:14px;font-weight:800;margin:0;line-height:1.25;color:#111827}",
+      ".ba-subtitle{font-size:11px;line-height:1.35;color:#5b6773;margin:3px 0 0}",
+      ".ba-pill{display:inline-flex;align-items:center;height:22px;border-radius:999px;background:#eef2f6;color:#5b6773;font-size:11px;font-weight:700;padding:0 8px;white-space:nowrap}",
+      ".ba-pill.is-on{background:#e6f8ff;color:#0077a3}",
+      ".ba-stats{display:grid;grid-template-columns:84px 1fr;gap:10px;align-items:center;border:1px solid #e5eaf0;border-radius:10px;background:#f7fafc;padding:10px;margin-bottom:12px}",
+      ".ba-count{font-size:22px;line-height:1;font-weight:800;color:#00aeec;text-align:center}",
+      ".ba-count-label{display:block;font-size:10px;font-weight:700;color:#6b7785;text-transform:uppercase;letter-spacing:.04em;margin-top:3px;text-align:center}",
+      "#ba-status{font-size:11px;line-height:1.45;color:#34495e;word-break:break-word}",
+      ".ba-field{display:grid;grid-template-columns:88px 1fr;align-items:center;gap:9px;margin:9px 0;font-size:12px}",
+      ".ba-field span{color:#46515c;font-weight:650}",
+      ".ba-control,.ba-field input[type=text],.ba-field select{width:100%;min-width:0;height:32px;border:1px solid #d5dde5;border-radius:8px;padding:0 9px;background:#fff;color:#17202a;outline:none;font-size:11px}",
+      ".ba-control:focus,.ba-field input[type=text]:focus{border-color:#00aeec;box-shadow:0 0 0 3px rgba(0,174,236,.14)}",
+      ".ba-switch-row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:10px 0;padding:9px 10px;border:1px solid #e5eaf0;border-radius:10px;background:#fff}",
+      ".ba-switch-text{display:grid;gap:2px}",
+      ".ba-switch-title{font-size:12px;font-weight:750;color:#202a33}",
+      ".ba-switch-note{font-size:11px;color:#6b7785;line-height:1.3}",
+      ".ba-switch{position:relative;display:inline-flex;width:42px;height:24px;flex:0 0 auto}",
+      ".ba-switch input{position:absolute;opacity:0;width:1px;height:1px}",
+      ".ba-slider{position:absolute;inset:0;border-radius:999px;background:#c9d3dd;cursor:pointer;transition:background .16s ease}",
+      ".ba-slider:before{content:'';position:absolute;width:20px;height:20px;left:2px;top:2px;border-radius:50%;background:#fff;box-shadow:0 2px 6px rgba(0,0,0,.22);transition:transform .16s ease}",
+      ".ba-switch input:checked+.ba-slider{background:#00aeec}",
+      ".ba-switch input:checked+.ba-slider:before{transform:translateX(18px)}",
+      ".ba-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}",
+      ".ba-actions button{height:32px;border:1px solid #d5dde5;border-radius:8px;background:#fff;color:#25313d;padding:0 11px;cursor:pointer;font-size:12px;font-weight:700}",
+      ".ba-actions button.primary{border-color:#00aeec;background:#00aeec;color:#fff}",
+      ".ba-note{font-size:11px;line-height:1.4;color:#6b7785;margin:10px 0 0}"
     ].join("");
 
     const toggle = document.createElement("button");
     toggle.className = "ba-toggle";
     toggle.type = "button";
-    toggle.textContent = "BA";
     toggle.title = "Bilibili Accelerator";
+    const mark = document.createElement("span");
+    mark.className = "ba-mark";
+    mark.innerHTML = "<svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path fill=\"currentColor\" d=\"M13 2 4 14h7l-1 8 10-13h-7l1-7Z\"/></svg>";
+    const toggleText = document.createElement("span");
+    toggleText.className = "ba-toggle-text";
+    toggleText.textContent = "Bili";
+    toggle.appendChild(mark);
+    toggle.appendChild(toggleText);
 
     const panel = document.createElement("section");
     panel.className = "ba-panel";
     panel.id = PANEL_ID;
 
+    const head = document.createElement("div");
+    head.className = "ba-head";
+    const headText = document.createElement("div");
     const title = document.createElement("p");
     title.className = "ba-title";
     title.textContent = "Bilibili Accelerator";
+    const subtitle = document.createElement("p");
+    subtitle.className = "ba-subtitle";
+    subtitle.textContent = "Playback CDN rewrite";
+    const indicator = document.createElement("span");
+    indicator.id = "ba-indicator";
+    indicator.className = config.enabled ? "ba-pill is-on" : "ba-pill";
+    indicator.textContent = config.enabled ? "On" : "Off";
+    headText.appendChild(title);
+    headText.appendChild(subtitle);
+    head.appendChild(headText);
+    head.appendChild(indicator);
+
+    const stats = document.createElement("div");
+    stats.className = "ba-stats";
+    const countBox = document.createElement("div");
+    const countValue = document.createElement("div");
+    countValue.className = "ba-count";
+    countValue.id = "ba-count";
+    countValue.textContent = String(state.rewriteCount);
+    const countLabel = document.createElement("span");
+    countLabel.className = "ba-count-label";
+    countLabel.textContent = "rewrites";
+    countBox.appendChild(countValue);
+    countBox.appendChild(countLabel);
+    const status = document.createElement("div");
+    status.id = "ba-status";
+    stats.appendChild(countBox);
+    stats.appendChild(status);
 
     const enabled = document.createElement("input");
     enabled.type = "checkbox";
     enabled.checked = config.enabled;
     enabled.addEventListener("change", function handleEnabled() {
       saveConfig(Object.assign({}, config, { enabled: enabled.checked }));
+      renderStatus();
     });
+    const enabledSwitch = document.createElement("span");
+    enabledSwitch.className = "ba-switch";
+    const enabledSlider = document.createElement("span");
+    enabledSlider.className = "ba-slider";
+    enabledSwitch.appendChild(enabled);
+    enabledSwitch.appendChild(enabledSlider);
     const enabledRow = document.createElement("label");
-    enabledRow.className = "ba-row";
-    enabledRow.appendChild(enabled);
-    enabledRow.appendChild(document.createTextNode("Enabled"));
+    enabledRow.className = "ba-switch-row";
+    const enabledCopy = document.createElement("span");
+    enabledCopy.className = "ba-switch-text";
+    const enabledTitle = document.createElement("span");
+    enabledTitle.className = "ba-switch-title";
+    enabledTitle.textContent = "Enabled";
+    const enabledNote = document.createElement("span");
+    enabledNote.className = "ba-switch-note";
+    enabledNote.textContent = "Rewrite slow playback hosts before buffering.";
+    enabledCopy.appendChild(enabledTitle);
+    enabledCopy.appendChild(enabledNote);
+    enabledRow.appendChild(enabledCopy);
+    enabledRow.appendChild(enabledSwitch);
 
     const mode = createSelect([
       { value: "bad-only", label: "Bad CDN only" },
@@ -274,6 +365,7 @@
 
     const hostInput = document.createElement("input");
     hostInput.type = "text";
+    hostInput.className = "ba-control";
     hostInput.value = config.pcdnHost;
     hostInput.setAttribute("list", "ba-hosts");
     hostInput.addEventListener("change", function handleHost() {
@@ -294,13 +386,26 @@
     akamai.addEventListener("change", function handleAkamai() {
       saveConfig(Object.assign({}, config, { rewriteAkamai: akamai.checked }));
     });
+    const akamaiSwitch = document.createElement("span");
+    akamaiSwitch.className = "ba-switch";
+    const akamaiSlider = document.createElement("span");
+    akamaiSlider.className = "ba-slider";
+    akamaiSwitch.appendChild(akamai);
+    akamaiSwitch.appendChild(akamaiSlider);
     const akamaiRow = document.createElement("label");
-    akamaiRow.className = "ba-row";
-    akamaiRow.appendChild(akamai);
-    akamaiRow.appendChild(document.createTextNode("Also rewrite Akamai"));
-
-    const status = document.createElement("div");
-    status.id = "ba-status";
+    akamaiRow.className = "ba-switch-row";
+    const akamaiCopy = document.createElement("span");
+    akamaiCopy.className = "ba-switch-text";
+    const akamaiTitle = document.createElement("span");
+    akamaiTitle.className = "ba-switch-title";
+    akamaiTitle.textContent = "Rewrite Akamai";
+    const akamaiNote = document.createElement("span");
+    akamaiNote.className = "ba-switch-note";
+    akamaiNote.textContent = "Use only if Akamai is slow on your network.";
+    akamaiCopy.appendChild(akamaiTitle);
+    akamaiCopy.appendChild(akamaiNote);
+    akamaiRow.appendChild(akamaiCopy);
+    akamaiRow.appendChild(akamaiSwitch);
 
     const note = document.createElement("p");
     note.className = "ba-note";
@@ -308,6 +413,7 @@
 
     const reload = document.createElement("button");
     reload.type = "button";
+    reload.className = "primary";
     reload.textContent = "Reload";
     reload.addEventListener("click", function handleReload() {
       root.location.reload();
@@ -325,14 +431,14 @@
     actions.appendChild(reload);
     actions.appendChild(close);
 
-    panel.appendChild(title);
+    panel.appendChild(head);
+    panel.appendChild(stats);
     panel.appendChild(enabledRow);
     panel.appendChild(createField("Mode", mode));
-    panel.appendChild(createField("PCDN host", hostInput));
+    panel.appendChild(createField("Target host", hostInput));
     panel.appendChild(hostList);
     panel.appendChild(createField("MCDN", mcdn));
     panel.appendChild(akamaiRow);
-    panel.appendChild(status);
     panel.appendChild(note);
     panel.appendChild(actions);
 
