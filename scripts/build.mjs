@@ -36,5 +36,6 @@ await writeFile(path.join(extensionDist, "bili-accelerator.page.js"), `${core}\n
 await writeFile(path.join(extensionDist, "content.js"), content);
 await writeFile(path.join(extensionDist, "manifest.json"), manifest);
 await copyFile(path.join(root, "README.md"), path.join(dist, "README.md")).catch(() => {});
+await copyFile(path.join(root, "README.en.md"), path.join(dist, "README.en.md")).catch(() => {});
 
 console.log("Built dist/bilibili-accelerator.user.js and dist/extension");
