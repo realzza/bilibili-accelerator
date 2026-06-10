@@ -1,8 +1,14 @@
 // ==UserScript==
 // @name         Bilibili Accelerator
-// @namespace    https://github.com/local/bilibili-accelerator
-// @version      0.1.0
-// @description  Rewrite slow Bilibili playback CDN URLs for smoother Safari playback.
+// @name:zh-CN   Bilibili Accelerator - B站海外播放加速
+// @namespace    https://github.com/realzza/bilibili-accelerator
+// @version      0.1.1
+// @description  Rewrite slow Bilibili playback CDN URLs for smoother overseas playback.
+// @description:zh-CN 自动改写 B 站慢 CDN 播放地址，缓解海外用户看冷门视频时的卡顿。
+// @author       realzza
+// @license      MIT
+// @homepageURL  https://github.com/realzza/bilibili-accelerator
+// @supportURL   https://github.com/realzza/bilibili-accelerator/issues
 // @match        https://*.bilibili.com/*
 // @match        https://*.bilibili.tv/*
 // @run-at       document-start
