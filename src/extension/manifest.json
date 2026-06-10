@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "Bilibili Accelerator",
+  "version": "0.1.0",
+  "description": "Rewrites slow Bilibili playback CDN URLs before Safari starts buffering.",
+  "icons": {},
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.bilibili.com/*",
+        "https://*.bilibili.tv/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_start"
+    }
+  ],
+  "host_permissions": [
+    "https://*.bilibili.com/*",
+    "https://*.bilibili.tv/*"
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "bili-accelerator.page.js"
+      ],
+      "matches": [
+        "https://*.bilibili.com/*",
+        "https://*.bilibili.tv/*"
+      ]
+    }
+  ]
+}
