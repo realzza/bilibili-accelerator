@@ -13,7 +13,7 @@ Greasy Fork is the recommended install path. It works with Chrome, Safari, Firef
 - [Greasy Fork script page](https://greasyfork.org/en/scripts/582026-bilibili-accelerator)
 - [Direct `.user.js` install](https://update.greasyfork.org/scripts/582026/Bilibili%20Accelerator.user.js)
 - [GitHub Raw fallback](https://raw.githubusercontent.com/realzza/bilibili-accelerator/main/dist/bilibili-accelerator.user.js)
-- [GitHub Release v0.1.1](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.1.1)
+- [GitHub Release v0.1.2](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.1.2)
 
 After installation, open any Bilibili video. A small `BA` button in the lower-right corner means the script is active.
 
