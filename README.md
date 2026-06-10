@@ -13,7 +13,7 @@
 - GitHub Release：
   [下载 v0.1.1](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.1.1)
 - Greasy Fork：
-  已准备发布，等 Greasy Fork 账号登录完成后补官方页面链接
+  [官方脚本页](https://greasyfork.org/en/scripts/582026-bilibili-accelerator)
 
 装好后打开任意 B 站视频，右下角出现 `BA` 按钮，就说明生效了。
 
@@ -116,7 +116,9 @@ dist/extension/
 - Tampermonkey：
   打开 GitHub raw 安装源即可触发安装页。
 - Greasy Fork：
-  发布包已准备好；Greasy Fork 当前需要账号登录/OAuth 后才能创建脚本页面。
+  `https://greasyfork.org/en/scripts/582026-bilibili-accelerator`
+- Greasy Fork 安装源：
+  `https://update.greasyfork.org/scripts/582026/Bilibili%20Accelerator.user.js`
 
 ## 为什么值得 Star
 
