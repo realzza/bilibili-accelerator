@@ -6,11 +6,12 @@
 
 ## 一句话安装
 
-下载或使用仓库里的这个文件：
+装一个用户脚本管理器，然后点安装：
 
-```text
-dist/bilibili-accelerator.user.js
-```
+- Tampermonkey / Violentmonkey / Userscripts：
+  [安装 GitHub 版](https://raw.githubusercontent.com/realzza/bilibili-accelerator/main/dist/bilibili-accelerator.user.js)
+- Greasy Fork：
+  发布后会在这里放官方页面链接
 
 装好后打开任意 B 站视频，右下角出现 `BA` 按钮，就说明生效了。
 
@@ -18,16 +19,27 @@ dist/bilibili-accelerator.user.js
 
 1. 安装 Safari 扩展 [Userscripts](https://apps.apple.com/us/app/userscripts/id1463298887)。
 2. 在 Safari 设置里启用 Userscripts，并允许访问 `bilibili.com`。
-3. 把 `dist/bilibili-accelerator.user.js` 加到 Userscripts。
-4. 刷新 B 站视频页。
+3. 打开：
+
+```text
+https://raw.githubusercontent.com/realzza/bilibili-accelerator/main/dist/bilibili-accelerator.user.js
+```
+
+4. Userscripts 会提示安装。安装后刷新 B 站视频页。
 
 ## Chrome 安装
 
-推荐用油猴脚本方式：
+推荐用 Tampermonkey：
 
 1. 安装 [Tampermonkey](https://www.tampermonkey.net/) 或 [Violentmonkey](https://violentmonkey.github.io/)。
-2. 新建脚本，粘贴 `dist/bilibili-accelerator.user.js` 的内容。
-3. 保存脚本，打开 B 站视频页。
+2. 打开：
+
+   ```text
+   https://raw.githubusercontent.com/realzza/bilibili-accelerator/main/dist/bilibili-accelerator.user.js
+   ```
+
+3. Tampermonkey 会弹出安装页，点 Install。
+4. 打开 B 站视频页。
 
 也可以用解压扩展方式：
 
@@ -93,7 +105,13 @@ dist/bilibili-accelerator.user.js
 dist/extension/
 ```
 
+## 发布
+
+- GitHub raw 安装源：
+  `https://raw.githubusercontent.com/realzza/bilibili-accelerator/main/dist/bilibili-accelerator.user.js`
+- Greasy Fork：
+  等待发布页面创建后补链接。
+
 ## 为什么值得 Star
 
 因为人在海外，看 B 站也应该是在看视频，不是在修网络。
-
