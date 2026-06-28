@@ -813,15 +813,20 @@
       root.location.reload();
     });
 
-    const close = document.createElement("button");
-    close.type = "button";
-    close.textContent = "Close";
-    close.addEventListener("click", function handleClose() {
+    function closePanel() {
+      if (!panel.classList.contains("open")) {
+        return;
+      }
       panel.classList.remove("open");
       if (immersive) {
         revealBadge();
       }
-    });
+    }
+
+    const close = document.createElement("button");
+    close.type = "button";
+    close.textContent = "Close";
+    close.addEventListener("click", closePanel);
 
     const actions = document.createElement("div");
     actions.className = "ba-actions";
@@ -855,6 +860,19 @@
       } else {
         revealBadge();
       }
+    });
+
+    // Click anywhere outside the control closes the panel. Clicks inside
+    // the shadow DOM keep `host` in the composed path, so they're ignored.
+    document.addEventListener("click", function handleOutsideClick(event) {
+      if (!panel.classList.contains("open")) {
+        return;
+      }
+      const path = typeof event.composedPath === "function" ? event.composedPath() : [];
+      if (path.indexOf(host) !== -1 || event.target === host) {
+        return;
+      }
+      closePanel();
     });
 
     shadow.appendChild(style);
