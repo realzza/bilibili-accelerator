@@ -15,7 +15,7 @@ Greasy Fork is the recommended install path. It works with Chrome, Safari, Firef
 - [GitHub Raw fallback](https://raw.githubusercontent.com/realzza/bilibili-accelerator/main/dist/bilibili-accelerator.user.js)
 - [GitHub Release v0.1.2](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.1.2)
 
-After installation, open any Bilibili video. A small `BA` button in the lower-right corner means the script is active.
+After installation, open any Bilibili video. A small ⚡ icon in the lower-right corner means the script is active.
 
 ## Chrome / Edge
 
@@ -55,7 +55,9 @@ upos-sz-mirrorcos.bilivideo.com
 proxy-tf-all-ws.bilivideo.com
 ```
 
-Healthy CDN URLs are left alone by default. For stubborn videos, open the `BA` panel, enable `Force all video CDN`, and reload.
+Healthy CDN URLs are left alone by default. For stubborn videos, open the ⚡ panel, enable `Force all video CDN`, and reload.
+
+In web fullscreen the ⚡ icon fades out so it never covers the video; move the cursor to the lower-right corner to bring it back.
 
 ## Tested Case
 
@@ -80,6 +82,10 @@ Outputs:
 dist/bilibili-accelerator.user.js
 dist/extension/
 ```
+
+## Router / Apple TV / Mobile App?
+
+A common request is router-level acceleration so native apps benefit too. See [docs/router-proxy.md](docs/router-proxy.md) for the feasibility and limits: the browser case works, but Apple TV / mobile apps are blocked by custom-CA installation and certificate pinning.
 
 ## Why Star This
 

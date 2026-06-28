@@ -278,7 +278,14 @@
   const STORAGE_KEY = "biliAccelerator.config.v1";
   const PANEL_ID = "bili-accelerator-panel";
   const BUTTON_ID = "bili-accelerator-button";
+  const IMMERSED_CLASS = "ba-immersed";
+  const REVEAL_HOTZONE = 150;
+  const REVEAL_TIMEOUT = 2600;
   const nativeJsonParse = JSON.parse;
+  let immersive = false;
+  let revealTimer = null;
+  let playerObserver = null;
+  let observedContainer = null;
   const state = {
     rewrites: [],
     rewriteCount: 0,
@@ -486,6 +493,110 @@
       : "Waiting for Bilibili playback URLs.";
   }
 
+  function panelIsOpen() {
+    const host = document.getElementById(BUTTON_ID);
+    return !!(host && host.shadowRoot && host.shadowRoot.querySelector(".ba-panel.open"));
+  }
+
+  function setBadgeHidden(hidden) {
+    const host = document.getElementById(BUTTON_ID);
+    if (!host) {
+      return;
+    }
+    if (hidden) {
+      host.classList.add(IMMERSED_CLASS);
+    } else {
+      host.classList.remove(IMMERSED_CLASS);
+    }
+  }
+
+  // Show the badge, then fade it back out after a short idle window —
+  // mirrors how the player's own controls behave in fullscreen.
+  function revealBadge() {
+    setBadgeHidden(false);
+    if (revealTimer) {
+      clearTimeout(revealTimer);
+    }
+    revealTimer = setTimeout(function hideAfterIdle() {
+      if (immersive && !panelIsOpen()) {
+        setBadgeHidden(true);
+      }
+    }, REVEAL_TIMEOUT);
+  }
+
+  function setImmersive(next) {
+    if (next === immersive) {
+      return;
+    }
+    immersive = next;
+    if (revealTimer) {
+      clearTimeout(revealTimer);
+      revealTimer = null;
+    }
+    // Hidden by default while immersive so it never covers the video;
+    // restored immediately when leaving web/true fullscreen.
+    setBadgeHidden(immersive && !panelIsOpen());
+  }
+
+  // Bilibili's modern player exposes its layout via data-screen on
+  // .bpx-player-container (normal/wide/web/full/mini). The legacy player
+  // uses a mode-webscreen class. Either signals an immersive layout.
+  function detectScreenMode() {
+    const container = document.querySelector(".bpx-player-container");
+    if (container) {
+      const mode = container.getAttribute("data-screen");
+      if (mode) {
+        return mode;
+      }
+    }
+    if (document.querySelector(".mode-webscreen")) {
+      return "web";
+    }
+    return "normal";
+  }
+
+  function refreshImmersive() {
+    const mode = detectScreenMode();
+    setImmersive(mode === "web" || mode === "full");
+  }
+
+  function ensurePlayerObserver() {
+    const container = document.querySelector(".bpx-player-container");
+    if (container && container !== observedContainer) {
+      if (playerObserver) {
+        playerObserver.disconnect();
+      }
+      observedContainer = container;
+      playerObserver = new MutationObserver(refreshImmersive);
+      playerObserver.observe(container, {
+        attributes: true,
+        attributeFilter: ["data-screen", "class"]
+      });
+    }
+    refreshImmersive();
+  }
+
+  function handlePointerMove(event) {
+    if (!immersive) {
+      return;
+    }
+    const nearRight = (root.innerWidth - event.clientX) < REVEAL_HOTZONE;
+    const nearBottom = (root.innerHeight - event.clientY) < REVEAL_HOTZONE;
+    if (nearRight && nearBottom) {
+      revealBadge();
+    }
+  }
+
+  function installImmersiveWatch() {
+    document.addEventListener("mousemove", handlePointerMove, { passive: true });
+    document.addEventListener("fullscreenchange", refreshImmersive);
+    document.addEventListener("webkitfullscreenchange", refreshImmersive);
+    // The player mounts after this script runs and is recreated on SPA
+    // navigation, so keep re-binding the observer to the live container.
+    ensurePlayerObserver();
+    setInterval(ensurePlayerObserver, 1500);
+  }
+
   function installUi() {
     if (!document.documentElement || document.getElementById(BUTTON_ID)) {
       return;
@@ -496,15 +607,14 @@
     const shadow = host.attachShadow({ mode: "open" });
     const style = document.createElement("style");
     style.textContent = [
-      ":host{position:fixed;right:18px;bottom:18px;z-index:2147483647;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#17202a}",
+      ":host{position:fixed;right:18px;bottom:18px;z-index:2147483647;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#17202a;transition:opacity .25s ease}",
+      ":host(.ba-immersed){opacity:0;pointer-events:none}",
       "*{box-sizing:border-box}",
       "button,input,select{font:inherit}",
-      ".ba-toggle{display:inline-flex;align-items:center;gap:7px;height:36px;min-width:72px;border:1px solid rgba(23,32,42,.14);border-radius:999px;background:rgba(255,255,255,.92);color:#17202a;box-shadow:0 8px 24px rgba(21,32,43,.18),0 1px 0 rgba(255,255,255,.9) inset;backdrop-filter:saturate(180%) blur(14px);-webkit-backdrop-filter:saturate(180%) blur(14px);cursor:pointer;font-weight:700;padding:0 12px 0 9px;transition:transform .16s ease,box-shadow .16s ease,background .16s ease}",
-      ".ba-toggle:hover{transform:translateY(-1px);box-shadow:0 12px 30px rgba(21,32,43,.22),0 1px 0 rgba(255,255,255,.9) inset;background:#fff}",
+      ".ba-toggle{display:grid;place-items:center;width:40px;height:40px;border:1px solid rgba(255,255,255,.4);border-radius:50%;background:linear-gradient(135deg,#00b5f5,#0091cc);color:#fff;box-shadow:0 8px 22px rgba(0,174,236,.42),0 1px 0 rgba(255,255,255,.45) inset;cursor:pointer;padding:0;transition:transform .16s ease,box-shadow .16s ease}",
+      ".ba-toggle:hover{transform:translateY(-1px);box-shadow:0 12px 28px rgba(0,174,236,.5),0 1px 0 rgba(255,255,255,.45) inset}",
       ".ba-toggle:active{transform:translateY(0)}",
-      ".ba-mark{display:grid;place-items:center;width:22px;height:22px;border-radius:999px;background:#00aeec;color:#fff;box-shadow:0 4px 10px rgba(0,174,236,.34)}",
-      ".ba-mark svg{width:14px;height:14px;display:block}",
-      ".ba-toggle-text{font-size:12px;letter-spacing:0}",
+      ".ba-toggle svg{width:20px;height:20px;display:block;filter:drop-shadow(0 1px 1px rgba(0,80,110,.35))}",
       ".ba-panel{display:none;position:absolute;right:0;bottom:48px;width:min(340px,calc(100vw - 36px));padding:14px;border:1px solid rgba(23,32,42,.12);border-radius:12px;background:rgba(255,255,255,.96);box-shadow:0 18px 46px rgba(21,32,43,.24);backdrop-filter:saturate(180%) blur(18px);-webkit-backdrop-filter:saturate(180%) blur(18px)}",
       ".ba-panel.open{display:block}",
       ".ba-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:12px}",
@@ -540,14 +650,13 @@
     toggle.className = "ba-toggle";
     toggle.type = "button";
     toggle.title = "Bilibili Accelerator";
-    const mark = document.createElement("span");
-    mark.className = "ba-mark";
-    mark.innerHTML = "<svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path fill=\"currentColor\" d=\"M13 2 4 14h7l-1 8 10-13h-7l1-7Z\"/></svg>";
-    const toggleText = document.createElement("span");
-    toggleText.className = "ba-toggle-text";
-    toggleText.textContent = "Bili";
-    toggle.appendChild(mark);
-    toggle.appendChild(toggleText);
+    toggle.setAttribute("aria-label", "Bilibili Accelerator");
+    toggle.innerHTML = "<svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path fill=\"currentColor\" d=\"M13 2 4 14h7l-1 8 10-13h-7l1-7Z\"/></svg>";
+    toggle.addEventListener("mouseenter", function handleToggleEnter() {
+      if (immersive) {
+        revealBadge();
+      }
+    });
 
     const panel = document.createElement("section");
     panel.className = "ba-panel";
@@ -692,6 +801,9 @@
     close.textContent = "Close";
     close.addEventListener("click", function handleClose() {
       panel.classList.remove("open");
+      if (immersive) {
+        revealBadge();
+      }
     });
 
     const actions = document.createElement("div");
@@ -713,6 +825,9 @@
     toggle.addEventListener("click", function handleToggle() {
       panel.classList.toggle("open");
       renderStatus();
+      if (immersive && !panel.classList.contains("open")) {
+        revealBadge();
+      }
     });
 
     shadow.appendChild(style);
@@ -743,10 +858,15 @@
   patchGlobalPlayInfo("__playinfo__");
   patchGlobalPlayInfo("__INITIAL_STATE__");
 
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", installUi, { once: true });
-  } else {
+  function bootstrapUi() {
     installUi();
+    installImmersiveWatch();
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", bootstrapUi, { once: true });
+  } else {
+    bootstrapUi();
   }
 
   console.info("[BiliAccelerator] installed", root.BiliAccelerator.getConfig());
