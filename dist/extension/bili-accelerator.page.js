@@ -279,6 +279,7 @@
   const PANEL_ID = "bili-accelerator-panel";
   const BUTTON_ID = "bili-accelerator-button";
   const IMMERSED_CLASS = "ba-immersed";
+  const LIFTED_CLASS = "ba-lifted";
   const REVEAL_HOTZONE = 150;
   const REVEAL_TIMEOUT = 2600;
   const nativeJsonParse = JSON.parse;
@@ -555,8 +556,23 @@
     return "normal";
   }
 
+  function setLifted(lifted) {
+    const host = document.getElementById(BUTTON_ID);
+    if (!host) {
+      return;
+    }
+    if (lifted) {
+      host.classList.add(LIFTED_CLASS);
+    } else {
+      host.classList.remove(LIFTED_CLASS);
+    }
+  }
+
   function refreshImmersive() {
     const mode = detectScreenMode();
+    // Lift above the control bar whenever the player fills the viewport
+    // width (web/full/wide). Hide-by-default only for fullscreen layouts.
+    setLifted(mode === "web" || mode === "full" || mode === "wide");
     setImmersive(mode === "web" || mode === "full");
   }
 
@@ -609,6 +625,9 @@
     style.textContent = [
       ":host{position:fixed;right:18px;bottom:18px;z-index:2147483647;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#17202a;transition:opacity .25s ease}",
       ":host(.ba-immersed){opacity:0;pointer-events:none}",
+      // Enlarged player modes put their control bar along the viewport
+      // bottom; lift the badge above it so it never covers the 全屏 button.
+      ":host(.ba-lifted){bottom:84px}",
       "*{box-sizing:border-box}",
       "button,input,select{font:inherit}",
       ".ba-toggle{display:grid;place-items:center;width:40px;height:40px;border:1px solid rgba(255,255,255,.4);border-radius:50%;background:linear-gradient(135deg,#00b5f5,#0091cc);color:#fff;box-shadow:0 8px 22px rgba(0,174,236,.42),0 1px 0 rgba(255,255,255,.45) inset;cursor:pointer;padding:0;transition:transform .16s ease,box-shadow .16s ease}",
