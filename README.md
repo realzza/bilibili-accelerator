@@ -13,9 +13,9 @@
 - [Greasy Fork 官方脚本页](https://greasyfork.org/en/scripts/582026-bilibili-accelerator)
 - [直接安装 `.user.js`](https://update.greasyfork.org/scripts/582026/Bilibili%20Accelerator.user.js)
 - [GitHub Raw 备用源](https://raw.githubusercontent.com/realzza/bilibili-accelerator/main/dist/bilibili-accelerator.user.js)
-- [GitHub Release v0.1.2](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.1.2)
+- [GitHub Release v0.1.3](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.1.3)
 
-装好后打开任意 B 站视频。右下角出现 `BA` 按钮，就说明脚本已经生效。
+装好后打开任意 B 站视频。右下角出现 ⚡ 小图标，就说明脚本已经生效。
 
 ## Chrome / Edge
 
@@ -55,7 +55,9 @@ upos-sz-mirrorcos.bilivideo.com
 proxy-tf-all-ws.bilivideo.com
 ```
 
-正常 CDN 默认不动。遇到特别顽固的视频，可以点右下角 `BA`，开启 `Force all video CDN` 后刷新。
+正常 CDN 默认不动。遇到特别顽固的视频，可以点右下角 ⚡ 图标，开启 `Force all video CDN` 后刷新。
+
+网页全屏时 ⚡ 图标会自动淡出，不挡视频；把鼠标移到右下角即可重新唤出。
 
 ## 已测样本
 
@@ -80,6 +82,10 @@ npm run build
 dist/bilibili-accelerator.user.js
 dist/extension/
 ```
+
+## 软路由 / Apple TV / 手机 App？
+
+经常有人问能不能放进软路由，让原生 App 也加速。结论和限制见 [docs/router-proxy.md](docs/router-proxy.md)：网页端可行，但 Apple TV / 手机 App 受证书安装与证书固定限制，基本做不到。
 
 ## 为什么值得 Star
 

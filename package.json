@@ -1,6 +1,6 @@
 {
   "name": "bilibili-accelerator",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "private": true,
   "description": "Safari-friendly Bilibili playback CDN accelerator.",
   "scripts": {
