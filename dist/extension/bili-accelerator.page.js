@@ -825,7 +825,17 @@
     toggle.addEventListener("click", function handleToggle() {
       panel.classList.toggle("open");
       renderStatus();
-      if (immersive && !panel.classList.contains("open")) {
+      if (!immersive) {
+        return;
+      }
+      if (panel.classList.contains("open")) {
+        // Pin the badge open while the settings panel is showing.
+        if (revealTimer) {
+          clearTimeout(revealTimer);
+          revealTimer = null;
+        }
+        setBadgeHidden(false);
+      } else {
         revealBadge();
       }
     });
