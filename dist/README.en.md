@@ -6,6 +6,10 @@ Bilibili should not buffer every few seconds just because you are watching from 
 
 **Bilibili Accelerator** is a userscript that rewrites slow Bilibili playback CDN URLs before the player starts buffering. It targets the usual overseas pain points: `upos-*ov` mirror hosts, MCDN/PCDN nodes, and route choices that make niche videos stutter while popular videos play fine.
 
+<p align="center">
+  <img src="docs/assets/panel.png" alt="Bilibili Accelerator panel: live download-speed graph, status, and one-tap acceleration" width="360">
+</p>
+
 ## Install
 
 Greasy Fork is the recommended install path. It works with Chrome, Safari, Firefox, and Edge through a userscript manager.
@@ -71,6 +75,10 @@ In web fullscreen the ⚡ icon fades out so it never covers the video; move the 
 - **Optional bandwidth guard** — stop Bilibili from using your upload via WebRTC P2P (off by default).
 - **Toolbar popup + synced settings** for the browser extension.
 - **Live speed graph** *(0.2.1)* — a real-time download-speed chart right in the panel, with a buffer-health fallback when a CDN hides byte sizes.
+
+<p align="center">
+  <img src="docs/assets/panel-advanced.png" alt="Advanced settings: auto server selection, hidden-PCDN detection, live auto-recover, bandwidth guard" width="360">
+</p>
 
 ## Tested Case
 
