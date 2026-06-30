@@ -26,9 +26,15 @@ test("config migrates v1 shape forward to v2 defaults", () => {
 });
 
 test("normalizeConfig rejects invalid enum values", () => {
-  const cfg = core.normalizeConfig({ mode: "nonsense", selection: "weird" });
+  const cfg = core.normalizeConfig({ mode: "nonsense", selection: "weird", lang: "fr" });
   assert.equal(cfg.mode, "bad-only");
   assert.equal(cfg.selection, "auto");
+  assert.equal(cfg.lang, "en");
+});
+
+test("language defaults to English and accepts zh", () => {
+  assert.equal(core.normalizeConfig().lang, "en");
+  assert.equal(core.normalizeConfig({ lang: "zh" }).lang, "zh");
 });
 
 test("classify flags non-default ports as PCDN", () => {

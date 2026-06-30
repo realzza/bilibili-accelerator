@@ -38,6 +38,7 @@
 
   const DEFAULT_CONFIG = Object.freeze({
     enabled: true,
+    lang: "en",                                    // en | zh (UI language)
     mode: "bad-only",                              // bad-only | force | off
     selection: "auto",                             // auto | fixed
     pcdnHost: "upos-sz-mirrorcos.bilivideo.com",
@@ -67,6 +68,9 @@
     }
     if (merged.selection !== "auto" && merged.selection !== "fixed") {
       merged.selection = DEFAULT_CONFIG.selection;
+    }
+    if (merged.lang !== "en" && merged.lang !== "zh") {
+      merged.lang = DEFAULT_CONFIG.lang;
     }
     merged.schemaVersion = SCHEMA_VERSION;
     return merged;

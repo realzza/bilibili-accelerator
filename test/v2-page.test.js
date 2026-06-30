@@ -60,6 +60,16 @@ test("playinfo rewrite also adds DASH backupUrl fan-out in auto mode", () => {
   assert.ok(v0.backupUrl.every((u) => u.includes("/upgcxcode/v.m4s")));
 });
 
+test("advanced toggle is pinned as the panel footer (stays under cursor)", () => {
+  const src = fs.readFileSync(path.join(__dirname, "../src/page/bili-accelerator.page.js"), "utf8");
+  const bodyIdx = src.indexOf("panel.appendChild(body)");
+  const toggleIdx = src.indexOf("panel.appendChild(advToggle)");
+  assert.ok(bodyIdx !== -1 && toggleIdx !== -1, "panel appends body and advToggle");
+  // The toggle must be appended last so expanding grows the panel upward
+  // while the toggle stays put at the bottom.
+  assert.ok(toggleIdx > bodyIdx, "advToggle is the bottom-most element");
+});
+
 test("public API exposes diagnostics and config control", () => {
   const sandbox = loadPage();
   const cfg = sandbox.BiliAccelerator.setConfig({ p2pGuard: true });

@@ -28,23 +28,34 @@
     .switch input:checked + .slider { background: #00aeec; }
     .switch input:checked + .slider:before { transform: translateX(18px); }
     .hint { font-size: 11px; color: #6b7785; line-height: 1.5; margin: 12px 2px 0; }
+    .lang { margin-left: auto; display: inline-flex; border: 1px solid #d5dde5; border-radius: 8px; overflow: hidden; }
+    .lang-btn { border: none; background: #fff; color: #6b7785; font-size: 11px; font-weight: 700; padding: 4px 10px; cursor: pointer; }
+    .lang-btn + .lang-btn { border-left: 1px solid #e5eaf0; }
+    .lang-btn.active { background: #00aeec; color: #fff; }
     @media (prefers-color-scheme: dark) {
       body { background: #1b1f24; color: #e6eaee; }
       .row { background: #23282e; border-color: #333a42; }
       .row .note, .hint { color: #98a3ad; }
+      .lang, .lang-btn + .lang-btn { border-color: #333a42; }
+      .lang-btn { background: #23282e; color: #98a3ad; }
+      .lang-btn.active { background: #00aeec; color: #fff; }
     }
   </style>
 </head>
 <body>
   <div class="head">
     <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M13 2 4 14h7l-1 8 10-13h-7l1-7Z"/></svg>
-    <h1>Bilibili Accelerator</h1>
+    <h1 data-i18n="title">Bilibili Accelerator</h1>
+    <div class="lang">
+      <button type="button" class="lang-btn" data-lang="en">EN</button>
+      <button type="button" class="lang-btn" data-lang="zh">中</button>
+    </div>
   </div>
 
   <div class="row">
     <span class="t">
-      <span class="title">Acceleration</span>
-      <span class="note">Speed up slow videos</span>
+      <span class="title" data-i18n="accelTitle">Acceleration</span>
+      <span class="note" data-i18n="accelNote">Speed up slow videos</span>
     </span>
     <label class="switch">
       <input type="checkbox" id="enabled" />
@@ -52,7 +63,7 @@
     </label>
   </div>
 
-  <p class="hint">Open a Bilibili video and tap the ⚡ in the corner for live status and advanced settings.</p>
+  <p class="hint" data-i18n="hint">Open a Bilibili video and tap the ⚡ in the corner for live status and advanced settings.</p>
 
   <script src="popup.js"></script>
 </body>

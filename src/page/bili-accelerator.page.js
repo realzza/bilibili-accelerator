@@ -732,13 +732,73 @@
 
   // ---- UI -----------------------------------------------------------------
 
-  const STATUS_TEXT = {
-    off: { word: "Acceleration off", note: "Turn it on to speed up slow videos." },
-    idle: { word: "Ready", note: "Open a video and it'll kick in." },
-    optimizing: { word: "Finding the fastest server…", note: "Picking the best route for you." },
-    buffering: { word: "Finding a faster server…", note: "Recovering from a slow connection." },
-    smooth: { word: "Playing smoothly", note: "Connected to the fastest server near you." }
+  const STRINGS = {
+    en: {
+      title: "Bilibili Accelerator",
+      status: {
+        off: ["Acceleration off", "Turn it on to speed up slow videos."],
+        idle: ["Ready", "Open a video and it'll kick in."],
+        optimizing: ["Finding the fastest server…", "Picking the best route for you."],
+        buffering: ["Finding a faster server…", "Recovering from a slow connection."],
+        smooth: ["Playing smoothly", "Connected to the fastest server near you."]
+      },
+      count: function (n) { return n + " slow connection" + (n === 1 ? "" : "s") + " fixed"; },
+      masterTitle: "Acceleration",
+      masterNote: "Speed up slow videos automatically.",
+      boost: "Still buffering? Boost harder",
+      advShow: "Advanced settings",
+      advHide: "Hide advanced",
+      fServer: "Server", fWhen: "When", fFixed: "Fixed server", fMcdn: "MCDN",
+      selAuto: "Auto (pick fastest)", selFixed: "Use a fixed server",
+      modeBad: "Only fix slow servers", modeForce: "Always switch server",
+      mcdnAll: "Proxy all MCDN", mcdnV1: "Proxy /v1 only", mcdnReplace: "Replace host",
+      portTitle: "Catch hidden PCDN", portNote: "Treat odd-port servers as slow (recommended).",
+      stallTitle: "Auto-recover", stallNote: "Switch servers live if it stalls — no reload.",
+      akamaiTitle: "Rewrite Akamai", akamaiNote: "Only if Akamai is slow on your network.",
+      p2pTitle: "Stop bandwidth sharing", p2pNote: "Block Bilibili's P2P upload (reload to apply).",
+      diag: "Copy report", diagCopied: "Copied ✓", diagConsole: "See console",
+      reload: "Reload"
+    },
+    zh: {
+      title: "Bilibili Accelerator",
+      status: {
+        off: ["已关闭加速", "打开后自动为慢视频提速。"],
+        idle: ["就绪", "打开视频后自动生效。"],
+        optimizing: ["正在寻找最快的服务器…", "正在为你挑选最佳线路。"],
+        buffering: ["正在切换更快的服务器…", "正在从卡顿中恢复。"],
+        smooth: ["播放流畅", "已连接到离你最近的最快服务器。"]
+      },
+      count: function (n) { return "已修复 " + n + " 个慢连接"; },
+      masterTitle: "加速",
+      masterNote: "自动为慢视频提速。",
+      boost: "还在卡？再加把劲",
+      advShow: "高级设置",
+      advHide: "收起高级设置",
+      fServer: "服务器", fWhen: "何时", fFixed: "固定服务器", fMcdn: "MCDN",
+      selAuto: "自动（选最快）", selFixed: "使用固定服务器",
+      modeBad: "仅修复慢服务器", modeForce: "总是切换服务器",
+      mcdnAll: "代理所有 MCDN", mcdnV1: "仅代理 /v1", mcdnReplace: "替换域名",
+      portTitle: "抓取隐藏 PCDN", portNote: "把奇怪端口的服务器当作慢节点（推荐）。",
+      stallTitle: "自动恢复", stallNote: "卡顿时实时切换服务器，无需刷新。",
+      akamaiTitle: "改写 Akamai", akamaiNote: "仅当 Akamai 在你的网络上很慢时使用。",
+      p2pTitle: "停止带宽共享", p2pNote: "阻止 B 站的 P2P 上传（刷新后生效）。",
+      diag: "复制诊断报告", diagCopied: "已复制 ✓", diagConsole: "见控制台",
+      reload: "刷新"
+    }
   };
+
+  function lang() {
+    return config.lang === "zh" ? "zh" : "en";
+  }
+
+  function t(key) {
+    return STRINGS[lang()][key];
+  }
+
+  function getShadow() {
+    const host = document.getElementById(BUTTON_ID);
+    return host && host.shadowRoot;
+  }
 
   function currentStatusKey() {
     if (!config.enabled) {
@@ -747,10 +807,51 @@
     return state.status || "idle";
   }
 
-  function makeOption(value, label, selectedValue) {
+  // Re-translate every tagged node + the dynamic bits, no reload needed.
+  function applyLang() {
+    const shadow = getShadow();
+    if (!shadow) {
+      return;
+    }
+    shadow.querySelectorAll("[data-i18n]").forEach(function (el) {
+      el.textContent = t(el.dataset.i18n);
+    });
+    const adv = shadow.querySelector(".ba-adv");
+    setAdvToggleLabel(adv && adv.classList.contains("open"));
+    updateLangButtons();
+    renderStatus();
+  }
+
+  function updateLangButtons() {
+    const shadow = getShadow();
+    if (!shadow) {
+      return;
+    }
+    shadow.querySelectorAll(".ba-lang-btn").forEach(function (b) {
+      b.classList.toggle("active", b.dataset.lang === lang());
+    });
+  }
+
+  function setAdvToggleLabel(open) {
+    const shadow = getShadow();
+    if (!shadow) {
+      return;
+    }
+    const label = shadow.getElementById("ba-adv-label");
+    const arrow = shadow.getElementById("ba-adv-arrow");
+    if (label) {
+      label.textContent = t(open ? "advHide" : "advShow");
+    }
+    if (arrow) {
+      arrow.textContent = open ? "▴" : "▾";
+    }
+  }
+
+  function makeOption(value, key, selectedValue) {
     const option = document.createElement("option");
     option.value = value;
-    option.textContent = label;
+    option.dataset.i18n = key;
+    option.textContent = t(key);
     option.selected = value === selectedValue;
     return option;
   }
@@ -760,34 +861,37 @@
     select.className = "ba-control";
     select.addEventListener("change", function () { onChange(select.value); });
     options.forEach(function (option) {
-      select.appendChild(makeOption(option.value, option.label, value));
+      select.appendChild(makeOption(option.value, option.key, value));
     });
     return select;
   }
 
-  function createField(labelText, control) {
+  function createField(key, control) {
     const label = document.createElement("label");
     label.className = "ba-field";
     const caption = document.createElement("span");
-    caption.textContent = labelText;
+    caption.dataset.i18n = key;
+    caption.textContent = t(key);
     label.appendChild(caption);
     label.appendChild(control);
     return label;
   }
 
-  function createSwitchRow(title, note, checked, onChange) {
+  function createSwitchRow(titleKey, noteKey, checked, onChange) {
     const row = document.createElement("label");
     row.className = "ba-switch-row";
     const copy = document.createElement("span");
     copy.className = "ba-switch-text";
-    const t = document.createElement("span");
-    t.className = "ba-switch-title";
-    t.textContent = title;
-    const n = document.createElement("span");
-    n.className = "ba-switch-note";
-    n.textContent = note;
-    copy.appendChild(t);
-    copy.appendChild(n);
+    const titleEl = document.createElement("span");
+    titleEl.className = "ba-switch-title";
+    titleEl.dataset.i18n = titleKey;
+    titleEl.textContent = t(titleKey);
+    const noteEl = document.createElement("span");
+    noteEl.className = "ba-switch-note";
+    noteEl.dataset.i18n = noteKey;
+    noteEl.textContent = t(noteKey);
+    copy.appendChild(titleEl);
+    copy.appendChild(noteEl);
     const sw = document.createElement("span");
     sw.className = "ba-switch";
     const input = document.createElement("input");
@@ -810,7 +914,8 @@
       return;
     }
     const key = currentStatusKey();
-    const info = STATUS_TEXT[key] || STATUS_TEXT.idle;
+    const strings = STRINGS[lang()];
+    const info = strings.status[key] || strings.status.idle;
 
     const dot = shadow.getElementById("ba-dot");
     const word = shadow.getElementById("ba-word");
@@ -823,14 +928,13 @@
       dot.className = "ba-dot ba-" + key;
     }
     if (word) {
-      word.textContent = info.word;
+      word.textContent = info[0];
     }
     if (note) {
-      note.textContent = info.note;
+      note.textContent = info[1];
     }
     if (count) {
-      count.textContent = state.rewriteCount + " slow connection" +
-        (state.rewriteCount === 1 ? "" : "s") + " fixed";
+      count.textContent = strings.count(state.rewriteCount);
     }
     if (master) {
       master.checked = config.enabled;
@@ -862,11 +966,16 @@
       ".ba-toggle{display:grid;place-items:center;width:40px;height:40px;border:1px solid rgba(255,255,255,.4);border-radius:50%;background:linear-gradient(135deg,#00b5f5,#0091cc);color:#fff;box-shadow:0 8px 22px rgba(0,174,236,.42),0 1px 0 rgba(255,255,255,.45) inset;cursor:pointer;padding:0;transition:transform .16s ease,box-shadow .16s ease}",
       ".ba-toggle:hover{transform:translateY(-1px)}",
       ".ba-toggle svg{width:20px;height:20px;display:block}",
-      ".ba-panel{display:none;position:absolute;right:0;bottom:48px;width:min(340px,calc(100vw - 36px));padding:16px;border:1px solid rgba(23,32,42,.12);border-radius:14px;background:rgba(255,255,255,.97);box-shadow:0 18px 46px rgba(21,32,43,.24);backdrop-filter:saturate(180%) blur(18px);-webkit-backdrop-filter:saturate(180%) blur(18px)}",
-      ".ba-panel.open{display:block}",
+      ".ba-panel{display:none;flex-direction:column;position:absolute;right:0;bottom:48px;width:min(340px,calc(100vw - 36px));max-height:calc(100vh - 96px);padding:16px;border:1px solid rgba(23,32,42,.12);border-radius:14px;background:rgba(255,255,255,.97);box-shadow:0 18px 46px rgba(21,32,43,.24);backdrop-filter:saturate(180%) blur(18px);-webkit-backdrop-filter:saturate(180%) blur(18px)}",
+      ".ba-panel.open{display:flex}",
+      ".ba-body{overflow-y:auto;min-height:0}",
       ".ba-head{display:flex;align-items:center;gap:8px;margin-bottom:14px}",
-      ".ba-head svg{width:18px;height:18px;color:#00aeec}",
+      ".ba-head svg{width:18px;height:18px;color:#00aeec;flex:0 0 auto}",
       ".ba-title{font-size:14px;font-weight:800;margin:0;color:#111827}",
+      ".ba-lang{margin-left:auto;display:inline-flex;border:1px solid #d5dde5;border-radius:8px;overflow:hidden;flex:0 0 auto}",
+      ".ba-lang-btn{border:none;background:#fff;color:#6b7785;font-size:11px;font-weight:700;padding:4px 10px;cursor:pointer;line-height:1.4}",
+      ".ba-lang-btn+.ba-lang-btn{border-left:1px solid #e5eaf0}",
+      ".ba-lang-btn.active{background:#00aeec;color:#fff}",
       ".ba-hero{display:flex;flex-direction:column;align-items:center;text-align:center;padding:4px 0 14px}",
       ".ba-dot{width:46px;height:46px;border-radius:50%;display:grid;place-items:center;margin-bottom:8px;background:#eef2f6}",
       ".ba-dot:after{content:'';width:14px;height:14px;border-radius:50%;background:#9aa6b2}",
@@ -888,8 +997,9 @@
       ".ba-switch input:checked+.ba-slider:before{transform:translateX(18px)}",
       ".ba-boost{display:none;width:100%;height:38px;margin-top:4px;border:1px solid #00aeec;border-radius:10px;background:#00aeec;color:#fff;font-size:13px;font-weight:700;cursor:pointer}",
       ".ba-boost:hover{background:#0099cf}",
-      ".ba-adv-toggle{display:flex;align-items:center;justify-content:center;gap:4px;width:100%;margin-top:12px;background:none;border:none;color:#6b7785;font-size:11px;cursor:pointer}",
-      ".ba-adv{display:none;margin-top:10px;padding-top:10px;border-top:1px solid #eef1f4}",
+      ".ba-adv-toggle{display:flex;align-items:center;justify-content:center;gap:5px;width:100%;flex:0 0 auto;margin-top:10px;padding-top:11px;border:none;border-top:1px solid #eef1f4;background:none;color:#6b7785;font-size:11px;font-weight:650;cursor:pointer}",
+      ".ba-adv-toggle:hover{color:#00aeec}",
+      ".ba-adv{display:none;margin-top:8px}",
       ".ba-adv.open{display:block}",
       ".ba-field{display:grid;grid-template-columns:96px 1fr;align-items:center;gap:9px;margin:9px 0;font-size:12px}",
       ".ba-field span{color:#46515c;font-weight:650}",
@@ -918,8 +1028,29 @@
     head.innerHTML = "<svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path fill=\"currentColor\" d=\"M13 2 4 14h7l-1 8 10-13h-7l1-7Z\"/></svg>";
     const title = document.createElement("p");
     title.className = "ba-title";
-    title.textContent = "Bilibili Accelerator";
+    title.dataset.i18n = "title";
+    title.textContent = t("title");
     head.appendChild(title);
+
+    // Language toggle (upper-right). Defaults to English.
+    const langWrap = document.createElement("div");
+    langWrap.className = "ba-lang";
+    [["en", "EN"], ["zh", "中"]].forEach(function (pair) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "ba-lang-btn";
+      b.dataset.lang = pair[0];
+      b.textContent = pair[1];
+      b.addEventListener("click", function () {
+        if (config.lang === pair[0]) {
+          return;
+        }
+        saveConfig(Object.assign({}, config, { lang: pair[0] }));
+        applyLang();
+      });
+      langWrap.appendChild(b);
+    });
+    head.appendChild(langWrap);
 
     // Hero status
     const hero = document.createElement("div");
@@ -942,7 +1073,7 @@
     hero.appendChild(count);
 
     // Master switch
-    const master = createSwitchRow("Acceleration", "Speed up slow videos automatically.",
+    const master = createSwitchRow("masterTitle", "masterNote",
       config.enabled, function (checked) {
         saveConfig(Object.assign({}, config, { enabled: checked }));
         if (!checked) {
@@ -959,7 +1090,8 @@
     boost.id = "ba-boost";
     boost.className = "ba-boost";
     boost.type = "button";
-    boost.textContent = "Still buffering? Boost harder";
+    boost.dataset.i18n = "boost";
+    boost.textContent = t("boost");
     boost.addEventListener("click", function () {
       saveConfig(Object.assign({}, config, { mode: "force" }));
       recovery.avoidHost = currentVideoHost();
@@ -967,25 +1099,31 @@
       root.location.reload();
     });
 
-    // Advanced toggle + section
-    const advToggle = document.createElement("button");
-    advToggle.className = "ba-adv-toggle";
-    advToggle.type = "button";
-    advToggle.innerHTML = "Advanced settings <span>▾</span>";
+    // Advanced toggle (pinned at panel bottom) + section. Keeping the toggle as
+    // the bottom-most element means expanding grows the panel upward while the
+    // toggle stays under the cursor — click to expand, click again to collapse.
     const adv = document.createElement("div");
     adv.className = "ba-adv";
-    advToggle.addEventListener("click", function () { adv.classList.toggle("open"); });
+    const advToggle = document.createElement("button");
+    advToggle.className = "ba-adv-toggle";
+    advToggle.id = "ba-adv-toggle";
+    advToggle.type = "button";
+    advToggle.innerHTML = "<span id=\"ba-adv-label\"></span><span id=\"ba-adv-arrow\">▾</span>";
+    advToggle.addEventListener("click", function () {
+      const open = adv.classList.toggle("open");
+      setAdvToggleLabel(open);
+    });
 
     const selection = createSelect([
-      { value: "auto", label: "Auto (pick fastest)" },
-      { value: "fixed", label: "Use a fixed server" }
+      { value: "auto", key: "selAuto" },
+      { value: "fixed", key: "selFixed" }
     ], config.selection, function (value) {
       saveConfig(Object.assign({}, config, { selection: value }));
     });
 
     const mode = createSelect([
-      { value: "bad-only", label: "Only fix slow servers" },
-      { value: "force", label: "Always switch server" }
+      { value: "bad-only", key: "modeBad" },
+      { value: "force", key: "modeForce" }
     ], config.mode, function (value) {
       saveConfig(Object.assign({}, config, { mode: value }));
       renderStatus();
@@ -1008,52 +1146,54 @@
     });
 
     const mcdn = createSelect([
-      { value: "proxy-all", label: "Proxy all MCDN" },
-      { value: "proxy-v1", label: "Proxy /v1 only" },
-      { value: "replace", label: "Replace host" }
+      { value: "proxy-all", key: "mcdnAll" },
+      { value: "proxy-v1", key: "mcdnV1" },
+      { value: "replace", key: "mcdnReplace" }
     ], config.mcdnStrategy, function (value) {
       saveConfig(Object.assign({}, config, { mcdnStrategy: value }));
     });
 
-    const portRow = createSwitchRow("Catch hidden PCDN", "Treat odd-port servers as slow (recommended).",
+    const portRow = createSwitchRow("portTitle", "portNote",
       config.portHeuristic, function (checked) {
         saveConfig(Object.assign({}, config, { portHeuristic: checked }));
       });
 
-    const stallRow = createSwitchRow("Auto-recover", "Switch servers live if it stalls — no reload.",
+    const stallRow = createSwitchRow("stallTitle", "stallNote",
       config.stallRecovery, function (checked) {
         saveConfig(Object.assign({}, config, { stallRecovery: checked }));
       });
 
-    const akamaiRow = createSwitchRow("Rewrite Akamai", "Only if Akamai is slow on your network.",
+    const akamaiRow = createSwitchRow("akamaiTitle", "akamaiNote",
       config.rewriteAkamai, function (checked) {
         saveConfig(Object.assign({}, config, { rewriteAkamai: checked }));
       });
 
-    const p2pRow = createSwitchRow("Stop bandwidth sharing", "Block Bilibili's P2P upload (reload to apply).",
+    const p2pRow = createSwitchRow("p2pTitle", "p2pNote",
       config.p2pGuard, function (checked) {
         saveConfig(Object.assign({}, config, { p2pGuard: checked }));
       });
 
     const diag = document.createElement("button");
     diag.type = "button";
-    diag.textContent = "Copy report";
+    diag.dataset.i18n = "diag";
+    diag.textContent = t("diag");
     diag.addEventListener("click", function () {
       const text = JSON.stringify(buildDiagnostics(), null, 2);
       try {
         root.navigator.clipboard.writeText(text);
-        diag.textContent = "Copied ✓";
-        setTimeout(function () { diag.textContent = "Copy report"; }, 1500);
+        diag.textContent = t("diagCopied");
+        setTimeout(function () { diag.textContent = t("diag"); }, 1500);
       } catch (_) {
         console.info("[BiliAccelerator] diagnostics", text);
-        diag.textContent = "See console";
+        diag.textContent = t("diagConsole");
       }
     });
 
     const reload = document.createElement("button");
     reload.type = "button";
     reload.className = "primary";
-    reload.textContent = "Reload";
+    reload.dataset.i18n = "reload";
+    reload.textContent = t("reload");
     reload.addEventListener("click", function () { root.location.reload(); });
 
     const actions = document.createElement("div");
@@ -1061,23 +1201,29 @@
     actions.appendChild(diag);
     actions.appendChild(reload);
 
-    adv.appendChild(createField("Server", selection));
-    adv.appendChild(createField("When", mode));
-    adv.appendChild(createField("Fixed server", hostInput));
+    adv.appendChild(createField("fServer", selection));
+    adv.appendChild(createField("fWhen", mode));
+    adv.appendChild(createField("fFixed", hostInput));
     adv.appendChild(hostList);
-    adv.appendChild(createField("MCDN", mcdn));
+    adv.appendChild(createField("fMcdn", mcdn));
     adv.appendChild(portRow);
     adv.appendChild(stallRow);
     adv.appendChild(akamaiRow);
     adv.appendChild(p2pRow);
     adv.appendChild(actions);
 
-    panel.appendChild(head);
-    panel.appendChild(hero);
-    panel.appendChild(master);
-    panel.appendChild(boost);
+    // Scrollable body holds everything; the advanced toggle is pinned below it
+    // as a footer so it never moves when the section expands.
+    const body = document.createElement("div");
+    body.className = "ba-body";
+    body.appendChild(head);
+    body.appendChild(hero);
+    body.appendChild(master);
+    body.appendChild(boost);
+    body.appendChild(adv);
+
+    panel.appendChild(body);
     panel.appendChild(advToggle);
-    panel.appendChild(adv);
 
     function closePanel() {
       if (!panel.classList.contains("open")) {
@@ -1121,7 +1267,7 @@
     shadow.appendChild(panel);
     shadow.appendChild(toggle);
     document.documentElement.appendChild(host);
-    renderStatus();
+    applyLang();
   }
 
   // ---- external config bridge (extension popup → page) -------------------
@@ -1137,7 +1283,7 @@
       const data = event.data;
       if (data && data.__biliAccel === "config" && data.config) {
         saveConfig(Object.assign({}, config, data.config));
-        renderStatus();
+        applyLang();
       }
     });
   }

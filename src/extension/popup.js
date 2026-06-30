@@ -5,27 +5,72 @@
   const STORE_KEY = "biliAcceleratorConfig";
   const enabled = document.getElementById("enabled");
 
-  function load() {
-    if (!api.storage || !api.storage.sync) {
-      enabled.checked = true;
-      return;
+  const STRINGS = {
+    en: {
+      title: "Bilibili Accelerator",
+      accelTitle: "Acceleration",
+      accelNote: "Speed up slow videos",
+      hint: "Open a Bilibili video and tap the ⚡ in the corner for live status and advanced settings.",
+      langTitle: "Language"
+    },
+    zh: {
+      title: "Bilibili Accelerator",
+      accelTitle: "加速",
+      accelNote: "为慢视频提速",
+      hint: "打开任意 B 站视频，点击角落的 ⚡ 查看实时状态与高级设置。",
+      langTitle: "语言"
     }
-    api.storage.sync.get(STORE_KEY, function (data) {
-      const config = (data && data[STORE_KEY]) || {};
-      enabled.checked = config.enabled !== false;
+  };
+
+  let lang = "en";
+
+  function applyLang() {
+    const s = STRINGS[lang] || STRINGS.en;
+    document.querySelectorAll("[data-i18n]").forEach(function (el) {
+      el.textContent = s[el.dataset.i18n];
+    });
+    document.querySelectorAll(".lang-btn").forEach(function (b) {
+      b.classList.toggle("active", b.dataset.lang === lang);
     });
   }
 
-  function save() {
+  function getConfig(cb) {
     if (!api.storage || !api.storage.sync) {
+      cb({});
       return;
     }
     api.storage.sync.get(STORE_KEY, function (data) {
-      const config = Object.assign({}, data && data[STORE_KEY], { enabled: enabled.checked });
-      api.storage.sync.set({ [STORE_KEY]: config });
+      cb((data && data[STORE_KEY]) || {});
     });
   }
 
-  enabled.addEventListener("change", save);
-  load();
+  function setConfig(patch) {
+    if (!api.storage || !api.storage.sync) {
+      return;
+    }
+    getConfig(function (config) {
+      api.storage.sync.set({ [STORE_KEY]: Object.assign({}, config, patch) });
+    });
+  }
+
+  getConfig(function (config) {
+    enabled.checked = config.enabled !== false;
+    lang = config.lang === "zh" ? "zh" : "en";
+    applyLang();
+  });
+
+  enabled.addEventListener("change", function () {
+    setConfig({ enabled: enabled.checked });
+  });
+
+  document.querySelectorAll(".lang-btn").forEach(function (b) {
+    b.addEventListener("click", function () {
+      if (lang === b.dataset.lang) {
+        return;
+      }
+      lang = b.dataset.lang;
+      applyLang();
+      setConfig({ lang: lang });
+    });
+  });
 })();
