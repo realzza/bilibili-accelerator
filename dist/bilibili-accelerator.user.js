@@ -1063,6 +1063,7 @@
     currentMbps: 0,
     peakMbps: 0,
     bufferSec: 0,
+    dispMax: 0,                   // eased y-axis maximum (smooth rescaling)
     sawBytes: false,
     activeTicks: 0,               // ticks where playback advanced
     lastTime: 0
@@ -1146,13 +1147,83 @@
     return speed.mode === "buffer" ? speed.bufSeries : speed.mbpsSeries;
   }
 
+  // Round a value up to a "nice" axis maximum (1/2/5 × 10ⁿ) so the y-scale
+  // lands on tidy numbers instead of arbitrary peaks.
+  function niceCeil(v) {
+    if (!(v > 0)) {
+      return 1;
+    }
+    const pow = Math.pow(10, Math.floor(Math.log(v) / Math.LN10));
+    const n = v / pow;
+    const step = n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10;
+    return step * pow;
+  }
+
+  // Light 3-point moving average to calm per-second jitter before smoothing.
+  function smoothSeries(arr) {
+    if (arr.length < 3) {
+      return arr.slice();
+    }
+    const out = arr.slice();
+    for (let i = 1; i < arr.length - 1; i += 1) {
+      out[i] = (arr[i - 1] + arr[i] * 2 + arr[i + 1]) / 4;
+    }
+    return out;
+  }
+
+  // Monotone cubic (Fritsch–Carlson) tangents — same family as d3.curveMonotoneX:
+  // smooth through every point with no overshoot. Best fit for time series.
+  function monotoneTangents(xs, ys) {
+    const n = xs.length;
+    const slopes = new Array(n - 1);
+    const tan = new Array(n);
+    for (let i = 0; i < n - 1; i += 1) {
+      slopes[i] = (ys[i + 1] - ys[i]) / (xs[i + 1] - xs[i]);
+    }
+    tan[0] = slopes[0];
+    tan[n - 1] = slopes[n - 2];
+    for (let i = 1; i < n - 1; i += 1) {
+      tan[i] = slopes[i - 1] * slopes[i] <= 0 ? 0 : (slopes[i - 1] + slopes[i]) / 2;
+    }
+    for (let i = 0; i < n - 1; i += 1) {
+      if (slopes[i] === 0) {
+        tan[i] = 0;
+        tan[i + 1] = 0;
+        continue;
+      }
+      const a = tan[i] / slopes[i];
+      const b = tan[i + 1] / slopes[i];
+      const s = a * a + b * b;
+      if (s > 9) {
+        const tau = 3 / Math.sqrt(s);
+        tan[i] = tau * a * slopes[i];
+        tan[i + 1] = tau * b * slopes[i];
+      }
+    }
+    return tan;
+  }
+
+  function tracePath(ctx, xs, ys, tan) {
+    ctx.moveTo(xs[0], ys[0]);
+    if (xs.length < 2) {
+      return;
+    }
+    for (let i = 0; i < xs.length - 1; i += 1) {
+      const dx = (xs[i + 1] - xs[i]) / 3;
+      ctx.bezierCurveTo(
+        xs[i] + dx, ys[i] + tan[i] * dx,
+        xs[i + 1] - dx, ys[i + 1] - tan[i + 1] * dx,
+        xs[i + 1], ys[i + 1]
+      );
+    }
+  }
+
   function drawSpeed() {
     const shadow = getShadow();
     const canvas = shadow && shadow.getElementById("ba-spd-canvas");
     if (!canvas || typeof canvas.getContext !== "function") {
       return;
     }
-    const series = speedSeries();
     const dpr = root.devicePixelRatio || 1;
     const w = canvas.clientWidth || 296;
     const h = canvas.clientHeight || 46;
@@ -1161,38 +1232,69 @@
     const ctx = canvas.getContext("2d");
     ctx.scale(dpr, dpr);
     ctx.clearRect(0, 0, w, h);
+
+    const series = smoothSeries(speedSeries());
     if (!series.length) {
       return;
     }
+
     const floor = speed.mode === "buffer" ? 30 : 1;
-    let max = floor;
+    let dataMax = floor;
     for (let i = 0; i < series.length; i += 1) {
-      if (series[i] > max) {
-        max = series[i];
+      if (series[i] > dataMax) {
+        dataMax = series[i];
       }
     }
+    // Ease the displayed maximum toward a nice ceiling so rescaling glides.
+    const target = niceCeil(dataMax);
+    speed.dispMax = speed.dispMax > 0
+      ? speed.dispMax + (target - speed.dispMax) * 0.25
+      : target;
+    const max = Math.max(speed.dispMax, floor);
+
+    const padTop = 5;
+    const padBottom = 2;
     const step = w / (SPEED_SAMPLES - 1);
     const offset = SPEED_SAMPLES - series.length;
-    const yFor = function (v) { return h - (v / max) * (h - 6) - 3; };
-    ctx.beginPath();
+    const xs = [];
+    const ys = [];
     for (let i = 0; i < series.length; i += 1) {
-      const x = (offset + i) * step;
-      const y = yFor(series[i]);
-      if (i === 0) {
-        ctx.moveTo(x, y);
-      } else {
-        ctx.lineTo(x, y);
-      }
+      xs.push((offset + i) * step);
+      ys.push(h - padBottom - (series[i] / max) * (h - padTop - padBottom));
     }
-    ctx.lineWidth = 1.6;
+    const tan = series.length >= 2 ? monotoneTangents(xs, ys) : [0];
+
+    // Gradient area fill.
+    ctx.beginPath();
+    tracePath(ctx, xs, ys, tan);
+    ctx.lineTo(xs[xs.length - 1], h);
+    ctx.lineTo(xs[0], h);
+    ctx.closePath();
+    const grad = ctx.createLinearGradient(0, 0, 0, h);
+    grad.addColorStop(0, "rgba(0,174,236,0.30)");
+    grad.addColorStop(1, "rgba(0,174,236,0.02)");
+    ctx.fillStyle = grad;
+    ctx.fill();
+
+    // Smooth line.
+    ctx.beginPath();
+    tracePath(ctx, xs, ys, tan);
+    ctx.lineWidth = 2;
     ctx.strokeStyle = "#00aeec";
     ctx.lineJoin = "round";
+    ctx.lineCap = "round";
     ctx.stroke();
-    ctx.lineTo((offset + series.length - 1) * step, h);
-    ctx.lineTo(offset * step, h);
-    ctx.closePath();
-    ctx.fillStyle = "rgba(0,174,236,0.12)";
+
+    // Leading-edge dot at the current value.
+    const lx = xs[xs.length - 1];
+    const ly = ys[ys.length - 1];
+    ctx.beginPath();
+    ctx.arc(lx, ly, 3.2, 0, Math.PI * 2);
+    ctx.fillStyle = "#00aeec";
     ctx.fill();
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = "#ffffff";
+    ctx.stroke();
   }
 
   function updateSpeedReadouts() {
