@@ -13,7 +13,7 @@
 - [Greasy Fork 官方脚本页](https://greasyfork.org/en/scripts/582026-bilibili-accelerator)
 - [直接安装 `.user.js`](https://update.greasyfork.org/scripts/582026/Bilibili%20Accelerator.user.js)
 - [GitHub Raw 备用源](https://raw.githubusercontent.com/realzza/bilibili-accelerator/main/dist/bilibili-accelerator.user.js)
-- [GitHub Release v0.1.3](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.1.3)
+- [GitHub Release v0.2.0](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.2.0)
 
 装好后打开任意 B 站视频。右下角出现 ⚡ 小图标，就说明脚本已经生效。
 
