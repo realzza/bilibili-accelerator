@@ -1016,11 +1016,11 @@
     en: {
       title: "Bilibili Accelerator",
       status: {
-        off: ["Acceleration off", "Turn it on to speed up slow videos."],
-        idle: ["Ready", "Open a video and it'll kick in."],
-        optimizing: ["Finding the fastest server…", "Picking the best route for you."],
-        buffering: ["Finding a faster server…", "Recovering from a slow connection."],
-        smooth: ["Playing smoothly", "Connected to the fastest server near you."]
+        off: ["Acceleration off", "Turn it on to speed up slow videos"],
+        idle: ["Ready", "Open a video and it'll kick in"],
+        optimizing: ["Finding the fastest server…", "Picking the best route for you"],
+        buffering: ["Finding a faster server…", "Recovering from a slow connection"],
+        smooth: ["Playing smoothly", "Connected to the fastest server near you"]
       },
       count: function (n) { return n + " slow connection" + (n === 1 ? "" : "s") + " fixed"; },
       spdTitle: "Download speed",
@@ -1031,7 +1031,7 @@
       bufUnit: "s",
       spdWaiting: "Waiting for playback…",
       masterTitle: "Acceleration",
-      masterNote: "Speed up slow videos automatically.",
+      masterNote: "Speed up slow videos automatically",
       boost: "Still buffering? Boost harder",
       advShow: "Advanced settings",
       advHide: "Hide advanced",
@@ -1039,21 +1039,21 @@
       selAuto: "Auto (pick fastest)", selFixed: "Use a fixed server",
       modeBad: "Only fix slow servers", modeForce: "Always switch server",
       mcdnAll: "Proxy all MCDN", mcdnV1: "Proxy /v1 only", mcdnReplace: "Replace host",
-      portTitle: "Catch hidden PCDN", portNote: "Treat odd-port servers as slow (recommended).",
-      stallTitle: "Auto-recover", stallNote: "Switch servers live if it stalls — no reload.",
-      akamaiTitle: "Rewrite Akamai", akamaiNote: "Only if Akamai is slow on your network.",
-      p2pTitle: "Stop bandwidth sharing", p2pNote: "Block Bilibili's P2P upload (reload to apply).",
+      portTitle: "Catch hidden PCDN", portNote: "Treat odd-port servers as slow (recommended)",
+      stallTitle: "Auto-recover", stallNote: "Switch servers live if it stalls — no reload",
+      akamaiTitle: "Rewrite Akamai", akamaiNote: "Only if Akamai is slow on your network",
+      p2pTitle: "Stop bandwidth sharing", p2pNote: "Block Bilibili's P2P upload (reload to apply)",
       diag: "Copy report", diagCopied: "Copied ✓", diagConsole: "See console",
       reload: "Reload"
     },
     zh: {
       title: "Bilibili Accelerator",
       status: {
-        off: ["已关闭加速", "打开后自动为慢视频提速。"],
-        idle: ["就绪", "打开视频后自动生效。"],
-        optimizing: ["正在寻找最快的服务器…", "正在为你挑选最佳线路。"],
-        buffering: ["正在切换更快的服务器…", "正在从卡顿中恢复。"],
-        smooth: ["播放流畅", "已连接到离你最近的最快服务器。"]
+        off: ["已关闭加速", "打开后自动为慢视频提速"],
+        idle: ["就绪", "打开视频后自动生效"],
+        optimizing: ["正在寻找最快的服务器…", "正在为你挑选最佳线路"],
+        buffering: ["正在切换更快的服务器…", "正在从卡顿中恢复"],
+        smooth: ["播放流畅", "已连接到离你最近的最快服务器"]
       },
       count: function (n) { return "已修复 " + n + " 个慢连接"; },
       spdTitle: "下载速度",
@@ -1064,7 +1064,7 @@
       bufUnit: "秒",
       spdWaiting: "等待播放…",
       masterTitle: "加速",
-      masterNote: "自动为慢视频提速。",
+      masterNote: "自动为慢视频提速",
       boost: "还在卡？再加把劲",
       advShow: "高级设置",
       advHide: "收起高级设置",
@@ -1072,10 +1072,10 @@
       selAuto: "自动（选最快）", selFixed: "使用固定服务器",
       modeBad: "仅修复慢服务器", modeForce: "总是切换服务器",
       mcdnAll: "代理所有 MCDN", mcdnV1: "仅代理 /v1", mcdnReplace: "替换域名",
-      portTitle: "抓取隐藏 PCDN", portNote: "把奇怪端口的服务器当作慢节点（推荐）。",
-      stallTitle: "自动恢复", stallNote: "卡顿时实时切换服务器，无需刷新。",
-      akamaiTitle: "改写 Akamai", akamaiNote: "仅当 Akamai 在你的网络上很慢时使用。",
-      p2pTitle: "停止带宽共享", p2pNote: "阻止 B 站的 P2P 上传（刷新后生效）。",
+      portTitle: "抓取隐藏 PCDN", portNote: "把奇怪端口的服务器当作慢节点（推荐）",
+      stallTitle: "自动恢复", stallNote: "卡顿时实时切换服务器，无需刷新",
+      akamaiTitle: "改写 Akamai", akamaiNote: "仅当 Akamai 在你的网络上很慢时使用",
+      p2pTitle: "停止带宽共享", p2pNote: "阻止 B 站的 P2P 上传（刷新后生效）",
       diag: "复制诊断报告", diagCopied: "已复制 ✓", diagConsole: "见控制台",
       reload: "刷新"
     }
