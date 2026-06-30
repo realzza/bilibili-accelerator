@@ -6,6 +6,10 @@
 
 **Bilibili Accelerator** 是一个用户脚本。它会在播放器开始缓冲前，自动改写 Bilibili 返回的慢 CDN 播放地址，专治海外网络下常见的 `upos-*ov` 海外镜像、MCDN/PCDN 节点和糟糕路由。
 
+<p align="center">
+  <img src="docs/assets/panel.png" alt="Bilibili Accelerator 面板：实时下载速度曲线、状态、一键加速" width="360">
+</p>
+
 ## 立即安装
 
 推荐从 Greasy Fork 安装，Chrome、Safari、Firefox、Edge 都可以用。
@@ -71,6 +75,10 @@ proxy-tf-all-ws.bilivideo.com
 - **可选的带宽保护**：阻止 B 站通过 WebRTC P2P 占用你的上传带宽（默认关闭）。
 - **浏览器扩展新增工具栏弹窗与设置同步。**
 - **实时速度图** *(0.2.1)*：面板内置实时下载速度曲线，当 CDN 不暴露字节数时自动回退为缓冲时长。
+
+<p align="center">
+  <img src="docs/assets/panel-advanced.png" alt="高级设置：自动选最快服务器、隐藏 PCDN 识别、卡顿自动恢复、带宽保护" width="360">
+</p>
 
 ## 已测样本
 
