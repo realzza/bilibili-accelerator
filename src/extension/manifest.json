@@ -1,9 +1,16 @@
 {
   "manifest_version": 3,
   "name": "Bilibili Accelerator",
-  "version": "0.1.3",
-  "description": "Rewrites slow Bilibili playback CDN URLs before Safari starts buffering.",
+  "version": "0.2.0",
+  "description": "Speeds up slow Bilibili playback by rewriting weak CDN/PCDN URLs before buffering.",
   "icons": {},
+  "permissions": [
+    "storage"
+  ],
+  "action": {
+    "default_title": "Bilibili Accelerator",
+    "default_popup": "popup.html"
+  },
   "content_scripts": [
     {
       "matches": [
