@@ -719,23 +719,33 @@
     }
     root.fetch = function patchedFetch(input, init) {
       let args = arguments;
-      if (config.enabled) {
-        const reqUrl = requestUrlOf(input);
-        if (reqUrl && core.hasMediaSignal(reqUrl)) {
-          const swapped = rewriteRequestUrl(reqUrl);
-          if (swapped !== reqUrl) {
-            input = typeof input === "string" ? swapped : new Request(swapped, input);
-            args = [input, init];
-          }
+      const reqUrl = requestUrlOf(input);
+      const isMedia = !!reqUrl && core.hasMediaSignal(reqUrl);
+      if (config.enabled && isMedia) {
+        const swapped = rewriteRequestUrl(reqUrl);
+        if (swapped !== reqUrl) {
+          input = typeof input === "string" ? swapped : new Request(swapped, input);
+          args = [input, init];
         }
       }
 
       return nativeFetch.apply(this, args).then(function handleResponse(response) {
-        if (!config.enabled || !isInterestingFetch(args[0])) {
+        if (!config.enabled) {
           return response;
         }
         const contentType = response.headers && response.headers.get("content-type");
-        if (contentType && !contentType.includes("json") && !contentType.includes("text")) {
+        const isBinary = !contentType ||
+          (!contentType.includes("json") && !contentType.includes("text"));
+
+        // Measure real throughput ourselves — Bilibili's CDN omits
+        // Timing-Allow-Origin, so Resource Timing reports 0 bytes. Reading a
+        // clone is non-invasive: the player still gets the original response.
+        if (isMedia && isBinary) {
+          measureFetchBytes(response);
+          return response;
+        }
+
+        if (!isInterestingFetch(args[0]) || isBinary) {
           return response;
         }
         return response.clone().text().then(function rewriteText(text) {
@@ -793,9 +803,19 @@
     NativeXHR.prototype.send = function patchedSend() {
       const xhr = this;
       const meta = xhr.__baAccel || {};
+      const isMedia = typeof meta.url === "string" && core.hasMediaSignal(meta.url);
       const interesting = typeof meta.url === "string" &&
         (meta.url.includes("playurl") || meta.url.includes("/x/player") ||
-          meta.url.includes("/pgc/player") || core.hasMediaSignal(meta.url));
+          meta.url.includes("/pgc/player") || isMedia);
+
+      // Count downloaded bytes for media segments (free via loadend.loaded).
+      if (config.enabled && isMedia) {
+        xhr.addEventListener("loadend", function onLoadEnd(event) {
+          if (event && typeof event.loaded === "number") {
+            addBytes(event.loaded);
+          }
+        });
+      }
 
       if (config.enabled && interesting) {
         xhr.addEventListener("load", function onLoad() {
@@ -1069,30 +1089,33 @@
     lastTime: 0
   };
   let speedTimer = null;
-  let speedObserver = null;
 
-  function onSpeedEntries(list) {
-    list.getEntries().forEach(function (entry) {
-      if (entry.entryType !== "resource" || !core.hasMediaSignal(entry.name)) {
-        return;
+  // Bytes are measured at the fetch/XHR layer (see measureFetchBytes and the
+  // XHR loadend counter) rather than via Resource Timing, because Bilibili's
+  // media CDN omits Timing-Allow-Origin and would report 0 transferSize.
+  function addBytes(n) {
+    if (n > 0) {
+      speed.windowBytes += n;
+      speed.sawBytes = true;
+    }
+  }
+
+  // Count a media response's bytes by reading a clone — the player still gets
+  // the original response untouched, and cloning tees the stream (no re-download).
+  function measureFetchBytes(response) {
+    try {
+      response.clone().arrayBuffer().then(function (buf) {
+        addBytes(buf && buf.byteLength);
+      }).catch(function () {});
+    } catch (_) {
+      const cl = response.headers && response.headers.get("content-length");
+      if (cl) {
+        addBytes(parseInt(cl, 10) || 0);
       }
-      const bytes = entry.transferSize || entry.encodedBodySize || 0;
-      if (bytes > 0) {
-        speed.windowBytes += bytes;
-        speed.sawBytes = true;
-      }
-    });
+    }
   }
 
   function installSpeedMeter() {
-    try {
-      if (typeof PerformanceObserver === "function") {
-        speedObserver = new PerformanceObserver(onSpeedEntries);
-        speedObserver.observe({ type: "resource", buffered: true });
-      }
-    } catch (_) {
-      // resource timing unavailable; the buffer-health fallback still works.
-    }
     if (!speedTimer && typeof setInterval === "function") {
       speedTimer = setInterval(tickSpeed, SPEED_TICK_MS);
     }
