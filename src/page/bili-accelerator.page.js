@@ -611,7 +611,7 @@
 
   function buildDiagnostics() {
     return {
-      version: "0.2.0",
+      version: "0.2.1",
       installedAt: state.installedAt,
       region: regionKey(),
       config,
@@ -626,6 +626,286 @@
       probedAt: state.probedAt,
       recentRewrites: state.rewrites.slice(-15)
     };
+  }
+
+  // ---- speed visualization ------------------------------------------------
+
+  const SPEED_SAMPLES = 60;       // ~60s of history at 1s resolution
+  const SPEED_TICK_MS = 1000;
+  const speed = {
+    mode: "speed",                // "speed" (Mbps) | "buffer" (seconds ahead)
+    mbpsSeries: [],
+    bufSeries: [],
+    windowBytes: 0,               // bytes finished within the current tick
+    currentMbps: 0,
+    peakMbps: 0,
+    bufferSec: 0,
+    dispMax: 0,                   // eased y-axis maximum (smooth rescaling)
+    sawBytes: false,
+    activeTicks: 0,               // ticks where playback advanced
+    lastTime: 0
+  };
+  let speedTimer = null;
+  let speedObserver = null;
+
+  function onSpeedEntries(list) {
+    list.getEntries().forEach(function (entry) {
+      if (entry.entryType !== "resource" || !core.hasMediaSignal(entry.name)) {
+        return;
+      }
+      const bytes = entry.transferSize || entry.encodedBodySize || 0;
+      if (bytes > 0) {
+        speed.windowBytes += bytes;
+        speed.sawBytes = true;
+      }
+    });
+  }
+
+  function installSpeedMeter() {
+    try {
+      if (typeof PerformanceObserver === "function") {
+        speedObserver = new PerformanceObserver(onSpeedEntries);
+        speedObserver.observe({ type: "resource", buffered: true });
+      }
+    } catch (_) {
+      // resource timing unavailable; the buffer-health fallback still works.
+    }
+    if (!speedTimer && typeof setInterval === "function") {
+      speedTimer = setInterval(tickSpeed, SPEED_TICK_MS);
+    }
+  }
+
+  function tickSpeed() {
+    // True throughput = bytes that finished in the last tick / tick length.
+    const mbps = core.throughputMbps(speed.windowBytes, SPEED_TICK_MS);
+    speed.windowBytes = 0;
+    speed.currentMbps = mbps;
+    if (mbps > speed.peakMbps) {
+      speed.peakMbps = mbps;
+    }
+    speed.mbpsSeries.push(mbps);
+    if (speed.mbpsSeries.length > SPEED_SAMPLES) {
+      speed.mbpsSeries.shift();
+    }
+
+    let playing = false;
+    try {
+      if (watchedVideo) {
+        if (watchedVideo.buffered && watchedVideo.buffered.length) {
+          const end = watchedVideo.buffered.end(watchedVideo.buffered.length - 1);
+          speed.bufferSec = Math.max(0, end - watchedVideo.currentTime);
+        }
+        playing = !watchedVideo.paused && !watchedVideo.ended &&
+          watchedVideo.currentTime !== speed.lastTime;
+        speed.lastTime = watchedVideo.currentTime;
+      }
+    } catch (_) {}
+    speed.bufSeries.push(speed.bufferSec);
+    if (speed.bufSeries.length > SPEED_SAMPLES) {
+      speed.bufSeries.shift();
+    }
+
+    // If playback is clearly advancing but the CDN never exposes byte sizes
+    // (opaque cross-origin), fall back to visualizing buffer health instead.
+    if (playing) {
+      speed.activeTicks += 1;
+    }
+    if (speed.mode === "speed" && !speed.sawBytes && speed.activeTicks >= 6) {
+      speed.mode = "buffer";
+    }
+
+    if (panelIsOpen()) {
+      drawSpeed();
+      updateSpeedReadouts();
+    }
+  }
+
+  function speedSeries() {
+    return speed.mode === "buffer" ? speed.bufSeries : speed.mbpsSeries;
+  }
+
+  // Round a value up to a "nice" axis maximum (1/2/5 × 10ⁿ) so the y-scale
+  // lands on tidy numbers instead of arbitrary peaks.
+  function niceCeil(v) {
+    if (!(v > 0)) {
+      return 1;
+    }
+    const pow = Math.pow(10, Math.floor(Math.log(v) / Math.LN10));
+    const n = v / pow;
+    const step = n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10;
+    return step * pow;
+  }
+
+  // Light 3-point moving average to calm per-second jitter before smoothing.
+  function smoothSeries(arr) {
+    if (arr.length < 3) {
+      return arr.slice();
+    }
+    const out = arr.slice();
+    for (let i = 1; i < arr.length - 1; i += 1) {
+      out[i] = (arr[i - 1] + arr[i] * 2 + arr[i + 1]) / 4;
+    }
+    return out;
+  }
+
+  // Monotone cubic (Fritsch–Carlson) tangents — same family as d3.curveMonotoneX:
+  // smooth through every point with no overshoot. Best fit for time series.
+  function monotoneTangents(xs, ys) {
+    const n = xs.length;
+    const slopes = new Array(n - 1);
+    const tan = new Array(n);
+    for (let i = 0; i < n - 1; i += 1) {
+      slopes[i] = (ys[i + 1] - ys[i]) / (xs[i + 1] - xs[i]);
+    }
+    tan[0] = slopes[0];
+    tan[n - 1] = slopes[n - 2];
+    for (let i = 1; i < n - 1; i += 1) {
+      tan[i] = slopes[i - 1] * slopes[i] <= 0 ? 0 : (slopes[i - 1] + slopes[i]) / 2;
+    }
+    for (let i = 0; i < n - 1; i += 1) {
+      if (slopes[i] === 0) {
+        tan[i] = 0;
+        tan[i + 1] = 0;
+        continue;
+      }
+      const a = tan[i] / slopes[i];
+      const b = tan[i + 1] / slopes[i];
+      const s = a * a + b * b;
+      if (s > 9) {
+        const tau = 3 / Math.sqrt(s);
+        tan[i] = tau * a * slopes[i];
+        tan[i + 1] = tau * b * slopes[i];
+      }
+    }
+    return tan;
+  }
+
+  function tracePath(ctx, xs, ys, tan) {
+    ctx.moveTo(xs[0], ys[0]);
+    if (xs.length < 2) {
+      return;
+    }
+    for (let i = 0; i < xs.length - 1; i += 1) {
+      const dx = (xs[i + 1] - xs[i]) / 3;
+      ctx.bezierCurveTo(
+        xs[i] + dx, ys[i] + tan[i] * dx,
+        xs[i + 1] - dx, ys[i + 1] - tan[i + 1] * dx,
+        xs[i + 1], ys[i + 1]
+      );
+    }
+  }
+
+  function drawSpeed() {
+    const shadow = getShadow();
+    const canvas = shadow && shadow.getElementById("ba-spd-canvas");
+    if (!canvas || typeof canvas.getContext !== "function") {
+      return;
+    }
+    const dpr = root.devicePixelRatio || 1;
+    const w = canvas.clientWidth || 296;
+    const h = canvas.clientHeight || 46;
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+    const ctx = canvas.getContext("2d");
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, w, h);
+
+    const series = smoothSeries(speedSeries());
+    if (!series.length) {
+      return;
+    }
+
+    const floor = speed.mode === "buffer" ? 30 : 1;
+    let dataMax = floor;
+    for (let i = 0; i < series.length; i += 1) {
+      if (series[i] > dataMax) {
+        dataMax = series[i];
+      }
+    }
+    // Ease the displayed maximum toward a nice ceiling so rescaling glides.
+    const target = niceCeil(dataMax);
+    speed.dispMax = speed.dispMax > 0
+      ? speed.dispMax + (target - speed.dispMax) * 0.25
+      : target;
+    const max = Math.max(speed.dispMax, floor);
+
+    const padTop = 5;
+    const padBottom = 2;
+    const step = w / (SPEED_SAMPLES - 1);
+    const offset = SPEED_SAMPLES - series.length;
+    const xs = [];
+    const ys = [];
+    for (let i = 0; i < series.length; i += 1) {
+      xs.push((offset + i) * step);
+      ys.push(h - padBottom - (series[i] / max) * (h - padTop - padBottom));
+    }
+    const tan = series.length >= 2 ? monotoneTangents(xs, ys) : [0];
+
+    // Gradient area fill.
+    ctx.beginPath();
+    tracePath(ctx, xs, ys, tan);
+    ctx.lineTo(xs[xs.length - 1], h);
+    ctx.lineTo(xs[0], h);
+    ctx.closePath();
+    const grad = ctx.createLinearGradient(0, 0, 0, h);
+    grad.addColorStop(0, "rgba(0,174,236,0.30)");
+    grad.addColorStop(1, "rgba(0,174,236,0.02)");
+    ctx.fillStyle = grad;
+    ctx.fill();
+
+    // Smooth line.
+    ctx.beginPath();
+    tracePath(ctx, xs, ys, tan);
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = "#00aeec";
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.stroke();
+
+    // Leading-edge dot at the current value.
+    const lx = xs[xs.length - 1];
+    const ly = ys[ys.length - 1];
+    ctx.beginPath();
+    ctx.arc(lx, ly, 3.2, 0, Math.PI * 2);
+    ctx.fillStyle = "#00aeec";
+    ctx.fill();
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = "#ffffff";
+    ctx.stroke();
+  }
+
+  function updateSpeedReadouts() {
+    const shadow = getShadow();
+    if (!shadow) {
+      return;
+    }
+    const card = shadow.getElementById("ba-speed");
+    const label = shadow.getElementById("ba-spd-label");
+    const value = shadow.getElementById("ba-spd-now");
+    const unit = shadow.getElementById("ba-spd-unit");
+    const foot = shadow.getElementById("ba-spd-foot");
+    if (!card) {
+      return;
+    }
+    const series = speedSeries();
+    const empty = series.length === 0 || (!speed.sawBytes && speed.mode === "speed");
+    card.className = empty ? "ba-speed empty" : "ba-speed";
+    if (label) {
+      label.textContent = t(speed.mode === "buffer" ? "bufTitle" : "spdTitle");
+    }
+    if (unit) {
+      unit.textContent = speed.mode === "buffer" ? t("bufUnit") : t("spdUnit");
+    }
+    if (value) {
+      value.textContent = speed.mode === "buffer"
+        ? String(Math.round(speed.bufferSec))
+        : speed.currentMbps.toFixed(1);
+    }
+    if (foot) {
+      foot.textContent = speed.mode === "buffer"
+        ? t("spdBuffering")
+        : t("spdPeak") + " " + speed.peakMbps.toFixed(1) + " " + t("spdUnit");
+    }
   }
 
   // ---- immersive badge handling ------------------------------------------
@@ -736,15 +1016,22 @@
     en: {
       title: "Bilibili Accelerator",
       status: {
-        off: ["Acceleration off", "Turn it on to speed up slow videos."],
-        idle: ["Ready", "Open a video and it'll kick in."],
-        optimizing: ["Finding the fastest server…", "Picking the best route for you."],
-        buffering: ["Finding a faster server…", "Recovering from a slow connection."],
-        smooth: ["Playing smoothly", "Connected to the fastest server near you."]
+        off: ["Acceleration off", "Turn it on to speed up slow videos"],
+        idle: ["Ready", "Open a video and it'll kick in"],
+        optimizing: ["Finding the fastest server…", "Picking the best route for you"],
+        buffering: ["Finding a faster server…", "Recovering from a slow connection"],
+        smooth: ["Playing smoothly", "Connected to the fastest server near you"]
       },
       count: function (n) { return n + " slow connection" + (n === 1 ? "" : "s") + " fixed"; },
+      spdTitle: "Download speed",
+      spdUnit: "Mbps",
+      spdPeak: "peak",
+      spdBuffering: "seconds buffered ahead",
+      bufTitle: "Buffer ahead",
+      bufUnit: "s",
+      spdWaiting: "Waiting for playback…",
       masterTitle: "Acceleration",
-      masterNote: "Speed up slow videos automatically.",
+      masterNote: "Speed up slow videos automatically",
       boost: "Still buffering? Boost harder",
       advShow: "Advanced settings",
       advHide: "Hide advanced",
@@ -752,25 +1039,32 @@
       selAuto: "Auto (pick fastest)", selFixed: "Use a fixed server",
       modeBad: "Only fix slow servers", modeForce: "Always switch server",
       mcdnAll: "Proxy all MCDN", mcdnV1: "Proxy /v1 only", mcdnReplace: "Replace host",
-      portTitle: "Catch hidden PCDN", portNote: "Treat odd-port servers as slow (recommended).",
-      stallTitle: "Auto-recover", stallNote: "Switch servers live if it stalls — no reload.",
-      akamaiTitle: "Rewrite Akamai", akamaiNote: "Only if Akamai is slow on your network.",
-      p2pTitle: "Stop bandwidth sharing", p2pNote: "Block Bilibili's P2P upload (reload to apply).",
+      portTitle: "Catch hidden PCDN", portNote: "Treat odd-port servers as slow (recommended)",
+      stallTitle: "Auto-recover", stallNote: "Switch servers live if it stalls — no reload",
+      akamaiTitle: "Rewrite Akamai", akamaiNote: "Only if Akamai is slow on your network",
+      p2pTitle: "Stop bandwidth sharing", p2pNote: "Block Bilibili's P2P upload (reload to apply)",
       diag: "Copy report", diagCopied: "Copied ✓", diagConsole: "See console",
       reload: "Reload"
     },
     zh: {
       title: "Bilibili Accelerator",
       status: {
-        off: ["已关闭加速", "打开后自动为慢视频提速。"],
-        idle: ["就绪", "打开视频后自动生效。"],
-        optimizing: ["正在寻找最快的服务器…", "正在为你挑选最佳线路。"],
-        buffering: ["正在切换更快的服务器…", "正在从卡顿中恢复。"],
-        smooth: ["播放流畅", "已连接到离你最近的最快服务器。"]
+        off: ["已关闭加速", "打开后自动为慢视频提速"],
+        idle: ["就绪", "打开视频后自动生效"],
+        optimizing: ["正在寻找最快的服务器…", "正在为你挑选最佳线路"],
+        buffering: ["正在切换更快的服务器…", "正在从卡顿中恢复"],
+        smooth: ["播放流畅", "已连接到离你最近的最快服务器"]
       },
       count: function (n) { return "已修复 " + n + " 个慢连接"; },
+      spdTitle: "下载速度",
+      spdUnit: "Mbps",
+      spdPeak: "峰值",
+      spdBuffering: "已缓冲秒数",
+      bufTitle: "缓冲时长",
+      bufUnit: "秒",
+      spdWaiting: "等待播放…",
       masterTitle: "加速",
-      masterNote: "自动为慢视频提速。",
+      masterNote: "自动为慢视频提速",
       boost: "还在卡？再加把劲",
       advShow: "高级设置",
       advHide: "收起高级设置",
@@ -778,10 +1072,10 @@
       selAuto: "自动（选最快）", selFixed: "使用固定服务器",
       modeBad: "仅修复慢服务器", modeForce: "总是切换服务器",
       mcdnAll: "代理所有 MCDN", mcdnV1: "仅代理 /v1", mcdnReplace: "替换域名",
-      portTitle: "抓取隐藏 PCDN", portNote: "把奇怪端口的服务器当作慢节点（推荐）。",
-      stallTitle: "自动恢复", stallNote: "卡顿时实时切换服务器，无需刷新。",
-      akamaiTitle: "改写 Akamai", akamaiNote: "仅当 Akamai 在你的网络上很慢时使用。",
-      p2pTitle: "停止带宽共享", p2pNote: "阻止 B 站的 P2P 上传（刷新后生效）。",
+      portTitle: "抓取隐藏 PCDN", portNote: "把奇怪端口的服务器当作慢节点（推荐）",
+      stallTitle: "自动恢复", stallNote: "卡顿时实时切换服务器，无需刷新",
+      akamaiTitle: "改写 Akamai", akamaiNote: "仅当 Akamai 在你的网络上很慢时使用",
+      p2pTitle: "停止带宽共享", p2pNote: "阻止 B 站的 P2P 上传（刷新后生效）",
       diag: "复制诊断报告", diagCopied: "已复制 ✓", diagConsole: "见控制台",
       reload: "刷新"
     }
@@ -819,6 +1113,7 @@
     const adv = shadow.querySelector(".ba-adv");
     setAdvToggleLabel(adv && adv.classList.contains("open"));
     updateLangButtons();
+    updateSpeedReadouts();
     renderStatus();
   }
 
@@ -985,6 +1280,16 @@
       ".ba-word{font-size:15px;font-weight:800;color:#1b2733}",
       ".ba-subnote{font-size:11px;color:#6b7785;margin-top:2px;line-height:1.4}",
       ".ba-count{font-size:11px;color:#8a95a1;margin-top:6px}",
+      ".ba-speed{margin:0 0 10px;padding:10px 12px;border:1px solid #e5eaf0;border-radius:10px;background:#fff}",
+      ".ba-speed-top{display:flex;align-items:baseline;justify-content:space-between;gap:8px}",
+      ".ba-speed-label{font-size:12px;font-weight:700;color:#46515c}",
+      ".ba-speed-val{font-size:11px;color:#8a95a1;white-space:nowrap}",
+      ".ba-speed-val b{font-size:17px;color:#00aeec;font-weight:800;margin-right:3px}",
+      ".ba-spd-canvas{display:block;width:100%;height:46px;margin-top:6px}",
+      ".ba-spd-foot{font-size:10px;color:#8a95a1;margin-top:4px}",
+      ".ba-spd-empty{display:none;font-size:11px;color:#8a95a1;padding:8px 0 4px;text-align:center}",
+      ".ba-speed.empty .ba-spd-canvas,.ba-speed.empty .ba-spd-foot,.ba-speed.empty .ba-speed-val{display:none}",
+      ".ba-speed.empty .ba-spd-empty{display:block}",
       ".ba-switch-row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:8px 0;padding:10px 12px;border:1px solid #e5eaf0;border-radius:10px;background:#fff}",
       ".ba-switch-text{display:grid;gap:2px}",
       ".ba-switch-title{font-size:13px;font-weight:750;color:#202a33}",
@@ -1071,6 +1376,43 @@
     hero.appendChild(word);
     hero.appendChild(subnote);
     hero.appendChild(count);
+
+    // Live speed card
+    const speedCard = document.createElement("div");
+    speedCard.id = "ba-speed";
+    speedCard.className = "ba-speed empty";
+    const speedTop = document.createElement("div");
+    speedTop.className = "ba-speed-top";
+    const speedLabel = document.createElement("span");
+    speedLabel.className = "ba-speed-label";
+    speedLabel.id = "ba-spd-label";
+    speedLabel.textContent = t("spdTitle");
+    const speedVal = document.createElement("span");
+    speedVal.className = "ba-speed-val";
+    const speedNow = document.createElement("b");
+    speedNow.id = "ba-spd-now";
+    speedNow.textContent = "0.0";
+    const speedUnit = document.createElement("span");
+    speedUnit.id = "ba-spd-unit";
+    speedUnit.textContent = t("spdUnit");
+    speedVal.appendChild(speedNow);
+    speedVal.appendChild(speedUnit);
+    speedTop.appendChild(speedLabel);
+    speedTop.appendChild(speedVal);
+    const speedCanvas = document.createElement("canvas");
+    speedCanvas.id = "ba-spd-canvas";
+    speedCanvas.className = "ba-spd-canvas";
+    const speedFoot = document.createElement("div");
+    speedFoot.className = "ba-spd-foot";
+    speedFoot.id = "ba-spd-foot";
+    const speedEmpty = document.createElement("div");
+    speedEmpty.className = "ba-spd-empty";
+    speedEmpty.dataset.i18n = "spdWaiting";
+    speedEmpty.textContent = t("spdWaiting");
+    speedCard.appendChild(speedTop);
+    speedCard.appendChild(speedCanvas);
+    speedCard.appendChild(speedFoot);
+    speedCard.appendChild(speedEmpty);
 
     // Master switch
     const master = createSwitchRow("masterTitle", "masterNote",
@@ -1218,6 +1560,7 @@
     body.className = "ba-body";
     body.appendChild(head);
     body.appendChild(hero);
+    body.appendChild(speedCard);
     body.appendChild(master);
     body.appendChild(boost);
     body.appendChild(adv);
@@ -1238,6 +1581,10 @@
     toggle.addEventListener("click", function () {
       panel.classList.toggle("open");
       renderStatus();
+      if (panel.classList.contains("open")) {
+        drawSpeed();
+        updateSpeedReadouts();
+      }
       if (!immersive) {
         return;
       }
@@ -1308,6 +1655,7 @@
   function bootstrapUi() {
     installUi();
     installImmersiveWatch();
+    installSpeedMeter();
   }
 
   if (document.readyState === "loading") {

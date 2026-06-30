@@ -10,14 +10,14 @@
       title: "Bilibili Accelerator",
       accelTitle: "Acceleration",
       accelNote: "Speed up slow videos",
-      hint: "Open a Bilibili video and tap the ⚡ in the corner for live status and advanced settings.",
+      hint: "Open a Bilibili video and tap the ⚡ in the corner for live status and advanced settings",
       langTitle: "Language"
     },
     zh: {
       title: "Bilibili Accelerator",
       accelTitle: "加速",
       accelNote: "为慢视频提速",
-      hint: "打开任意 B 站视频，点击角落的 ⚡ 查看实时状态与高级设置。",
+      hint: "打开任意 B 站视频，点击角落的 ⚡ 查看实时状态与高级设置",
       langTitle: "语言"
     }
   };

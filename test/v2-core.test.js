@@ -97,6 +97,16 @@ test("alternativesFor builds host-swapped backups excluding current host", () =>
   assert.ok(!alts.some((u) => new URL(u).hostname === "upos-sz-mirrorcos.bilivideo.com"));
 });
 
+test("throughputMbps converts bytes over a window to megabits per second", () => {
+  // 1,000,000 bytes in 1000 ms = 8 Mbps
+  assert.equal(core.throughputMbps(1e6, 1000), 8);
+  // 250,000 bytes in 500 ms = 4 Mbps
+  assert.equal(core.throughputMbps(250000, 500), 4);
+  // guards against zero/negative inputs
+  assert.equal(core.throughputMbps(0, 1000), 0);
+  assert.equal(core.throughputMbps(1000, 0), 0);
+});
+
 test("rankHosts orders healthy hosts by TTFB and sinks failures", () => {
   const ranked = core.rankHosts([
     { host: "slow.bilivideo.com", ttfb: 800, ok: true },

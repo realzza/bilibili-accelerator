@@ -13,7 +13,7 @@ Greasy Fork is the recommended install path. It works with Chrome, Safari, Firef
 - [Greasy Fork script page](https://greasyfork.org/en/scripts/582026-bilibili-accelerator)
 - [Direct `.user.js` install](https://update.greasyfork.org/scripts/582026/Bilibili%20Accelerator.user.js)
 - [GitHub Raw fallback](https://raw.githubusercontent.com/realzza/bilibili-accelerator/main/dist/bilibili-accelerator.user.js)
-- [GitHub Release v0.2.0](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.2.0)
+- [GitHub Release v0.2.1](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.2.1)
 
 After installation, open any Bilibili video. A small ⚡ icon in the lower-right corner means the script is active.
 
@@ -70,6 +70,7 @@ In web fullscreen the ⚡ icon fades out so it never covers the video; move the 
 - **Plain-language panel** — one status (Playing smoothly / Finding a faster server), one switch, one "Boost harder" button. Every old knob still lives under **Advanced settings**.
 - **Optional bandwidth guard** — stop Bilibili from using your upload via WebRTC P2P (off by default).
 - **Toolbar popup + synced settings** for the browser extension.
+- **Live speed graph** *(0.2.1)* — a real-time download-speed chart right in the panel, with a buffer-health fallback when a CDN hides byte sizes.
 
 ## Tested Case
 

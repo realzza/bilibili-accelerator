@@ -300,6 +300,15 @@
     return out;
   }
 
+  // Convert a transferred byte count over a duration into megabits per second.
+  // Pure so the speed meter's math stays unit-tested.
+  function throughputMbps(bytes, durationMs) {
+    if (!(bytes > 0) || !(durationMs > 0)) {
+      return 0;
+    }
+    return (bytes * 8 / 1e6) / (durationMs / 1000);
+  }
+
   // Pure ranking of probed hosts. samples: [{host, ttfb:number|null, ok:bool}].
   // Healthy hosts first (lowest TTFB wins); failures sink to the bottom.
   function rankHosts(samples) {
@@ -386,6 +395,7 @@
     classify,
     selectTarget,
     alternativesFor,
+    throughputMbps,
     rankHosts,
     rewriteJsonText,
     rewriteObject,
