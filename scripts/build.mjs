@@ -9,12 +9,14 @@ const core = await readFile(path.join(root, "src/core/rewrite.js"), "utf8");
 const page = await readFile(path.join(root, "src/page/bili-accelerator.page.js"), "utf8");
 const content = await readFile(path.join(root, "src/extension/content.js"), "utf8");
 const manifest = await readFile(path.join(root, "src/extension/manifest.json"), "utf8");
+const popupHtml = await readFile(path.join(root, "src/extension/popup.html"), "utf8");
+const popupJs = await readFile(path.join(root, "src/extension/popup.js"), "utf8");
 
 const userscriptHeader = `// ==UserScript==
 // @name         Bilibili Accelerator
 // @name:zh-CN   Bilibili Accelerator - B站海外播放加速
 // @namespace    https://github.com/realzza/bilibili-accelerator
-// @version      0.1.3
+// @version      0.2.0
 // @description  Rewrite slow Bilibili playback CDN URLs for smoother overseas playback.
 // @description:zh-CN 自动改写 B 站慢 CDN 播放地址，缓解海外用户看冷门视频时的卡顿。
 // @author       realzza
@@ -35,6 +37,8 @@ await writeFile(path.join(dist, "bilibili-accelerator.user.js"), `${userscriptHe
 await writeFile(path.join(extensionDist, "bili-accelerator.page.js"), `${core}\n${page}\n`);
 await writeFile(path.join(extensionDist, "content.js"), content);
 await writeFile(path.join(extensionDist, "manifest.json"), manifest);
+await writeFile(path.join(extensionDist, "popup.html"), popupHtml);
+await writeFile(path.join(extensionDist, "popup.js"), popupJs);
 await copyFile(path.join(root, "README.md"), path.join(dist, "README.md")).catch(() => {});
 await copyFile(path.join(root, "README.en.md"), path.join(dist, "README.en.md")).catch(() => {});
 

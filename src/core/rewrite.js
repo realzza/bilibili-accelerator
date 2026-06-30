@@ -9,16 +9,10 @@
 })(typeof globalThis !== "undefined" ? globalThis : window, function createCore() {
   "use strict";
 
-  const DEFAULT_CONFIG = Object.freeze({
-    enabled: true,
-    mode: "bad-only",
-    pcdnHost: "upos-sz-mirrorcos.bilivideo.com",
-    mcdnStrategy: "proxy-all",
-    proxyHost: "proxy-tf-all-ws.bilivideo.com",
-    rewriteAkamai: false,
-    maxDepth: 20
-  });
+  const SCHEMA_VERSION = 2;
 
+  // Healthy UPOS mirrors we are willing to rewrite toward. The first entry is
+  // the default target; the whole list seeds the auto-selection candidate pool.
   const CDN_HOSTS = Object.freeze([
     "upos-sz-mirrorcos.bilivideo.com",
     "upos-sz-mirrorali.bilivideo.com",
@@ -32,12 +26,54 @@
     "upos-sz-mirrorhwov.bilivideo.com"
   ]);
 
+  // Candidates that are safe to auto-probe and rank: non-akamai, non-overseas
+  // mirrors that work well as generic rewrite targets.
+  const CANDIDATE_POOL = Object.freeze([
+    "upos-sz-mirrorcos.bilivideo.com",
+    "upos-sz-mirrorali.bilivideo.com",
+    "upos-sz-mirrorhw.bilivideo.com",
+    "upos-tf-all-hw.bilivideo.com",
+    "upos-tf-all-tx.bilivideo.com"
+  ]);
+
+  const DEFAULT_CONFIG = Object.freeze({
+    enabled: true,
+    lang: "en",                                    // en | zh (UI language)
+    mode: "bad-only",                              // bad-only | force | off
+    selection: "auto",                             // auto | fixed
+    pcdnHost: "upos-sz-mirrorcos.bilivideo.com",
+    candidatePool: CANDIDATE_POOL.slice(),
+    mcdnStrategy: "proxy-all",                      // proxy-all | proxy-v1 | replace
+    proxyHost: "proxy-tf-all-ws.bilivideo.com",
+    rewriteAkamai: false,
+    portHeuristic: true,                           // non-default port ⇒ PCDN
+    stallRecovery: true,                           // live failover on buffering
+    p2pGuard: false,                               // opt-in WebRTC/PCDN neutralizer
+    maxDepth: 20,
+    schemaVersion: SCHEMA_VERSION
+  });
+
   const MEDIA_PATH_RE = /\.(m4s|mp4|flv|m3u8)(?:$|[?#])/i;
   const IP_RE = /^(?:\d{1,3}\.){3}\d{1,3}$/;
   const XY_MCDN_RE = /^xy(?:\d+x){3}\d+xy\.mcdn\.bilivideo\.(?:cn|com|net)$/i;
 
+  // Forward-migrate any stored config (v1 or partial) onto the v2 defaults.
   function normalizeConfig(config) {
-    return Object.assign({}, DEFAULT_CONFIG, config || {});
+    const merged = Object.assign({}, DEFAULT_CONFIG, config || {});
+    if (!Array.isArray(merged.candidatePool) || merged.candidatePool.length === 0) {
+      merged.candidatePool = CANDIDATE_POOL.slice();
+    }
+    if (merged.mode !== "bad-only" && merged.mode !== "force" && merged.mode !== "off") {
+      merged.mode = DEFAULT_CONFIG.mode;
+    }
+    if (merged.selection !== "auto" && merged.selection !== "fixed") {
+      merged.selection = DEFAULT_CONFIG.selection;
+    }
+    if (merged.lang !== "en" && merged.lang !== "zh") {
+      merged.lang = DEFAULT_CONFIG.lang;
+    }
+    merged.schemaVersion = SCHEMA_VERSION;
+    return merged;
   }
 
   function hasBiliMediaSignal(value) {
@@ -45,6 +81,8 @@
       (value.includes("bilivideo") ||
         value.includes("akamaized.net") ||
         value.includes("szbdyd.com") ||
+        value.includes("mcdn.bili") ||
+        value.includes("os=mcdn") ||
         value.includes("/upgcxcode/") ||
         value.includes("/v1/resource/"));
   }
@@ -75,10 +113,6 @@
     return /\.mcdn\.bilivideo\.(?:cn|com|net)$/i.test(hostname);
   }
 
-  function isPcdnHost(url) {
-    return IP_RE.test(url.hostname) || XY_MCDN_RE.test(url.hostname) || isMcdnHost(url.hostname);
-  }
-
   function isBiliCdnHost(hostname) {
     return hostname.endsWith(".bilivideo.com") ||
       hostname.endsWith(".bilivideo.cn") ||
@@ -86,22 +120,70 @@
       hostname.endsWith(".akamaized.net");
   }
 
-  function isKnownSlowHost(url, config) {
+  function hasNonDefaultPort(url) {
+    // URL drops the port when it matches the protocol default (80/443), so any
+    // remaining port string means a non-standard endpoint — a strong PCDN tell.
+    return url.port !== "" && url.port !== "80" && url.port !== "443";
+  }
+
+  function hasMcdnQuery(url) {
+    return url.searchParams.get("os") === "mcdn" || /(?:^|[?&])os=mcdn(?:&|$)/i.test(url.search);
+  }
+
+  function isOverseasMirror(hostname) {
+    return hostname.includes("mirroraliov") ||
+      hostname.includes("mirrorcosov") ||
+      hostname.includes("mirrorhwov");
+  }
+
+  // Single source of truth for "what is this host, and is it slow for us".
+  // Behavior-based so renamed PCDN families (e.g. *.edge.mountaintoys.cn) are
+  // caught by the port/os=mcdn heuristics without needing a hostname update.
+  function classify(url, rawConfig) {
+    const config = normalizeConfig(rawConfig);
     const hostname = url.hostname.toLowerCase();
 
-    if (isPcdnHost(url)) {
-      return true;
-    }
-
+    let schedulerSource = null;
     if (hostname.endsWith(".szbdyd.com")) {
-      return true;
+      schedulerSource = cleanHost(url.searchParams.get("xy_usource") || "") || null;
     }
 
-    if (hostname.includes("mirroraliov") || hostname.includes("mirrorcosov") || hostname.includes("mirrorhwov")) {
-      return true;
+    const ipLike = IP_RE.test(hostname);
+    const xyMcdn = XY_MCDN_RE.test(hostname);
+    const mcdn = isMcdnHost(hostname);
+    const akamai = hostname.endsWith(".akamaized.net");
+    const portPcdn = config.portHeuristic && hasNonDefaultPort(url);
+    const queryMcdn = hasMcdnQuery(url);
+
+    const isPcdn = ipLike || xyMcdn || portPcdn || queryMcdn;
+
+    let kind = "unknown";
+    if (schedulerSource !== null || hostname.endsWith(".szbdyd.com")) {
+      kind = "scheduler";
+    } else if (mcdn) {
+      kind = "mcdn";
+    } else if (ipLike || xyMcdn || portPcdn || queryMcdn) {
+      kind = "pcdn";
+    } else if (akamai) {
+      kind = "akamai";
+    } else if (hostname.startsWith("upos-") || hostname.endsWith(".bilivideo.com")) {
+      kind = "upos";
     }
 
-    return config.rewriteAkamai && hostname.endsWith(".akamaized.net");
+    const isSlow = isPcdn ||
+      isOverseasMirror(hostname) ||
+      (config.rewriteAkamai && akamai);
+
+    return {
+      host: hostname,
+      port: url.port || "",
+      kind,
+      isPcdn,
+      isMcdn: mcdn,
+      isAkamai: akamai,
+      isSlow,
+      schedulerSource
+    };
   }
 
   function cleanHost(host) {
@@ -125,16 +207,20 @@
     return next.toString();
   }
 
-  function shouldProxyMcdn(url, config) {
-    if (!isMcdnHost(url.hostname)) {
+  function shouldProxyMcdn(verdict, url, config) {
+    if (!verdict.isMcdn) {
       return false;
     }
-
     if (config.mcdnStrategy === "proxy-all") {
       return true;
     }
-
     return config.mcdnStrategy === "proxy-v1" && url.pathname.startsWith("/v1/resource/");
+  }
+
+  // The host to rewrite slow UPOS/PCDN URLs toward. In auto mode the runtime
+  // keeps config.pcdnHost pointed at the current best-ranked candidate.
+  function selectTarget(config) {
+    return cleanHost(config.pcdnHost) || CDN_HOSTS[0];
   }
 
   function rewriteUrlDetail(value, rawConfig) {
@@ -142,30 +228,25 @@
     const original = String(value || "");
     const url = parseUrl(original);
 
-    if (!config.enabled || !url || !isMediaUrl(url) || url.hostname === cleanHost(config.proxyHost)) {
+    if (!config.enabled || config.mode === "off" || !url || !isMediaUrl(url) ||
+        url.hostname === cleanHost(config.proxyHost)) {
+      return { changed: false, original, url: original, reason: "ignored" };
+    }
+
+    const verdict = classify(url, config);
+
+    if (verdict.schedulerSource) {
+      const rewritten = replaceHost(url, verdict.schedulerSource);
       return {
-        changed: false,
+        changed: rewritten !== original,
         original,
-        url: original,
-        reason: "ignored"
+        url: rewritten,
+        reason: "szbdyd-source",
+        targetHost: cleanHost(verdict.schedulerSource)
       };
     }
 
-    if (url.hostname.endsWith(".szbdyd.com")) {
-      const source = url.searchParams.get("xy_usource");
-      if (source) {
-        const rewritten = replaceHost(url, source);
-        return {
-          changed: rewritten !== original,
-          original,
-          url: rewritten,
-          reason: "szbdyd-source",
-          targetHost: cleanHost(source)
-        };
-      }
-    }
-
-    if (shouldProxyMcdn(url, config)) {
+    if (shouldProxyMcdn(verdict, url, config)) {
       const rewritten = proxyUrl(url, config);
       return {
         changed: rewritten !== original,
@@ -177,27 +258,67 @@
     }
 
     const force = config.mode === "force";
-    if (isKnownSlowHost(url, config) || (force && isBiliCdnHost(url.hostname))) {
-      const rewritten = replaceHost(url, config.pcdnHost);
+    if (verdict.isSlow || verdict.isMcdn || (force && isBiliCdnHost(url.hostname))) {
+      const target = selectTarget(config);
+      const rewritten = replaceHost(url, target);
       return {
         changed: rewritten !== original,
         original,
         url: rewritten,
-        reason: isPcdnHost(url) ? "pcdn-host" : "cdn-host",
-        targetHost: cleanHost(config.pcdnHost)
+        reason: verdict.isPcdn ? "pcdn-host" : (verdict.isMcdn ? "mcdn-host" : "cdn-host"),
+        targetHost: target
       };
     }
 
-    return {
-      changed: false,
-      original,
-      url: original,
-      reason: "ok"
-    };
+    return { changed: false, original, url: original, reason: "ok" };
   }
 
   function rewriteUrl(value, config) {
     return rewriteUrlDetail(value, config).url;
+  }
+
+  // Build host-swapped alternatives of a media URL for DASH backupUrl fan-out.
+  // Returns rewritten URL strings for each candidate host except the current one.
+  function alternativesFor(value, rawConfig, hosts) {
+    const config = normalizeConfig(rawConfig);
+    const url = parseUrl(String(value || ""));
+    if (!url || !isMediaUrl(url)) {
+      return [];
+    }
+    const pool = (hosts && hosts.length ? hosts : config.candidatePool) || [];
+    const current = url.hostname.toLowerCase();
+    const seen = {};
+    const out = [];
+    pool.forEach(function eachHost(host) {
+      const clean = cleanHost(host).toLowerCase();
+      if (!clean || clean === current || seen[clean]) {
+        return;
+      }
+      seen[clean] = true;
+      out.push(replaceHost(url, host));
+    });
+    return out;
+  }
+
+  // Pure ranking of probed hosts. samples: [{host, ttfb:number|null, ok:bool}].
+  // Healthy hosts first (lowest TTFB wins); failures sink to the bottom.
+  function rankHosts(samples) {
+    return (samples || [])
+      .slice()
+      .sort(function compare(a, b) {
+        const aOk = a.ok && typeof a.ttfb === "number";
+        const bOk = b.ok && typeof b.ttfb === "number";
+        if (aOk !== bOk) {
+          return aOk ? -1 : 1;
+        }
+        if (aOk && bOk) {
+          return a.ttfb - b.ttfb;
+        }
+        return 0;
+      })
+      .map(function pickHost(sample) {
+        return cleanHost(sample.host);
+      });
   }
 
   function rewriteObject(value, rawConfig, state, depth, seen) {
@@ -256,9 +377,16 @@
   }
 
   return {
+    SCHEMA_VERSION,
     CDN_HOSTS,
+    CANDIDATE_POOL,
     DEFAULT_CONFIG,
     normalizeConfig,
+    hasMediaSignal: hasBiliMediaSignal,
+    classify,
+    selectTarget,
+    alternativesFor,
+    rankHosts,
     rewriteJsonText,
     rewriteObject,
     rewriteUrl,

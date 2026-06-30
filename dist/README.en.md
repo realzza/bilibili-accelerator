@@ -13,7 +13,7 @@ Greasy Fork is the recommended install path. It works with Chrome, Safari, Firef
 - [Greasy Fork script page](https://greasyfork.org/en/scripts/582026-bilibili-accelerator)
 - [Direct `.user.js` install](https://update.greasyfork.org/scripts/582026/Bilibili%20Accelerator.user.js)
 - [GitHub Raw fallback](https://raw.githubusercontent.com/realzza/bilibili-accelerator/main/dist/bilibili-accelerator.user.js)
-- [GitHub Release v0.1.3](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.1.3)
+- [GitHub Release v0.2.0](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.2.0)
 
 After installation, open any Bilibili video. A small ⚡ icon in the lower-right corner means the script is active.
 
@@ -55,9 +55,21 @@ upos-sz-mirrorcos.bilivideo.com
 proxy-tf-all-ws.bilivideo.com
 ```
 
-Healthy CDN URLs are left alone by default. For stubborn videos, open the ⚡ panel, enable `Force all video CDN`, and reload.
+Healthy CDN URLs are left alone by default. For stubborn videos, open the ⚡ panel and tap **Still buffering? Boost harder**.
 
 In web fullscreen the ⚡ icon fades out so it never covers the video; move the cursor to the lower-right corner to bring it back.
+
+## What's New in 0.2
+
+0.2 is a full upgrade focused on catching more slow servers automatically and getting out of your way:
+
+- **Catches Bilibili's newer hidden PCDN** (e.g. `*.edge.mountaintoys.cn`) by treating any odd-port / `os=mcdn` playback server as slow — no hostname allow-list to keep up to date.
+- **Covers every request path** — adds `XMLHttpRequest` interception on top of `fetch`, `JSON.parse`, and page globals, so quality switches and bangumi no longer slip through.
+- **Picks the fastest server for you** — auto-probes candidate servers and remembers the best one for your region, instead of forcing everyone onto one fixed host.
+- **Auto-recovers from stalls** — if playback buffers, it switches servers live, no page reload.
+- **Plain-language panel** — one status (Playing smoothly / Finding a faster server), one switch, one "Boost harder" button. Every old knob still lives under **Advanced settings**.
+- **Optional bandwidth guard** — stop Bilibili from using your upload via WebRTC P2P (off by default).
+- **Toolbar popup + synced settings** for the browser extension.
 
 ## Tested Case
 
