@@ -628,6 +628,184 @@
     };
   }
 
+  // ---- speed visualization ------------------------------------------------
+
+  const SPEED_SAMPLES = 60;       // ~60s of history at 1s resolution
+  const SPEED_TICK_MS = 1000;
+  const speed = {
+    mode: "speed",                // "speed" (Mbps) | "buffer" (seconds ahead)
+    mbpsSeries: [],
+    bufSeries: [],
+    windowBytes: 0,               // bytes finished within the current tick
+    currentMbps: 0,
+    peakMbps: 0,
+    bufferSec: 0,
+    sawBytes: false,
+    activeTicks: 0,               // ticks where playback advanced
+    lastTime: 0
+  };
+  let speedTimer = null;
+  let speedObserver = null;
+
+  function onSpeedEntries(list) {
+    list.getEntries().forEach(function (entry) {
+      if (entry.entryType !== "resource" || !core.hasMediaSignal(entry.name)) {
+        return;
+      }
+      const bytes = entry.transferSize || entry.encodedBodySize || 0;
+      if (bytes > 0) {
+        speed.windowBytes += bytes;
+        speed.sawBytes = true;
+      }
+    });
+  }
+
+  function installSpeedMeter() {
+    try {
+      if (typeof PerformanceObserver === "function") {
+        speedObserver = new PerformanceObserver(onSpeedEntries);
+        speedObserver.observe({ type: "resource", buffered: true });
+      }
+    } catch (_) {
+      // resource timing unavailable; the buffer-health fallback still works.
+    }
+    if (!speedTimer && typeof setInterval === "function") {
+      speedTimer = setInterval(tickSpeed, SPEED_TICK_MS);
+    }
+  }
+
+  function tickSpeed() {
+    // True throughput = bytes that finished in the last tick / tick length.
+    const mbps = core.throughputMbps(speed.windowBytes, SPEED_TICK_MS);
+    speed.windowBytes = 0;
+    speed.currentMbps = mbps;
+    if (mbps > speed.peakMbps) {
+      speed.peakMbps = mbps;
+    }
+    speed.mbpsSeries.push(mbps);
+    if (speed.mbpsSeries.length > SPEED_SAMPLES) {
+      speed.mbpsSeries.shift();
+    }
+
+    let playing = false;
+    try {
+      if (watchedVideo) {
+        if (watchedVideo.buffered && watchedVideo.buffered.length) {
+          const end = watchedVideo.buffered.end(watchedVideo.buffered.length - 1);
+          speed.bufferSec = Math.max(0, end - watchedVideo.currentTime);
+        }
+        playing = !watchedVideo.paused && !watchedVideo.ended &&
+          watchedVideo.currentTime !== speed.lastTime;
+        speed.lastTime = watchedVideo.currentTime;
+      }
+    } catch (_) {}
+    speed.bufSeries.push(speed.bufferSec);
+    if (speed.bufSeries.length > SPEED_SAMPLES) {
+      speed.bufSeries.shift();
+    }
+
+    // If playback is clearly advancing but the CDN never exposes byte sizes
+    // (opaque cross-origin), fall back to visualizing buffer health instead.
+    if (playing) {
+      speed.activeTicks += 1;
+    }
+    if (speed.mode === "speed" && !speed.sawBytes && speed.activeTicks >= 6) {
+      speed.mode = "buffer";
+    }
+
+    if (panelIsOpen()) {
+      drawSpeed();
+      updateSpeedReadouts();
+    }
+  }
+
+  function speedSeries() {
+    return speed.mode === "buffer" ? speed.bufSeries : speed.mbpsSeries;
+  }
+
+  function drawSpeed() {
+    const shadow = getShadow();
+    const canvas = shadow && shadow.getElementById("ba-spd-canvas");
+    if (!canvas || typeof canvas.getContext !== "function") {
+      return;
+    }
+    const series = speedSeries();
+    const dpr = root.devicePixelRatio || 1;
+    const w = canvas.clientWidth || 296;
+    const h = canvas.clientHeight || 46;
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+    const ctx = canvas.getContext("2d");
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, w, h);
+    if (!series.length) {
+      return;
+    }
+    const floor = speed.mode === "buffer" ? 30 : 1;
+    let max = floor;
+    for (let i = 0; i < series.length; i += 1) {
+      if (series[i] > max) {
+        max = series[i];
+      }
+    }
+    const step = w / (SPEED_SAMPLES - 1);
+    const offset = SPEED_SAMPLES - series.length;
+    const yFor = function (v) { return h - (v / max) * (h - 6) - 3; };
+    ctx.beginPath();
+    for (let i = 0; i < series.length; i += 1) {
+      const x = (offset + i) * step;
+      const y = yFor(series[i]);
+      if (i === 0) {
+        ctx.moveTo(x, y);
+      } else {
+        ctx.lineTo(x, y);
+      }
+    }
+    ctx.lineWidth = 1.6;
+    ctx.strokeStyle = "#00aeec";
+    ctx.lineJoin = "round";
+    ctx.stroke();
+    ctx.lineTo((offset + series.length - 1) * step, h);
+    ctx.lineTo(offset * step, h);
+    ctx.closePath();
+    ctx.fillStyle = "rgba(0,174,236,0.12)";
+    ctx.fill();
+  }
+
+  function updateSpeedReadouts() {
+    const shadow = getShadow();
+    if (!shadow) {
+      return;
+    }
+    const card = shadow.getElementById("ba-speed");
+    const label = shadow.getElementById("ba-spd-label");
+    const value = shadow.getElementById("ba-spd-now");
+    const unit = shadow.getElementById("ba-spd-unit");
+    const foot = shadow.getElementById("ba-spd-foot");
+    if (!card) {
+      return;
+    }
+    const series = speedSeries();
+    const empty = series.length === 0 || (!speed.sawBytes && speed.mode === "speed");
+    card.className = empty ? "ba-speed empty" : "ba-speed";
+    if (label) {
+      label.textContent = t(speed.mode === "buffer" ? "bufTitle" : "spdTitle");
+    }
+    if (unit) {
+      unit.textContent = speed.mode === "buffer" ? t("bufUnit") : t("spdUnit");
+    }
+    if (value) {
+      value.textContent = speed.mode === "buffer"
+        ? String(Math.round(speed.bufferSec))
+        : speed.currentMbps.toFixed(1);
+    }
+    if (foot) {
+      foot.textContent = speed.mode === "buffer"
+        ? t("spdBuffering")
+        : t("spdPeak") + " " + speed.peakMbps.toFixed(1) + " " + t("spdUnit");
+    }
+  }
+
   // ---- immersive badge handling ------------------------------------------
 
   function setBadgeHidden(hidden) {
@@ -743,6 +921,13 @@
         smooth: ["Playing smoothly", "Connected to the fastest server near you."]
       },
       count: function (n) { return n + " slow connection" + (n === 1 ? "" : "s") + " fixed"; },
+      spdTitle: "Download speed",
+      spdUnit: "Mbps",
+      spdPeak: "peak",
+      spdBuffering: "seconds buffered ahead",
+      bufTitle: "Buffer ahead",
+      bufUnit: "s",
+      spdWaiting: "Waiting for playback…",
       masterTitle: "Acceleration",
       masterNote: "Speed up slow videos automatically.",
       boost: "Still buffering? Boost harder",
@@ -769,6 +954,13 @@
         smooth: ["播放流畅", "已连接到离你最近的最快服务器。"]
       },
       count: function (n) { return "已修复 " + n + " 个慢连接"; },
+      spdTitle: "下载速度",
+      spdUnit: "Mbps",
+      spdPeak: "峰值",
+      spdBuffering: "已缓冲秒数",
+      bufTitle: "缓冲时长",
+      bufUnit: "秒",
+      spdWaiting: "等待播放…",
       masterTitle: "加速",
       masterNote: "自动为慢视频提速。",
       boost: "还在卡？再加把劲",
@@ -819,6 +1011,7 @@
     const adv = shadow.querySelector(".ba-adv");
     setAdvToggleLabel(adv && adv.classList.contains("open"));
     updateLangButtons();
+    updateSpeedReadouts();
     renderStatus();
   }
 
@@ -985,6 +1178,16 @@
       ".ba-word{font-size:15px;font-weight:800;color:#1b2733}",
       ".ba-subnote{font-size:11px;color:#6b7785;margin-top:2px;line-height:1.4}",
       ".ba-count{font-size:11px;color:#8a95a1;margin-top:6px}",
+      ".ba-speed{margin:0 0 10px;padding:10px 12px;border:1px solid #e5eaf0;border-radius:10px;background:#fff}",
+      ".ba-speed-top{display:flex;align-items:baseline;justify-content:space-between;gap:8px}",
+      ".ba-speed-label{font-size:12px;font-weight:700;color:#46515c}",
+      ".ba-speed-val{font-size:11px;color:#8a95a1;white-space:nowrap}",
+      ".ba-speed-val b{font-size:17px;color:#00aeec;font-weight:800;margin-right:3px}",
+      ".ba-spd-canvas{display:block;width:100%;height:46px;margin-top:6px}",
+      ".ba-spd-foot{font-size:10px;color:#8a95a1;margin-top:4px}",
+      ".ba-spd-empty{display:none;font-size:11px;color:#8a95a1;padding:8px 0 4px;text-align:center}",
+      ".ba-speed.empty .ba-spd-canvas,.ba-speed.empty .ba-spd-foot,.ba-speed.empty .ba-speed-val{display:none}",
+      ".ba-speed.empty .ba-spd-empty{display:block}",
       ".ba-switch-row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:8px 0;padding:10px 12px;border:1px solid #e5eaf0;border-radius:10px;background:#fff}",
       ".ba-switch-text{display:grid;gap:2px}",
       ".ba-switch-title{font-size:13px;font-weight:750;color:#202a33}",
@@ -1071,6 +1274,43 @@
     hero.appendChild(word);
     hero.appendChild(subnote);
     hero.appendChild(count);
+
+    // Live speed card
+    const speedCard = document.createElement("div");
+    speedCard.id = "ba-speed";
+    speedCard.className = "ba-speed empty";
+    const speedTop = document.createElement("div");
+    speedTop.className = "ba-speed-top";
+    const speedLabel = document.createElement("span");
+    speedLabel.className = "ba-speed-label";
+    speedLabel.id = "ba-spd-label";
+    speedLabel.textContent = t("spdTitle");
+    const speedVal = document.createElement("span");
+    speedVal.className = "ba-speed-val";
+    const speedNow = document.createElement("b");
+    speedNow.id = "ba-spd-now";
+    speedNow.textContent = "0.0";
+    const speedUnit = document.createElement("span");
+    speedUnit.id = "ba-spd-unit";
+    speedUnit.textContent = t("spdUnit");
+    speedVal.appendChild(speedNow);
+    speedVal.appendChild(speedUnit);
+    speedTop.appendChild(speedLabel);
+    speedTop.appendChild(speedVal);
+    const speedCanvas = document.createElement("canvas");
+    speedCanvas.id = "ba-spd-canvas";
+    speedCanvas.className = "ba-spd-canvas";
+    const speedFoot = document.createElement("div");
+    speedFoot.className = "ba-spd-foot";
+    speedFoot.id = "ba-spd-foot";
+    const speedEmpty = document.createElement("div");
+    speedEmpty.className = "ba-spd-empty";
+    speedEmpty.dataset.i18n = "spdWaiting";
+    speedEmpty.textContent = t("spdWaiting");
+    speedCard.appendChild(speedTop);
+    speedCard.appendChild(speedCanvas);
+    speedCard.appendChild(speedFoot);
+    speedCard.appendChild(speedEmpty);
 
     // Master switch
     const master = createSwitchRow("masterTitle", "masterNote",
@@ -1218,6 +1458,7 @@
     body.className = "ba-body";
     body.appendChild(head);
     body.appendChild(hero);
+    body.appendChild(speedCard);
     body.appendChild(master);
     body.appendChild(boost);
     body.appendChild(adv);
@@ -1238,6 +1479,10 @@
     toggle.addEventListener("click", function () {
       panel.classList.toggle("open");
       renderStatus();
+      if (panel.classList.contains("open")) {
+        drawSpeed();
+        updateSpeedReadouts();
+      }
       if (!immersive) {
         return;
       }
@@ -1308,6 +1553,7 @@
   function bootstrapUi() {
     installUi();
     installImmersiveWatch();
+    installSpeedMeter();
   }
 
   if (document.readyState === "loading") {
