@@ -75,6 +75,6 @@ test("public API exposes diagnostics and config control", () => {
   const cfg = sandbox.BiliAccelerator.setConfig({ p2pGuard: true });
   assert.equal(cfg.p2pGuard, true);
   const diag = sandbox.BiliAccelerator.getDiagnostics();
-  assert.equal(diag.version, "0.2.0");
+  assert.equal(diag.version, "0.2.1");
   assert.ok(diag.counters && typeof diag.counters.rewrites === "number");
 });
