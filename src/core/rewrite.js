@@ -366,6 +366,17 @@
     return throughputMbps(bytes, unionDurationMs(intervals));
   }
 
+  // Bare host[:port] of a URL, for diagnostics that must never carry the query
+  // string — segment URLs pack the viewer's mid, buvid, IP-derived oi and signed
+  // access tokens there, and the report is meant to be shared. "" on failure.
+  function hostOf(value) {
+    try {
+      return new URL(String(value)).host;
+    } catch (_) {
+      return "";
+    }
+  }
+
   // Pure ranking of probed hosts. samples: [{host, ttfb:number|null, ok:bool}].
   // Healthy hosts first (lowest TTFB wins); failures sink to the bottom.
   function rankHosts(samples) {
@@ -455,6 +466,7 @@
     throughputMbps,
     unionDurationMs,
     aggregateThroughput,
+    hostOf,
     rankHosts,
     rewriteJsonText,
     rewriteObject,

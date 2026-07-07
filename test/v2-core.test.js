@@ -143,6 +143,19 @@ test("aggregateThroughput prorates a transfer straddling the window edge", () =>
   assert.equal(core.aggregateThroughput(straddling, 3100, 100), 80);
 });
 
+test("hostOf returns bare host[:port] and drops the query string", () => {
+  assert.equal(
+    core.hostOf("https://upos-sz-mirrorcos.bilivideo.com/x.m4s?mid=1&buvid=SECRET&upsig=tok"),
+    "upos-sz-mirrorcos.bilivideo.com"
+  );
+  // keeps a non-default port (useful PCDN signal), still no query
+  assert.equal(
+    core.hostOf("https://node-7.edge.mountaintoys.cn:4830/upgcxcode/v.m4s?os=mcdn&oi=123"),
+    "node-7.edge.mountaintoys.cn:4830"
+  );
+  assert.equal(core.hostOf("not a url"), "");
+});
+
 test("rankHosts orders healthy hosts by TTFB and sinks failures", () => {
   const ranked = core.rankHosts([
     { host: "slow.bilivideo.com", ttfb: 800, ok: true },
