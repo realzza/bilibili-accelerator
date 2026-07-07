@@ -107,6 +107,42 @@ test("throughputMbps converts bytes over a window to megabits per second", () =>
   assert.equal(core.throughputMbps(1000, 0), 0);
 });
 
+test("unionDurationMs merges overlapping intervals", () => {
+  // two back-to-back non-overlapping intervals: 100 + 100 = 200
+  assert.equal(core.unionDurationMs([[0, 100], [200, 300]]), 200);
+  // fully overlapping parallel transfers count their shared time once
+  assert.equal(core.unionDurationMs([[0, 100], [0, 100]]), 100);
+  // partial overlap merges into a single span
+  assert.equal(core.unionDurationMs([[0, 100], [50, 150]]), 150);
+  assert.equal(core.unionDurationMs([]), 0);
+});
+
+test("aggregateThroughput measures active rate, not wall-clock", () => {
+  // 1,000,000 bytes downloaded in a 100ms burst, then idle. Over a 3s window
+  // this is the burst's real rate (80 Mbps), NOT smeared to ~2.7 Mbps.
+  const burst = [{ start: 0, end: 100, bytes: 1e6 }];
+  assert.equal(core.aggregateThroughput(burst, 3000, 3000), 80);
+
+  // Parallel video+audio segments over the same 100ms move a combined
+  // 1,000,000 bytes: union active time is 100ms, so the link reads 80 Mbps.
+  const parallel = [
+    { start: 0, end: 100, bytes: 6e5 },
+    { start: 0, end: 100, bytes: 4e5 }
+  ];
+  assert.equal(core.aggregateThroughput(parallel, 3000, 3000), 80);
+
+  // No transfers in the window ⇒ 0 (the idle-hold lives in the page layer).
+  assert.equal(core.aggregateThroughput([{ start: 0, end: 100, bytes: 1e6 }], 5000, 3000), 0);
+});
+
+test("aggregateThroughput prorates a transfer straddling the window edge", () => {
+  // A 200ms transfer of 2,000,000 bytes (2900→3100ms) with a 100ms window
+  // (3000→3100): only the last half is inside, so half the bytes over 100ms of
+  // active time = 80 Mbps.
+  const straddling = [{ start: 2900, end: 3100, bytes: 2e6 }];
+  assert.equal(core.aggregateThroughput(straddling, 3100, 100), 80);
+});
+
 test("rankHosts orders healthy hosts by TTFB and sinks failures", () => {
   const ranked = core.rankHosts([
     { host: "slow.bilivideo.com", ttfb: 800, ok: true },
