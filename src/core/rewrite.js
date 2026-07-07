@@ -309,6 +309,63 @@
     return (bytes * 8 / 1e6) / (durationMs / 1000);
   }
 
+  // Total length of a set of [start, end] intervals with overlaps merged, so
+  // two segments downloaded in parallel count their shared time only once.
+  function unionDurationMs(intervals) {
+    if (!intervals || !intervals.length) {
+      return 0;
+    }
+    const sorted = intervals.slice().sort(function byStart(a, b) {
+      return a[0] - b[0];
+    });
+    let total = 0;
+    let curStart = sorted[0][0];
+    let curEnd = sorted[0][1];
+    for (let i = 1; i < sorted.length; i += 1) {
+      const s = sorted[i][0];
+      const e = sorted[i][1];
+      if (s > curEnd) {
+        total += curEnd - curStart;
+        curStart = s;
+        curEnd = e;
+      } else if (e > curEnd) {
+        curEnd = e;
+      }
+    }
+    total += curEnd - curStart;
+    return total;
+  }
+
+  // Aggregate "active" throughput: bytes moved per second of time actually spent
+  // transferring, measured over the trailing `windowMs`. Unlike dividing by
+  // wall-clock, idle gaps between the player's burst downloads don't drag the
+  // rate to zero — this reflects the link's real capacity. Bytes from transfers
+  // straddling the window edge are prorated to the in-window fraction, and the
+  // active time is the union of all transfer intervals (parallel video+audio
+  // segments count their overlap once). transfers: [{ start, end, bytes }] in ms.
+  function aggregateThroughput(transfers, now, windowMs) {
+    if (!transfers || !transfers.length || !(windowMs > 0)) {
+      return 0;
+    }
+    const windowStart = now - windowMs;
+    let bytes = 0;
+    const intervals = [];
+    for (let i = 0; i < transfers.length; i += 1) {
+      const tr = transfers[i];
+      if (!tr || !(tr.bytes > 0) || !(tr.end > tr.start)) {
+        continue;
+      }
+      const s = Math.max(tr.start, windowStart);
+      const e = Math.min(tr.end, now);
+      if (e <= s) {
+        continue;
+      }
+      bytes += tr.bytes * ((e - s) / (tr.end - tr.start));
+      intervals.push([s, e]);
+    }
+    return throughputMbps(bytes, unionDurationMs(intervals));
+  }
+
   // Pure ranking of probed hosts. samples: [{host, ttfb:number|null, ok:bool}].
   // Healthy hosts first (lowest TTFB wins); failures sink to the bottom.
   function rankHosts(samples) {
@@ -396,6 +453,8 @@
     selectTarget,
     alternativesFor,
     throughputMbps,
+    unionDurationMs,
+    aggregateThroughput,
     rankHosts,
     rewriteJsonText,
     rewriteObject,

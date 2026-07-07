@@ -385,11 +385,13 @@
         (meta.url.includes("playurl") || meta.url.includes("/x/player") ||
           meta.url.includes("/pgc/player") || isMedia);
 
-      // Count downloaded bytes for media segments (free via loadend.loaded).
+      // Count downloaded bytes for media segments (free via loadend.loaded) and
+      // time send→loadend as the transfer duration for the throughput window.
       if (config.enabled && isMedia) {
+        const startTs = nowMs();
         xhr.addEventListener("loadend", function onLoadEnd(event) {
           if (event && typeof event.loaded === "number") {
-            addBytes(event.loaded);
+            recordTransfer(startTs, nowMs(), event.loaded);
           }
         });
       }
@@ -631,7 +633,7 @@
 
   function buildDiagnostics() {
     return {
-      version: "0.2.1",
+      version: "0.2.2",
       installedAt: state.installedAt,
       region: regionKey(),
       config,
@@ -652,12 +654,16 @@
 
   const SPEED_SAMPLES = 60;       // ~60s of history at 1s resolution
   const SPEED_TICK_MS = 1000;
+  const SPEED_WINDOW_MS = 3000;   // trailing window for active-throughput math
+  const MIN_TRANSFER_MS = 8;      // ignore sub-8ms reads (cache hits) as rate noise
   const speed = {
     mode: "speed",                // "speed" (Mbps) | "buffer" (seconds ahead)
     mbpsSeries: [],
     bufSeries: [],
-    windowBytes: 0,               // bytes finished within the current tick
-    currentMbps: 0,
+    transfers: [],                // recent { start, end, bytes } media transfers
+    currentMbps: 0,               // displayed (eased) rate — mirrors dispMbps
+    dispMbps: 0,                  // eased value driving the curve + big readout
+    avgMbps: 0,                   // slow average, used as the idle anchor
     peakMbps: 0,
     bufferSec: 0,
     dispMax: 0,                   // eased y-axis maximum (smooth rescaling)
@@ -667,27 +673,40 @@
   };
   let speedTimer = null;
 
-  // Bytes are measured at the fetch/XHR layer (see measureFetchBytes and the
-  // XHR loadend counter) rather than via Resource Timing, because Bilibili's
-  // media CDN omits Timing-Allow-Origin and would report 0 transferSize.
-  function addBytes(n) {
-    if (n > 0) {
-      speed.windowBytes += n;
-      speed.sawBytes = true;
+  function nowMs() {
+    return (root.performance && root.performance.now) ? root.performance.now() : Date.now();
+  }
+
+  // Record one completed media transfer for the active-throughput window. Bytes
+  // are measured at the fetch/XHR layer (see measureFetchBytes and the XHR
+  // loadend counter) rather than via Resource Timing, because Bilibili's media
+  // CDN omits Timing-Allow-Origin and would report 0 transferSize.
+  function recordTransfer(start, end, bytes) {
+    if (!(bytes > 0)) {
+      return;
+    }
+    speed.sawBytes = true;
+    // Near-instant reads are cache hits, not the network — counting them would
+    // spike the rate to absurd values, so only their "bytes seen" flag matters.
+    if (end - start >= MIN_TRANSFER_MS) {
+      speed.transfers.push({ start: start, end: end, bytes: bytes });
     }
   }
 
   // Count a media response's bytes by reading a clone — the player still gets
   // the original response untouched, and cloning tees the stream (no re-download).
+  // The clone drains as fast as the network delivers, so start→arrayBuffer is a
+  // clean transfer-duration proxy that excludes idle time between segments.
   function measureFetchBytes(response) {
+    const start = nowMs();
     try {
       response.clone().arrayBuffer().then(function (buf) {
-        addBytes(buf && buf.byteLength);
+        recordTransfer(start, nowMs(), buf && buf.byteLength);
       }).catch(function () {});
     } catch (_) {
       const cl = response.headers && response.headers.get("content-length");
-      if (cl) {
-        addBytes(parseInt(cl, 10) || 0);
+      if (cl && parseInt(cl, 10) > 0) {
+        speed.sawBytes = true;
       }
     }
   }
@@ -699,17 +718,14 @@
   }
 
   function tickSpeed() {
-    // True throughput = bytes that finished in the last tick / tick length.
-    const mbps = core.throughputMbps(speed.windowBytes, SPEED_TICK_MS);
-    speed.windowBytes = 0;
-    speed.currentMbps = mbps;
-    if (mbps > speed.peakMbps) {
-      speed.peakMbps = mbps;
-    }
-    speed.mbpsSeries.push(mbps);
-    if (speed.mbpsSeries.length > SPEED_SAMPLES) {
-      speed.mbpsSeries.shift();
-    }
+    const now = nowMs();
+    // Active throughput: bytes per second of time actually spent transferring in
+    // the trailing window, so the player's idle gaps between burst downloads
+    // don't drag a fast link to zero.
+    const sample = core.aggregateThroughput(speed.transfers, now, SPEED_WINDOW_MS);
+    speed.transfers = speed.transfers.filter(function keep(tr) {
+      return tr.end > now - SPEED_WINDOW_MS;
+    });
 
     let playing = false;
     try {
@@ -723,6 +739,36 @@
         speed.lastTime = watchedVideo.currentTime;
       }
     } catch (_) {}
+
+    if (sample > 0) {
+      // Downloading: ease up toward the measured rate and keep a slow average
+      // as the anchor to hold at once the burst ends.
+      speed.avgMbps = speed.avgMbps > 0
+        ? speed.avgMbps + (sample - speed.avgMbps) * 0.25
+        : sample;
+      speed.dispMbps += (sample - speed.dispMbps) * 0.45;
+      if (sample > speed.peakMbps) {
+        speed.peakMbps = sample;
+      }
+    } else if (playing) {
+      // Buffer full, nothing in flight: the link is idle, not slow — drift
+      // gently toward the recent average instead of dropping to 0.
+      speed.dispMbps += (speed.avgMbps - speed.dispMbps) * 0.05;
+    } else {
+      // Genuinely idle (paused/ended): relax the reading toward 0.
+      speed.dispMbps *= 0.8;
+      speed.avgMbps *= 0.8;
+    }
+    if (speed.dispMbps < 0.05) {
+      speed.dispMbps = 0;
+    }
+    speed.currentMbps = speed.dispMbps;
+
+    speed.mbpsSeries.push(speed.dispMbps);
+    if (speed.mbpsSeries.length > SPEED_SAMPLES) {
+      speed.mbpsSeries.shift();
+    }
+
     speed.bufSeries.push(speed.bufferSec);
     if (speed.bufSeries.length > SPEED_SAMPLES) {
       speed.bufSeries.shift();
@@ -854,12 +900,14 @@
 
     const padTop = 5;
     const padBottom = 2;
-    const step = w / (SPEED_SAMPLES - 1);
-    const offset = SPEED_SAMPLES - series.length;
+    // Elastic x-axis: while the series is still filling, stretch it across the
+    // full width so the curve looks alive from the first seconds; once it caps
+    // at SPEED_SAMPLES the step stabilizes and the window simply slides.
+    const step = w / Math.max(1, series.length - 1);
     const xs = [];
     const ys = [];
     for (let i = 0; i < series.length; i += 1) {
-      xs.push((offset + i) * step);
+      xs.push(i * step);
       ys.push(h - padBottom - (series[i] / max) * (h - padTop - padBottom));
     }
     const tan = series.length >= 2 ? monotoneTangents(xs, ys) : [0];
