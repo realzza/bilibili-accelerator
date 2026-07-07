@@ -366,6 +366,17 @@
     return throughputMbps(bytes, unionDurationMs(intervals));
   }
 
+  // Bare host[:port] of a URL, for diagnostics that must never carry the query
+  // string — segment URLs pack the viewer's mid, buvid, IP-derived oi and signed
+  // access tokens there, and the report is meant to be shared. "" on failure.
+  function hostOf(value) {
+    try {
+      return new URL(String(value)).host;
+    } catch (_) {
+      return "";
+    }
+  }
+
   // Pure ranking of probed hosts. samples: [{host, ttfb:number|null, ok:bool}].
   // Healthy hosts first (lowest TTFB wins); failures sink to the bottom.
   function rankHosts(samples) {
@@ -455,6 +466,7 @@
     throughputMbps,
     unionDurationMs,
     aggregateThroughput,
+    hostOf,
     rankHosts,
     rewriteJsonText,
     rewriteObject,
@@ -589,13 +601,16 @@
     state.lastSource = source;
     state.rewriteCount += rewrites.length;
     state.rewrites = state.rewrites.concat(rewrites.map(function mapRewrite(item) {
+      // Keep only bare host + reason — never the full media URL. Segment URLs
+      // carry the viewer's mid, buvid, IP-derived oi and signed tokens, and the
+      // diagnostics report is built to be pasted into public issues. Redacting
+      // here (not just at display) means those tokens never persist in memory.
       return {
         at: new Date().toISOString(),
         source,
         reason: item.reason,
-        targetHost: item.targetHost,
-        from: item.original,
-        to: item.url
+        fromHost: core.hostOf(item.original),
+        toHost: core.hostOf(item.url)
       };
     })).slice(-50);
     if (state.status === "idle") {
@@ -1100,7 +1115,7 @@
     return {
       version: "0.2.2",
       installedAt: state.installedAt,
-      region: regionKey(),
+      region: regionKey().split("|")[0],   // timezone only — drop locale
       config,
       status: state.status,
       counters: {

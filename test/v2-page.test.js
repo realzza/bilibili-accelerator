@@ -70,6 +70,32 @@ test("advanced toggle is pinned as the panel footer (stays under cursor)", () =>
   assert.ok(toggleIdx > bodyIdx, "advToggle is the bottom-most element");
 });
 
+test("diagnostics redacts media URLs to bare hosts (no tokens leak)", () => {
+  const sandbox = loadPage();
+  // A PCDN payload whose URL carries account/device/token params. Parsing it
+  // triggers the rewrite + record() path.
+  sandbox.JSON.parse(JSON.stringify({
+    data: { dash: { video: [{
+      baseUrl: "https://node-7.edge.mountaintoys.cn:4830/upgcxcode/v.m4s?os=mcdn&mid=404508679&buvid=SECRETDEVICE&upsig=TOKEN",
+      backupUrl: []
+    }] } }
+  }));
+  const diag = sandbox.BiliAccelerator.getDiagnostics();
+  assert.ok(diag.recentRewrites.length > 0, "records the rewrite");
+  const entry = diag.recentRewrites[0];
+  assert.ok(entry.fromHost, "keeps a source host");
+  assert.ok(entry.toHost, "keeps a target host");
+  assert.equal(entry.from, undefined, "no raw from URL");
+  assert.equal(entry.to, undefined, "no raw to URL");
+  // The whole shared blob must not carry account/device/token material.
+  const blob = JSON.stringify(diag);
+  ["mid=404508679", "SECRETDEVICE", "buvid", "upsig", "TOKEN", "?"].forEach((needle) => {
+    assert.ok(blob.indexOf(needle) === -1, `report leaks "${needle}"`);
+  });
+  // region is trimmed to a bare timezone (no locale).
+  assert.ok(diag.region.indexOf("|") === -1, "region drops locale");
+});
+
 test("public API exposes diagnostics and config control", () => {
   const sandbox = loadPage();
   const cfg = sandbox.BiliAccelerator.setConfig({ p2pGuard: true });
