@@ -7,6 +7,7 @@
   }
   root.__BILI_ACCELERATOR_INSTALLED__ = true;
 
+  const VERSION = "0.2.3";
   const STORAGE_KEY = "biliAccelerator.config.v2";
   const LEGACY_KEY = "biliAccelerator.config.v1";
   const RANK_PREFIX = "biliAccelerator.rank.";
@@ -18,6 +19,8 @@
   const REVEAL_HOTZONE = 150;
   const REVEAL_TIMEOUT = 2600;
   const STALL_GRACE_MS = 2500;
+  const STALL_RETRY_MS = 5000;
+  const PROBE_TIMEOUT_MS = 4000;
 
   const nativeJsonParse = JSON.parse;
   const nativeFetch = root.fetch;
@@ -37,6 +40,7 @@
     rewrites: [],
     rewriteCount: 0,
     lastSource: "",
+    lastMediaHost: null,
     status: "idle",
     stalls: 0,
     recoveries: 0,
@@ -175,16 +179,50 @@
     return null;
   }
 
-  // Add host-swapped alternatives to DASH entries so Bilibili's own backupUrl
-  // failover can recover for free if the primary host stalls.
+  function backupPool() {
+    return state.ranking.length ? state.ranking : config.candidatePool;
+  }
+
+  // Merge host-swapped alternatives of `base` into entry[key], deduped, max 8.
+  function mergeBackups(entry, key, base) {
+    const alts = core.alternativesFor(base, config, backupPool());
+    if (!alts.length) {
+      return;
+    }
+    const existing = Array.isArray(entry[key]) ? entry[key] : [];
+    const merged = alts.concat(existing).filter(function uniq(u, i, arr) {
+      return arr.indexOf(u) === i;
+    });
+    entry[key] = merged.slice(0, 8);
+  }
+
+  // Add host-swapped alternatives to DASH/durl entries so Bilibili's own
+  // backup-URL failover can recover for free if the primary host stalls.
+  // Payload shapes: data.dash (web player), result.video_info.dash (bangumi),
+  // result.dash, bare dash; durl carries the legacy FLV/MP4 lists. Web-API DASH
+  // uses camelCase (baseUrl/backupUrl); app-style payloads and durl use
+  // snake_case (base_url/backup_url).
   function enrichBackups(payload) {
     if (config.selection !== "auto" || !payload || typeof payload !== "object") {
       return;
     }
-    const dash = (payload.data && payload.data.dash) ||
-      (payload.result && payload.result.dash) ||
-      payload.dash;
-    if (!dash) {
+    const containers = [
+      payload.data,
+      payload.result,
+      payload.result && payload.result.video_info,
+      payload
+    ];
+    containers.forEach(function eachContainer(container) {
+      if (!container || typeof container !== "object") {
+        return;
+      }
+      enrichDash(container.dash);
+      enrichDurl(container.durl);
+    });
+  }
+
+  function enrichDash(dash) {
+    if (!dash || typeof dash !== "object") {
       return;
     }
     ["video", "audio"].forEach(function eachKind(kind) {
@@ -193,19 +231,27 @@
         return;
       }
       list.forEach(function eachEntry(entry) {
-        if (!entry || typeof entry.baseUrl !== "string") {
+        if (!entry) {
           return;
         }
-        const alts = core.alternativesFor(entry.baseUrl, config, state.ranking.length ? state.ranking : config.candidatePool);
-        if (!alts.length) {
-          return;
+        if (typeof entry.baseUrl === "string") {
+          mergeBackups(entry, "backupUrl", entry.baseUrl);
         }
-        const existing = Array.isArray(entry.backupUrl) ? entry.backupUrl : [];
-        const merged = alts.concat(existing).filter(function uniq(u, i, arr) {
-          return arr.indexOf(u) === i;
-        });
-        entry.backupUrl = merged.slice(0, 8);
+        if (typeof entry.base_url === "string") {
+          mergeBackups(entry, "backup_url", entry.base_url);
+        }
       });
+    });
+  }
+
+  function enrichDurl(durl) {
+    if (!Array.isArray(durl)) {
+      return;
+    }
+    durl.forEach(function eachEntry(entry) {
+      if (entry && typeof entry.url === "string") {
+        mergeBackups(entry, "backup_url", entry.url);
+      }
     });
   }
 
@@ -215,11 +261,25 @@
       const rewritten = core.rewriteObject(payload, config, tracker);
       enrichBackups(rewritten);
       record(tracker.rewrites, source);
+      filterLivePcdn(rewritten, source);
       rememberSample(rewritten);
       return rewritten;
     } catch (error) {
       console.warn("[BiliAccelerator] rewrite failed", error);
       return payload;
+    }
+  }
+
+  // Live playurl payloads list candidate hosts (url_info) instead of full URLs;
+  // drop the PCDN/MCDN entries so the live player only ever dials official CDN.
+  function filterLivePcdn(payload, source) {
+    try {
+      const filtered = core.filterLiveUrlInfo(payload, config);
+      if (filtered.changed) {
+        record(filtered.rewrites, source);
+      }
+    } catch (_) {
+      // never let live filtering break payload delivery.
     }
   }
 
@@ -252,6 +312,13 @@
         ? Object.assign({}, config, { mode: "force" })
         : config;
       const detail = core.rewriteUrlDetail(rawUrl, cfg);
+      // Track which host actually serves the media: the <video> element only
+      // exposes a blob: URL under MSE, so this is what stall recovery must avoid.
+      try {
+        state.lastMediaHost = detail.changed
+          ? new URL(detail.url).hostname
+          : (host || state.lastMediaHost);
+      } catch (_) {}
       if (detail.changed) {
         record([detail], "segment");
         return detail.url;
@@ -265,11 +332,12 @@
   // ---- interception -------------------------------------------------------
 
   function isInterestingFetch(input) {
-    const url = typeof input === "string" ? input : input && input.url;
+    const url = requestUrlOf(input);
     return typeof url === "string" &&
       (url.includes("/x/player") ||
         url.includes("/pgc/player") ||
         url.includes("playurl") ||
+        url.includes("getRoomPlayInfo") ||
         url.includes("bilivideo"));
   }
 
@@ -287,8 +355,11 @@
     if (typeof input === "string") {
       return input;
     }
+    if (input && typeof input.href === "string") {
+      return input.href; // URL instance
+    }
     if (input && typeof input.url === "string") {
-      return input.url;
+      return input.url; // Request instance
     }
     return null;
   }
@@ -304,7 +375,11 @@
       if (config.enabled && isMedia) {
         const swapped = rewriteRequestUrl(reqUrl);
         if (swapped !== reqUrl) {
-          input = typeof input === "string" ? swapped : new Request(swapped, input);
+          // string and URL inputs can be replaced by the string directly; only a
+          // Request needs to be rebuilt to preserve its init options.
+          input = (typeof input === "string" || typeof input.href === "string")
+            ? swapped
+            : new Request(swapped, input);
           args = [input, init];
         }
       }
@@ -334,18 +409,21 @@
           }
           let parsed;
           const tracker = { changed: false, rewrites: [] };
+          let live = { changed: false, rewrites: [] };
           try {
             parsed = nativeJsonParse(text);
             core.rewriteObject(parsed, config, tracker);
             enrichBackups(parsed);
+            live = core.filterLiveUrlInfo(parsed, config);
           } catch (_) {
             return response;
           }
-          if (!tracker.changed) {
+          if (!tracker.changed && !live.changed) {
             rememberSample(parsed);
             return response;
           }
           record(tracker.rewrites, "fetch");
+          record(live.rewrites, "fetch");
           rememberSample(parsed);
           const headers = new Headers(response.headers);
           headers.delete("content-length");
@@ -372,10 +450,13 @@
     const send = NativeXHR.prototype.send;
 
     NativeXHR.prototype.open = function patchedOpen(method, url) {
-      this.__baAccel = { url: typeof url === "string" ? url : "" };
+      const urlStr = typeof url === "string"
+        ? url
+        : (url && typeof url.href === "string" ? url.href : "");
+      this.__baAccel = { url: urlStr };
       let finalUrl = url;
-      if (config.enabled && typeof url === "string" && core.hasMediaSignal(url)) {
-        finalUrl = rewriteRequestUrl(url);
+      if (config.enabled && urlStr && core.hasMediaSignal(urlStr)) {
+        finalUrl = rewriteRequestUrl(urlStr);
       }
       return open.apply(this, [method, finalUrl].concat([].slice.call(arguments, 2)));
     };
@@ -386,7 +467,8 @@
       const isMedia = typeof meta.url === "string" && core.hasMediaSignal(meta.url);
       const interesting = typeof meta.url === "string" &&
         (meta.url.includes("playurl") || meta.url.includes("/x/player") ||
-          meta.url.includes("/pgc/player") || isMedia);
+          meta.url.includes("/pgc/player") || meta.url.includes("getRoomPlayInfo") ||
+          isMedia);
 
       // Count downloaded bytes for media segments (free via loadend.loaded) and
       // time send→loadend as the transfer duration for the throughput window.
@@ -414,8 +496,9 @@
             const tracker = { changed: false, rewrites: [] };
             core.rewriteObject(parsed, config, tracker);
             enrichBackups(parsed);
+            const live = core.filterLiveUrlInfo(parsed, config);
             rememberSample(parsed);
-            if (!tracker.changed) {
+            if (!tracker.changed && !live.changed) {
               return;
             }
             const rewrittenText = JSON.stringify(parsed);
@@ -433,6 +516,7 @@
               });
             } catch (_) {}
             record(tracker.rewrites, "xhr");
+            record(live.rewrites, "xhr");
           } catch (_) {
             // leave the original response intact on any failure.
           }
@@ -471,6 +555,22 @@
     if (!config.p2pGuard) {
       return;
     }
+    // Stub Bilibili's P2P SDK entry points so the player never boots the
+    // PCDN/seeder mesh (same surface MBGTEB neutralizes). Instances only need
+    // an `on` no-op to satisfy the player's wiring code.
+    function NoopSdk() {}
+    NoopSdk.prototype.on = function () {};
+    ["PCDNLoader", "BPP2PSDK", "SeederSDK"].forEach(function (name) {
+      try {
+        Object.defineProperty(root, name, {
+          configurable: false,
+          writable: false,
+          value: NoopSdk
+        });
+      } catch (_) {
+        // already defined and frozen; ignore.
+      }
+    });
     ["RTCPeerConnection", "webkitRTCPeerConnection", "mozRTCPeerConnection"].forEach(function (name) {
       try {
         const Blocked = function BlockedRTCPeerConnection() {
@@ -505,28 +605,55 @@
     }
   }
 
+  // TTFB-probe one candidate host by re-requesting the signed sample URL on it.
+  // Uses cors mode (the CDN sends ACAO for the player's own segment fetches) so
+  // the real status is visible — under no-cors a host that fast-fails with 403
+  // would look "healthy" and win the ranking. No Range header: it isn't
+  // no-cors/preflight-safe everywhere, and the body is aborted right after the
+  // headers arrive anyway, so only a few KB ever transfer.
   function probeHost(host, sampleUrl) {
     const url = swapHost(sampleUrl, host);
     if (!url) {
       return Promise.resolve({ host, ttfb: null, ok: false });
     }
-    const started = (root.performance && root.performance.now) ? root.performance.now() : Date.now();
-    const timeout = new Promise(function (resolve) {
-      setTimeout(function () { resolve({ host, ttfb: null, ok: false }); }, 4000);
-    });
-    const probe = nativeFetch(url, {
-      method: "GET",
-      headers: { Range: "bytes=0-1" },
-      mode: "no-cors",
-      cache: "no-store",
-      credentials: "omit"
-    }).then(function () {
-      const now = (root.performance && root.performance.now) ? root.performance.now() : Date.now();
-      return { host, ttfb: now - started, ok: true };
+    const started = nowMs();
+    const init = { method: "GET", mode: "cors", cache: "no-store", credentials: "omit" };
+    const controller = typeof AbortController === "function" ? new AbortController() : null;
+    let timer = null;
+    let settled = false;
+    if (controller) {
+      init.signal = controller.signal;
+      timer = setTimeout(function () { controller.abort(); }, PROBE_TIMEOUT_MS);
+    }
+    const probe = nativeFetch(url, init).then(function (response) {
+      const ttfb = nowMs() - started;
+      // Headers are in — stop the body download, we only wanted the timing.
+      try {
+        if (response.body && typeof response.body.cancel === "function") {
+          response.body.cancel();
+        }
+      } catch (_) {}
+      return { host, ttfb: response.ok ? ttfb : null, ok: !!response.ok };
     }).catch(function () {
       return { host, ttfb: null, ok: false };
+    }).then(function (result) {
+      settled = true;
+      if (timer) {
+        clearTimeout(timer);
+      }
+      return result;
     });
-    return Promise.race([probe, timeout]);
+    if (controller) {
+      return probe;
+    }
+    // No AbortController (very old engines): fall back to racing a timeout.
+    return Promise.race([probe, new Promise(function (resolve) {
+      setTimeout(function () {
+        if (!settled) {
+          resolve({ host, ttfb: null, ok: false });
+        }
+      }, PROBE_TIMEOUT_MS);
+    })]);
   }
 
   function scheduleProbe(sampleUrl) {
@@ -593,11 +720,18 @@
     if (watchedVideo.readyState >= 3) {
       return;
     }
-    state.stalls += 1;
+    // Count distinct stall episodes once; re-checks of the same episode below
+    // only add recovery rotations.
+    if (state.status !== "buffering") {
+      state.stalls += 1;
+    }
     state.status = "buffering";
     if (config.stallRecovery && config.selection === "auto") {
-      rotateTarget(currentVideoHost());
+      rotateTarget(state.lastMediaHost || currentVideoHost());
       state.recoveries += 1;
+      // Keep rotating while the stall persists — 'waiting' fires only once per
+      // episode, so without a re-check a single bad pick would strand playback.
+      stallTimer = setTimeout(handleStall, STALL_RETRY_MS);
     }
     renderStatus();
   }
@@ -636,7 +770,7 @@
 
   function buildDiagnostics() {
     return {
-      version: "0.2.2",
+      version: VERSION,
       installedAt: state.installedAt,
       region: regionKey().split("|")[0],   // timezone only — drop locale
       config,
@@ -729,6 +863,12 @@
     speed.transfers = speed.transfers.filter(function keep(tr) {
       return tr.end > now - SPEED_WINDOW_MS;
     });
+
+    // Background tabs get throttled timers anyway; skip the series/UI work and
+    // resume cleanly when the tab is visible again.
+    if (document.hidden) {
+      return;
+    }
 
     let playing = false;
     try {
@@ -1723,6 +1863,7 @@
   patchXHR();
   patchGlobalPlayInfo("__playinfo__");
   patchGlobalPlayInfo("__INITIAL_STATE__");
+  patchGlobalPlayInfo("__NEPTUNE_IS_MY_WAIFU__"); // live room initial state
   installP2PGuard();
   installConfigBridge();
 

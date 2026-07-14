@@ -2,7 +2,7 @@
 // @name         Bilibili Accelerator
 // @name:zh-CN   Bilibili Accelerator - B站海外播放加速
 // @namespace    https://github.com/realzza/bilibili-accelerator
-// @version      0.2.2
+// @version      0.2.3
 // @description  Rewrite slow Bilibili playback CDN URLs for smoother overseas playback.
 // @description:zh-CN 自动改写 B 站慢 CDN 播放地址，缓解海外用户看冷门视频时的卡顿。
 // @author       realzza
@@ -74,6 +74,35 @@
   const IP_RE = /^(?:\d{1,3}\.){3}\d{1,3}$/;
   const XY_MCDN_RE = /^xy(?:\d+x){3}\d+xy\.mcdn\.bilivideo\.(?:cn|com|net)$/i;
 
+  // P2P/PCDN families known from community research (Bilibili-Evolved, MBGTEB):
+  // szbdyd is the legacy scheduler, mountaintoys the 2025 rename, nexusedgeio and
+  // ahdohpiechei are where the upos-*302* redirect hosts land, and mirror14b is a
+  // mirror-named host that actually serves PCDN (its TLS cert is *.bilivideo.cn).
+  const KNOWN_P2P_SUFFIXES = Object.freeze([
+    ".szbdyd.com",
+    ".mountaintoys.cn",
+    ".nexusedgeio.com",
+    ".ahdohpiechei.com"
+  ]);
+  const KNOWN_P2P_HOSTS = Object.freeze([
+    "upos-sz-mirror14b.bilivideo.com"
+  ]);
+
+  function isKnownP2pHost(hostname) {
+    if (KNOWN_P2P_HOSTS.indexOf(hostname) !== -1) {
+      return true;
+    }
+    for (let i = 0; i < KNOWN_P2P_SUFFIXES.length; i += 1) {
+      if (hostname.length > KNOWN_P2P_SUFFIXES[i].length &&
+          hostname.indexOf(KNOWN_P2P_SUFFIXES[i]) === hostname.length - KNOWN_P2P_SUFFIXES[i].length) {
+        return true;
+      }
+    }
+    // upos-sz-302ppio / upos-sz-302kodo style hosts answer with an HTTP 302 to a
+    // residential P2P node; the "302" only ever appears in that first label.
+    return hostname.indexOf("upos-") === 0 && hostname.split(".")[0].indexOf("302") !== -1;
+  }
+
   // Forward-migrate any stored config (v1 or partial) onto the v2 defaults.
   function normalizeConfig(config) {
     const merged = Object.assign({}, DEFAULT_CONFIG, config || {});
@@ -98,6 +127,9 @@
       (value.includes("bilivideo") ||
         value.includes("akamaized.net") ||
         value.includes("szbdyd.com") ||
+        value.includes("mountaintoys") ||
+        value.includes("nexusedgeio") ||
+        value.includes("ahdohpiechei") ||
         value.includes("mcdn.bili") ||
         value.includes("os=mcdn") ||
         value.includes("/upgcxcode/") ||
@@ -110,7 +142,8 @@
     }
 
     try {
-      const url = new URL(value);
+      // Payloads occasionally carry protocol-relative URLs ("//host/path").
+      const url = new URL(value.slice(0, 2) === "//" ? "https:" + value : value);
       if (url.protocol !== "http:" && url.protocol !== "https:") {
         return null;
       }
@@ -124,6 +157,14 @@
     return MEDIA_PATH_RE.test(url.pathname + url.search) ||
       url.pathname.startsWith("/upgcxcode/") ||
       url.pathname.startsWith("/v1/resource/");
+  }
+
+  // Live streams (/live-bvc/ FLV & HLS) are served by a separate CDN tier — the
+  // VOD upos mirrors and the MCDN proxy cannot serve them, so a host swap or
+  // proxy wrap would hard-break live playback. Live PCDN is handled upstream by
+  // filtering the getRoomPlayInfo host list instead (see filterLiveUrlInfo).
+  function isLiveMediaUrl(url) {
+    return url.pathname.indexOf("/live-bvc/") !== -1;
   }
 
   function isMcdnHost(hostname) {
@@ -171,15 +212,16 @@
     const akamai = hostname.endsWith(".akamaized.net");
     const portPcdn = config.portHeuristic && hasNonDefaultPort(url);
     const queryMcdn = hasMcdnQuery(url);
+    const knownP2p = isKnownP2pHost(hostname);
 
-    const isPcdn = ipLike || xyMcdn || portPcdn || queryMcdn;
+    const isPcdn = ipLike || xyMcdn || portPcdn || queryMcdn || knownP2p;
 
     let kind = "unknown";
     if (schedulerSource !== null || hostname.endsWith(".szbdyd.com")) {
       kind = "scheduler";
     } else if (mcdn) {
       kind = "mcdn";
-    } else if (ipLike || xyMcdn || portPcdn || queryMcdn) {
+    } else if (isPcdn) {
       kind = "pcdn";
     } else if (akamai) {
       kind = "akamai";
@@ -250,6 +292,10 @@
       return { changed: false, original, url: original, reason: "ignored" };
     }
 
+    if (isLiveMediaUrl(url)) {
+      return { changed: false, original, url: original, reason: "live-skip" };
+    }
+
     const verdict = classify(url, config);
 
     if (verdict.schedulerSource) {
@@ -299,7 +345,7 @@
   function alternativesFor(value, rawConfig, hosts) {
     const config = normalizeConfig(rawConfig);
     const url = parseUrl(String(value || ""));
-    if (!url || !isMediaUrl(url)) {
+    if (!url || !isMediaUrl(url) || isLiveMediaUrl(url)) {
       return [];
     }
     const pool = (hosts && hosts.length ? hosts : config.candidatePool) || [];
@@ -457,6 +503,84 @@
     return value;
   }
 
+  // Live playurl payloads (getRoomPlayInfo) don't carry full media URLs — each
+  // stream/format/codec entry lists candidate hosts in url_info: [{host, extra}].
+  // A host like "https://xy…xy.mcdn.bilivideo.cn:486" is a residential PCDN node;
+  // slow for overseas viewers. This decides "is this live host slow" from the
+  // same behavioral signals as classify(), minus the media-path requirement.
+  function isSlowLiveHost(hostValue, extra, rawConfig) {
+    const config = normalizeConfig(rawConfig);
+    const raw = String(hostValue || "");
+    let url;
+    try {
+      url = new URL(raw.indexOf("://") !== -1 ? raw : "https://" + raw.replace(/^\/\//, ""));
+    } catch (_) {
+      return false;
+    }
+    const hostname = url.hostname.toLowerCase();
+    if (IP_RE.test(hostname) || XY_MCDN_RE.test(hostname) ||
+        isMcdnHost(hostname) || isKnownP2pHost(hostname)) {
+      return true;
+    }
+    if (config.portHeuristic && hasNonDefaultPort(url)) {
+      return true;
+    }
+    return typeof extra === "string" && /(?:^|[?&])os=mcdn(?:&|$)/i.test(extra);
+  }
+
+  // Drop PCDN/MCDN entries from live url_info host lists, keeping the official
+  // CDN entries the player can fail over to. Never removes the last usable host:
+  // if every entry looks slow, the list is left untouched. Returns rewrite-shaped
+  // entries ({original, url, reason}) so callers can log them like URL rewrites.
+  function filterLiveUrlInfo(payload, rawConfig, depth, seen) {
+    const config = normalizeConfig(rawConfig);
+    const level = depth || 0;
+    const visited = seen || new WeakSet();
+    const result = { changed: false, rewrites: [] };
+
+    if (!config.enabled || config.mode === "off" ||
+        payload == null || typeof payload !== "object" ||
+        level > config.maxDepth || visited.has(payload)) {
+      return result;
+    }
+    visited.add(payload);
+
+    const list = payload.url_info;
+    if (Array.isArray(list) && list.length > 1 &&
+        list.every(function (item) { return item && typeof item.host === "string"; })) {
+      const kept = list.filter(function (item) {
+        return !isSlowLiveHost(item.host, item.extra, config);
+      });
+      if (kept.length > 0 && kept.length < list.length) {
+        list.forEach(function (item) {
+          if (kept.indexOf(item) === -1) {
+            result.rewrites.push({
+              changed: true,
+              original: item.host,
+              url: kept[0].host,
+              reason: "live-pcdn-filter"
+            });
+          }
+        });
+        list.length = 0;
+        kept.forEach(function (item) { list.push(item); });
+        result.changed = true;
+      }
+    }
+
+    const keys = Array.isArray(payload)
+      ? payload.map(function (_, i) { return i; })
+      : Object.keys(payload);
+    for (let i = 0; i < keys.length; i += 1) {
+      const child = filterLiveUrlInfo(payload[keys[i]], config, level + 1, visited);
+      if (child.changed) {
+        result.changed = true;
+        result.rewrites = result.rewrites.concat(child.rewrites);
+      }
+    }
+    return result;
+  }
+
   function rewriteJsonText(text, rawConfig) {
     const state = { changed: false, rewrites: [] };
     const parsed = JSON.parse(text);
@@ -478,6 +602,8 @@
     normalizeConfig,
     hasMediaSignal: hasBiliMediaSignal,
     classify,
+    isSlowLiveHost,
+    filterLiveUrlInfo,
     selectTarget,
     alternativesFor,
     throughputMbps,
@@ -501,6 +627,7 @@
   }
   root.__BILI_ACCELERATOR_INSTALLED__ = true;
 
+  const VERSION = "0.2.3";
   const STORAGE_KEY = "biliAccelerator.config.v2";
   const LEGACY_KEY = "biliAccelerator.config.v1";
   const RANK_PREFIX = "biliAccelerator.rank.";
@@ -512,6 +639,8 @@
   const REVEAL_HOTZONE = 150;
   const REVEAL_TIMEOUT = 2600;
   const STALL_GRACE_MS = 2500;
+  const STALL_RETRY_MS = 5000;
+  const PROBE_TIMEOUT_MS = 4000;
 
   const nativeJsonParse = JSON.parse;
   const nativeFetch = root.fetch;
@@ -531,6 +660,7 @@
     rewrites: [],
     rewriteCount: 0,
     lastSource: "",
+    lastMediaHost: null,
     status: "idle",
     stalls: 0,
     recoveries: 0,
@@ -669,16 +799,50 @@
     return null;
   }
 
-  // Add host-swapped alternatives to DASH entries so Bilibili's own backupUrl
-  // failover can recover for free if the primary host stalls.
+  function backupPool() {
+    return state.ranking.length ? state.ranking : config.candidatePool;
+  }
+
+  // Merge host-swapped alternatives of `base` into entry[key], deduped, max 8.
+  function mergeBackups(entry, key, base) {
+    const alts = core.alternativesFor(base, config, backupPool());
+    if (!alts.length) {
+      return;
+    }
+    const existing = Array.isArray(entry[key]) ? entry[key] : [];
+    const merged = alts.concat(existing).filter(function uniq(u, i, arr) {
+      return arr.indexOf(u) === i;
+    });
+    entry[key] = merged.slice(0, 8);
+  }
+
+  // Add host-swapped alternatives to DASH/durl entries so Bilibili's own
+  // backup-URL failover can recover for free if the primary host stalls.
+  // Payload shapes: data.dash (web player), result.video_info.dash (bangumi),
+  // result.dash, bare dash; durl carries the legacy FLV/MP4 lists. Web-API DASH
+  // uses camelCase (baseUrl/backupUrl); app-style payloads and durl use
+  // snake_case (base_url/backup_url).
   function enrichBackups(payload) {
     if (config.selection !== "auto" || !payload || typeof payload !== "object") {
       return;
     }
-    const dash = (payload.data && payload.data.dash) ||
-      (payload.result && payload.result.dash) ||
-      payload.dash;
-    if (!dash) {
+    const containers = [
+      payload.data,
+      payload.result,
+      payload.result && payload.result.video_info,
+      payload
+    ];
+    containers.forEach(function eachContainer(container) {
+      if (!container || typeof container !== "object") {
+        return;
+      }
+      enrichDash(container.dash);
+      enrichDurl(container.durl);
+    });
+  }
+
+  function enrichDash(dash) {
+    if (!dash || typeof dash !== "object") {
       return;
     }
     ["video", "audio"].forEach(function eachKind(kind) {
@@ -687,19 +851,27 @@
         return;
       }
       list.forEach(function eachEntry(entry) {
-        if (!entry || typeof entry.baseUrl !== "string") {
+        if (!entry) {
           return;
         }
-        const alts = core.alternativesFor(entry.baseUrl, config, state.ranking.length ? state.ranking : config.candidatePool);
-        if (!alts.length) {
-          return;
+        if (typeof entry.baseUrl === "string") {
+          mergeBackups(entry, "backupUrl", entry.baseUrl);
         }
-        const existing = Array.isArray(entry.backupUrl) ? entry.backupUrl : [];
-        const merged = alts.concat(existing).filter(function uniq(u, i, arr) {
-          return arr.indexOf(u) === i;
-        });
-        entry.backupUrl = merged.slice(0, 8);
+        if (typeof entry.base_url === "string") {
+          mergeBackups(entry, "backup_url", entry.base_url);
+        }
       });
+    });
+  }
+
+  function enrichDurl(durl) {
+    if (!Array.isArray(durl)) {
+      return;
+    }
+    durl.forEach(function eachEntry(entry) {
+      if (entry && typeof entry.url === "string") {
+        mergeBackups(entry, "backup_url", entry.url);
+      }
     });
   }
 
@@ -709,11 +881,25 @@
       const rewritten = core.rewriteObject(payload, config, tracker);
       enrichBackups(rewritten);
       record(tracker.rewrites, source);
+      filterLivePcdn(rewritten, source);
       rememberSample(rewritten);
       return rewritten;
     } catch (error) {
       console.warn("[BiliAccelerator] rewrite failed", error);
       return payload;
+    }
+  }
+
+  // Live playurl payloads list candidate hosts (url_info) instead of full URLs;
+  // drop the PCDN/MCDN entries so the live player only ever dials official CDN.
+  function filterLivePcdn(payload, source) {
+    try {
+      const filtered = core.filterLiveUrlInfo(payload, config);
+      if (filtered.changed) {
+        record(filtered.rewrites, source);
+      }
+    } catch (_) {
+      // never let live filtering break payload delivery.
     }
   }
 
@@ -746,6 +932,13 @@
         ? Object.assign({}, config, { mode: "force" })
         : config;
       const detail = core.rewriteUrlDetail(rawUrl, cfg);
+      // Track which host actually serves the media: the <video> element only
+      // exposes a blob: URL under MSE, so this is what stall recovery must avoid.
+      try {
+        state.lastMediaHost = detail.changed
+          ? new URL(detail.url).hostname
+          : (host || state.lastMediaHost);
+      } catch (_) {}
       if (detail.changed) {
         record([detail], "segment");
         return detail.url;
@@ -759,11 +952,12 @@
   // ---- interception -------------------------------------------------------
 
   function isInterestingFetch(input) {
-    const url = typeof input === "string" ? input : input && input.url;
+    const url = requestUrlOf(input);
     return typeof url === "string" &&
       (url.includes("/x/player") ||
         url.includes("/pgc/player") ||
         url.includes("playurl") ||
+        url.includes("getRoomPlayInfo") ||
         url.includes("bilivideo"));
   }
 
@@ -781,8 +975,11 @@
     if (typeof input === "string") {
       return input;
     }
+    if (input && typeof input.href === "string") {
+      return input.href; // URL instance
+    }
     if (input && typeof input.url === "string") {
-      return input.url;
+      return input.url; // Request instance
     }
     return null;
   }
@@ -798,7 +995,11 @@
       if (config.enabled && isMedia) {
         const swapped = rewriteRequestUrl(reqUrl);
         if (swapped !== reqUrl) {
-          input = typeof input === "string" ? swapped : new Request(swapped, input);
+          // string and URL inputs can be replaced by the string directly; only a
+          // Request needs to be rebuilt to preserve its init options.
+          input = (typeof input === "string" || typeof input.href === "string")
+            ? swapped
+            : new Request(swapped, input);
           args = [input, init];
         }
       }
@@ -828,18 +1029,21 @@
           }
           let parsed;
           const tracker = { changed: false, rewrites: [] };
+          let live = { changed: false, rewrites: [] };
           try {
             parsed = nativeJsonParse(text);
             core.rewriteObject(parsed, config, tracker);
             enrichBackups(parsed);
+            live = core.filterLiveUrlInfo(parsed, config);
           } catch (_) {
             return response;
           }
-          if (!tracker.changed) {
+          if (!tracker.changed && !live.changed) {
             rememberSample(parsed);
             return response;
           }
           record(tracker.rewrites, "fetch");
+          record(live.rewrites, "fetch");
           rememberSample(parsed);
           const headers = new Headers(response.headers);
           headers.delete("content-length");
@@ -866,10 +1070,13 @@
     const send = NativeXHR.prototype.send;
 
     NativeXHR.prototype.open = function patchedOpen(method, url) {
-      this.__baAccel = { url: typeof url === "string" ? url : "" };
+      const urlStr = typeof url === "string"
+        ? url
+        : (url && typeof url.href === "string" ? url.href : "");
+      this.__baAccel = { url: urlStr };
       let finalUrl = url;
-      if (config.enabled && typeof url === "string" && core.hasMediaSignal(url)) {
-        finalUrl = rewriteRequestUrl(url);
+      if (config.enabled && urlStr && core.hasMediaSignal(urlStr)) {
+        finalUrl = rewriteRequestUrl(urlStr);
       }
       return open.apply(this, [method, finalUrl].concat([].slice.call(arguments, 2)));
     };
@@ -880,7 +1087,8 @@
       const isMedia = typeof meta.url === "string" && core.hasMediaSignal(meta.url);
       const interesting = typeof meta.url === "string" &&
         (meta.url.includes("playurl") || meta.url.includes("/x/player") ||
-          meta.url.includes("/pgc/player") || isMedia);
+          meta.url.includes("/pgc/player") || meta.url.includes("getRoomPlayInfo") ||
+          isMedia);
 
       // Count downloaded bytes for media segments (free via loadend.loaded) and
       // time send→loadend as the transfer duration for the throughput window.
@@ -908,8 +1116,9 @@
             const tracker = { changed: false, rewrites: [] };
             core.rewriteObject(parsed, config, tracker);
             enrichBackups(parsed);
+            const live = core.filterLiveUrlInfo(parsed, config);
             rememberSample(parsed);
-            if (!tracker.changed) {
+            if (!tracker.changed && !live.changed) {
               return;
             }
             const rewrittenText = JSON.stringify(parsed);
@@ -927,6 +1136,7 @@
               });
             } catch (_) {}
             record(tracker.rewrites, "xhr");
+            record(live.rewrites, "xhr");
           } catch (_) {
             // leave the original response intact on any failure.
           }
@@ -965,6 +1175,22 @@
     if (!config.p2pGuard) {
       return;
     }
+    // Stub Bilibili's P2P SDK entry points so the player never boots the
+    // PCDN/seeder mesh (same surface MBGTEB neutralizes). Instances only need
+    // an `on` no-op to satisfy the player's wiring code.
+    function NoopSdk() {}
+    NoopSdk.prototype.on = function () {};
+    ["PCDNLoader", "BPP2PSDK", "SeederSDK"].forEach(function (name) {
+      try {
+        Object.defineProperty(root, name, {
+          configurable: false,
+          writable: false,
+          value: NoopSdk
+        });
+      } catch (_) {
+        // already defined and frozen; ignore.
+      }
+    });
     ["RTCPeerConnection", "webkitRTCPeerConnection", "mozRTCPeerConnection"].forEach(function (name) {
       try {
         const Blocked = function BlockedRTCPeerConnection() {
@@ -999,28 +1225,55 @@
     }
   }
 
+  // TTFB-probe one candidate host by re-requesting the signed sample URL on it.
+  // Uses cors mode (the CDN sends ACAO for the player's own segment fetches) so
+  // the real status is visible — under no-cors a host that fast-fails with 403
+  // would look "healthy" and win the ranking. No Range header: it isn't
+  // no-cors/preflight-safe everywhere, and the body is aborted right after the
+  // headers arrive anyway, so only a few KB ever transfer.
   function probeHost(host, sampleUrl) {
     const url = swapHost(sampleUrl, host);
     if (!url) {
       return Promise.resolve({ host, ttfb: null, ok: false });
     }
-    const started = (root.performance && root.performance.now) ? root.performance.now() : Date.now();
-    const timeout = new Promise(function (resolve) {
-      setTimeout(function () { resolve({ host, ttfb: null, ok: false }); }, 4000);
-    });
-    const probe = nativeFetch(url, {
-      method: "GET",
-      headers: { Range: "bytes=0-1" },
-      mode: "no-cors",
-      cache: "no-store",
-      credentials: "omit"
-    }).then(function () {
-      const now = (root.performance && root.performance.now) ? root.performance.now() : Date.now();
-      return { host, ttfb: now - started, ok: true };
+    const started = nowMs();
+    const init = { method: "GET", mode: "cors", cache: "no-store", credentials: "omit" };
+    const controller = typeof AbortController === "function" ? new AbortController() : null;
+    let timer = null;
+    let settled = false;
+    if (controller) {
+      init.signal = controller.signal;
+      timer = setTimeout(function () { controller.abort(); }, PROBE_TIMEOUT_MS);
+    }
+    const probe = nativeFetch(url, init).then(function (response) {
+      const ttfb = nowMs() - started;
+      // Headers are in — stop the body download, we only wanted the timing.
+      try {
+        if (response.body && typeof response.body.cancel === "function") {
+          response.body.cancel();
+        }
+      } catch (_) {}
+      return { host, ttfb: response.ok ? ttfb : null, ok: !!response.ok };
     }).catch(function () {
       return { host, ttfb: null, ok: false };
+    }).then(function (result) {
+      settled = true;
+      if (timer) {
+        clearTimeout(timer);
+      }
+      return result;
     });
-    return Promise.race([probe, timeout]);
+    if (controller) {
+      return probe;
+    }
+    // No AbortController (very old engines): fall back to racing a timeout.
+    return Promise.race([probe, new Promise(function (resolve) {
+      setTimeout(function () {
+        if (!settled) {
+          resolve({ host, ttfb: null, ok: false });
+        }
+      }, PROBE_TIMEOUT_MS);
+    })]);
   }
 
   function scheduleProbe(sampleUrl) {
@@ -1087,11 +1340,18 @@
     if (watchedVideo.readyState >= 3) {
       return;
     }
-    state.stalls += 1;
+    // Count distinct stall episodes once; re-checks of the same episode below
+    // only add recovery rotations.
+    if (state.status !== "buffering") {
+      state.stalls += 1;
+    }
     state.status = "buffering";
     if (config.stallRecovery && config.selection === "auto") {
-      rotateTarget(currentVideoHost());
+      rotateTarget(state.lastMediaHost || currentVideoHost());
       state.recoveries += 1;
+      // Keep rotating while the stall persists — 'waiting' fires only once per
+      // episode, so without a re-check a single bad pick would strand playback.
+      stallTimer = setTimeout(handleStall, STALL_RETRY_MS);
     }
     renderStatus();
   }
@@ -1130,7 +1390,7 @@
 
   function buildDiagnostics() {
     return {
-      version: "0.2.2",
+      version: VERSION,
       installedAt: state.installedAt,
       region: regionKey().split("|")[0],   // timezone only — drop locale
       config,
@@ -1223,6 +1483,12 @@
     speed.transfers = speed.transfers.filter(function keep(tr) {
       return tr.end > now - SPEED_WINDOW_MS;
     });
+
+    // Background tabs get throttled timers anyway; skip the series/UI work and
+    // resume cleanly when the tab is visible again.
+    if (document.hidden) {
+      return;
+    }
 
     let playing = false;
     try {
@@ -2217,6 +2483,7 @@
   patchXHR();
   patchGlobalPlayInfo("__playinfo__");
   patchGlobalPlayInfo("__INITIAL_STATE__");
+  patchGlobalPlayInfo("__NEPTUNE_IS_MY_WAIFU__"); // live room initial state
   installP2PGuard();
   installConfigBridge();
 

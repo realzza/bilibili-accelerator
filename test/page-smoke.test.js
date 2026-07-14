@@ -32,7 +32,9 @@ test("page script rewrites playurl JSON parsed by the page", () => {
   const sandbox = {
     URL,
     Date,
-    JSON,
+    // Own JSON facade — the page script patches JSON.parse in place and must
+    // not touch the test runner's global JSON.
+    JSON: { parse: JSON.parse, stringify: JSON.stringify },
     WeakSet,
     Headers,
     Response,

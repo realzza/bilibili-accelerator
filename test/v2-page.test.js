@@ -17,7 +17,11 @@ function loadPage() {
 
   const store = new Map();
   const sandbox = {
-    URL, Date, JSON, WeakSet, Headers, Response, Request, Promise, Math,
+    // Each sandbox gets its own JSON object: the page script patches JSON.parse
+    // in place, and handing it the host realm's JSON would stack patches across
+    // tests (and patch the test runner's own JSON).
+    JSON: { parse: JSON.parse, stringify: JSON.stringify },
+    URL, Date, WeakSet, Headers, Response, Request, Promise, Math,
     setTimeout, clearTimeout, setInterval, Intl,
     performance: { now: () => 1 },
     XMLHttpRequest: FakeXHR,
@@ -101,6 +105,61 @@ test("public API exposes diagnostics and config control", () => {
   const cfg = sandbox.BiliAccelerator.setConfig({ p2pGuard: true });
   assert.equal(cfg.p2pGuard, true);
   const diag = sandbox.BiliAccelerator.getDiagnostics();
-  assert.equal(diag.version, "0.2.2");
+  assert.equal(diag.version, require("../package.json").version,
+    "page VERSION constant must match package.json (single source of truth)");
   assert.ok(diag.counters && typeof diag.counters.rewrites === "number");
+});
+
+test("XHR open() accepts URL objects and still rewrites PCDN segments", () => {
+  const sandbox = loadPage();
+  const xhr = new sandbox.XMLHttpRequest();
+  const bad = new URL("https://node-7.edge.mountaintoys.cn:4830/upgcxcode/12/34/567-1-30280.m4s?os=mcdn&abc=1");
+  xhr.open("GET", bad);
+  assert.equal(new URL(xhr._url).hostname, "upos-sz-mirrorcos.bilivideo.com");
+});
+
+test("live getRoomPlayInfo parsed by the page gets its PCDN hosts filtered", () => {
+  const sandbox = loadPage();
+  const parsed = sandbox.JSON.parse(JSON.stringify({
+    code: 0,
+    data: { playurl_info: { playurl: { stream: [{ format: [{ codec: [{
+      base_url: "/live-bvc/123/live_1234.flv?sig=abc",
+      url_info: [
+        { host: "https://xy36x110x213x230xy.mcdn.bilivideo.cn:486", extra: "?os=mcdn" },
+        { host: "https://d1--cn-gotcha208.bilivideo.com", extra: "?sig=1" }
+      ]
+    }] }] }] } } }
+  }));
+  const urlInfo = parsed.data.playurl_info.playurl.stream[0].format[0].codec[0].url_info;
+  assert.equal(urlInfo.length, 1);
+  assert.equal(urlInfo[0].host, "https://d1--cn-gotcha208.bilivideo.com");
+  assert.ok(sandbox.BiliAccelerator.getStats().rewriteCount >= 1);
+});
+
+test("live segment URLs pass through untouched (no VOD host swap)", () => {
+  const sandbox = loadPage();
+  const xhr = new sandbox.XMLHttpRequest();
+  const liveUrl = "https://xy1x2x3x4xy.mcdn.bilivideo.cn:486/live-bvc/123/live_1234.flv?os=mcdn";
+  xhr.open("GET", liveUrl);
+  assert.equal(xhr._url, liveUrl);
+});
+
+test("bangumi video_info.dash gets backup fan-out; durl gets backup_url fan-out", () => {
+  const sandbox = loadPage();
+  const bangumi = sandbox.JSON.parse(JSON.stringify({
+    result: { video_info: { dash: { video: [{
+      baseUrl: "https://node-7.edge.mountaintoys.cn:4830/upgcxcode/v.m4s?os=mcdn",
+      backupUrl: []
+    }] } } }
+  }));
+  const entry = bangumi.result.video_info.dash.video[0];
+  assert.equal(new URL(entry.baseUrl).hostname, "upos-sz-mirrorcos.bilivideo.com");
+  assert.ok(entry.backupUrl.length > 0);
+
+  const durl = sandbox.JSON.parse(JSON.stringify({
+    data: { durl: [{ url: "https://upos-sz-mirrorcos.bilivideo.com/upgcxcode/v.mp4?x=1" }] }
+  }));
+  const durlEntry = durl.data.durl[0];
+  assert.ok(Array.isArray(durlEntry.backup_url) && durlEntry.backup_url.length > 0);
+  assert.ok(durlEntry.backup_url.every((u) => u.includes("/upgcxcode/v.mp4")));
 });

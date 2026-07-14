@@ -17,7 +17,7 @@
 - [Greasy Fork 官方脚本页](https://greasyfork.org/en/scripts/582026-bilibili-accelerator)
 - [直接安装 `.user.js`](https://update.greasyfork.org/scripts/582026/Bilibili%20Accelerator.user.js)
 - [GitHub Raw 备用源](https://raw.githubusercontent.com/realzza/bilibili-accelerator/main/dist/bilibili-accelerator.user.js)
-- [GitHub Release v0.2.2](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.2.2)
+- [GitHub Release v0.2.3](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.2.3)
 
 装好后打开任意 B 站视频。右下角出现 ⚡ 小图标，就说明脚本已经生效。
 
@@ -79,6 +79,17 @@ proxy-tf-all-ws.bilivideo.com
 <p align="center">
   <img src="docs/assets/panel-advanced.png" alt="高级设置：自动选最快服务器、隐藏 PCDN 识别、卡顿自动恢复、带宽保护" width="360">
 </p>
+
+## 0.2.3 更新
+
+0.2.3 是一次正确性与覆盖率升级：
+
+- **直播不再误伤** —— 直播（`/live-bvc/`）地址不再被换到点播镜像（那些服务器根本放不了直播），并且会从直播间的服务器列表里过滤掉 PCDN/MCDN 节点，让直播播放器只连官方 CDN。
+- **测速更聪明** —— 探测候选服务器时会读取真实 HTTP 状态（秒回错误的服务器不会再赢得排名），并在拿到响应后立刻中断下载，不再在每次探测时偷偷拉整段视频。
+- **识别更多 PCDN 家族** —— 新增 `upos-*302*` 跳转节点及其落地的家用宽带域名，以及伪装成镜像名的 PCDN 服务器。
+- **漏网更少** —— `URL` 对象请求、协议相对地址、番剧（`video_info.dash`）返回、老式 `durl` 播放列表全部覆盖。
+- **卡顿恢复更执着** —— 现在记录真正卡住的服务器（而不是播放器内部的 blob 地址），并且在持续缓冲时不断轮换，而不是只切一次。
+- **带宽保护加固** —— 可选的带宽保护同时屏蔽 B 站 P2P SDK 入口（`PCDNLoader`、`BPP2PSDK`、`SeederSDK`）。
 
 ## 已测样本
 
