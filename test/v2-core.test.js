@@ -62,9 +62,18 @@ test("mountaintoys-style PCDN URL is rewritten to the target host", () => {
 });
 
 test("port heuristic can be disabled", () => {
-  const url = new URL("https://node-7.edge.mountaintoys.cn:4830/upgcxcode/v.m4s?abc=1");
+  // A bcache-style host on an odd port: with the heuristic off it must pass.
+  // (mountaintoys can no longer serve here — it is a known P2P family and is
+  // flagged regardless of port; see the known-suffix tests.)
+  const url = new URL("https://cn-sccd-cu-01-01.bilivideo.com:4830/upgcxcode/v.m4s?abc=1");
   const v = core.classify(url, { portHeuristic: false });
   assert.equal(v.isPcdn, false);
+});
+
+test("known P2P families are flagged even with the port heuristic off", () => {
+  const url = new URL("https://node-7.edge.mountaintoys.cn:4830/upgcxcode/v.m4s?abc=1");
+  const v = core.classify(url, { portHeuristic: false });
+  assert.equal(v.isPcdn, true);
 });
 
 test("os=mcdn alone (no weird port) is treated as PCDN", () => {

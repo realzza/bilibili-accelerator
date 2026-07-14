@@ -17,7 +17,7 @@ Greasy Fork is the recommended install path. It works with Chrome, Safari, Firef
 - [Greasy Fork script page](https://greasyfork.org/en/scripts/582026-bilibili-accelerator)
 - [Direct `.user.js` install](https://update.greasyfork.org/scripts/582026/Bilibili%20Accelerator.user.js)
 - [GitHub Raw fallback](https://raw.githubusercontent.com/realzza/bilibili-accelerator/main/dist/bilibili-accelerator.user.js)
-- [GitHub Release v0.2.2](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.2.2)
+- [GitHub Release v0.2.3](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.2.3)
 
 After installation, open any Bilibili video. A small ⚡ icon in the lower-right corner means the script is active.
 
@@ -79,6 +79,17 @@ In web fullscreen the ⚡ icon fades out so it never covers the video; move the 
 <p align="center">
   <img src="docs/assets/panel-advanced.png" alt="Advanced settings: auto server selection, hidden-PCDN detection, live auto-recover, bandwidth guard" width="360">
 </p>
+
+## What's New in 0.2.3
+
+0.2.3 is a correctness and coverage release:
+
+- **Live streams are now safe** — live (`/live-bvc/`) media URLs are never host-swapped or proxied (VOD mirrors can't serve them), and PCDN/MCDN entries are filtered out of the live room's server list so the live player only dials official CDN hosts.
+- **Smarter server probing** — probes now read the real HTTP status (a fast-failing server can no longer win the ranking) and abort the download right after timing the response, instead of silently pulling full video segments during each probe.
+- **More PCDN families caught** — `upos-*302*` redirect hosts and the residential-node domains they land on, plus PCDN hosts hiding behind mirror-style names.
+- **Fewer escapes** — requests made with `URL` objects, protocol-relative URLs, bangumi (`video_info.dash`) payloads, and legacy `durl` playlists are all covered now.
+- **Stall recovery that keeps trying** — recovery now tracks the server that actually stalled (not the player's internal blob URL) and keeps rotating while buffering persists instead of switching exactly once.
+- **Bandwidth guard hardening** — the opt-in guard also stubs Bilibili's P2P SDK entry points (`PCDNLoader`, `BPP2PSDK`, `SeederSDK`).
 
 ## Tested Case
 

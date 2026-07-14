@@ -57,6 +57,35 @@
   const IP_RE = /^(?:\d{1,3}\.){3}\d{1,3}$/;
   const XY_MCDN_RE = /^xy(?:\d+x){3}\d+xy\.mcdn\.bilivideo\.(?:cn|com|net)$/i;
 
+  // P2P/PCDN families known from community research (Bilibili-Evolved, MBGTEB):
+  // szbdyd is the legacy scheduler, mountaintoys the 2025 rename, nexusedgeio and
+  // ahdohpiechei are where the upos-*302* redirect hosts land, and mirror14b is a
+  // mirror-named host that actually serves PCDN (its TLS cert is *.bilivideo.cn).
+  const KNOWN_P2P_SUFFIXES = Object.freeze([
+    ".szbdyd.com",
+    ".mountaintoys.cn",
+    ".nexusedgeio.com",
+    ".ahdohpiechei.com"
+  ]);
+  const KNOWN_P2P_HOSTS = Object.freeze([
+    "upos-sz-mirror14b.bilivideo.com"
+  ]);
+
+  function isKnownP2pHost(hostname) {
+    if (KNOWN_P2P_HOSTS.indexOf(hostname) !== -1) {
+      return true;
+    }
+    for (let i = 0; i < KNOWN_P2P_SUFFIXES.length; i += 1) {
+      if (hostname.length > KNOWN_P2P_SUFFIXES[i].length &&
+          hostname.indexOf(KNOWN_P2P_SUFFIXES[i]) === hostname.length - KNOWN_P2P_SUFFIXES[i].length) {
+        return true;
+      }
+    }
+    // upos-sz-302ppio / upos-sz-302kodo style hosts answer with an HTTP 302 to a
+    // residential P2P node; the "302" only ever appears in that first label.
+    return hostname.indexOf("upos-") === 0 && hostname.split(".")[0].indexOf("302") !== -1;
+  }
+
   // Forward-migrate any stored config (v1 or partial) onto the v2 defaults.
   function normalizeConfig(config) {
     const merged = Object.assign({}, DEFAULT_CONFIG, config || {});
@@ -81,6 +110,9 @@
       (value.includes("bilivideo") ||
         value.includes("akamaized.net") ||
         value.includes("szbdyd.com") ||
+        value.includes("mountaintoys") ||
+        value.includes("nexusedgeio") ||
+        value.includes("ahdohpiechei") ||
         value.includes("mcdn.bili") ||
         value.includes("os=mcdn") ||
         value.includes("/upgcxcode/") ||
@@ -93,7 +125,8 @@
     }
 
     try {
-      const url = new URL(value);
+      // Payloads occasionally carry protocol-relative URLs ("//host/path").
+      const url = new URL(value.slice(0, 2) === "//" ? "https:" + value : value);
       if (url.protocol !== "http:" && url.protocol !== "https:") {
         return null;
       }
@@ -107,6 +140,14 @@
     return MEDIA_PATH_RE.test(url.pathname + url.search) ||
       url.pathname.startsWith("/upgcxcode/") ||
       url.pathname.startsWith("/v1/resource/");
+  }
+
+  // Live streams (/live-bvc/ FLV & HLS) are served by a separate CDN tier — the
+  // VOD upos mirrors and the MCDN proxy cannot serve them, so a host swap or
+  // proxy wrap would hard-break live playback. Live PCDN is handled upstream by
+  // filtering the getRoomPlayInfo host list instead (see filterLiveUrlInfo).
+  function isLiveMediaUrl(url) {
+    return url.pathname.indexOf("/live-bvc/") !== -1;
   }
 
   function isMcdnHost(hostname) {
@@ -154,15 +195,16 @@
     const akamai = hostname.endsWith(".akamaized.net");
     const portPcdn = config.portHeuristic && hasNonDefaultPort(url);
     const queryMcdn = hasMcdnQuery(url);
+    const knownP2p = isKnownP2pHost(hostname);
 
-    const isPcdn = ipLike || xyMcdn || portPcdn || queryMcdn;
+    const isPcdn = ipLike || xyMcdn || portPcdn || queryMcdn || knownP2p;
 
     let kind = "unknown";
     if (schedulerSource !== null || hostname.endsWith(".szbdyd.com")) {
       kind = "scheduler";
     } else if (mcdn) {
       kind = "mcdn";
-    } else if (ipLike || xyMcdn || portPcdn || queryMcdn) {
+    } else if (isPcdn) {
       kind = "pcdn";
     } else if (akamai) {
       kind = "akamai";
@@ -233,6 +275,10 @@
       return { changed: false, original, url: original, reason: "ignored" };
     }
 
+    if (isLiveMediaUrl(url)) {
+      return { changed: false, original, url: original, reason: "live-skip" };
+    }
+
     const verdict = classify(url, config);
 
     if (verdict.schedulerSource) {
@@ -282,7 +328,7 @@
   function alternativesFor(value, rawConfig, hosts) {
     const config = normalizeConfig(rawConfig);
     const url = parseUrl(String(value || ""));
-    if (!url || !isMediaUrl(url)) {
+    if (!url || !isMediaUrl(url) || isLiveMediaUrl(url)) {
       return [];
     }
     const pool = (hosts && hosts.length ? hosts : config.candidatePool) || [];
@@ -440,6 +486,84 @@
     return value;
   }
 
+  // Live playurl payloads (getRoomPlayInfo) don't carry full media URLs — each
+  // stream/format/codec entry lists candidate hosts in url_info: [{host, extra}].
+  // A host like "https://xy…xy.mcdn.bilivideo.cn:486" is a residential PCDN node;
+  // slow for overseas viewers. This decides "is this live host slow" from the
+  // same behavioral signals as classify(), minus the media-path requirement.
+  function isSlowLiveHost(hostValue, extra, rawConfig) {
+    const config = normalizeConfig(rawConfig);
+    const raw = String(hostValue || "");
+    let url;
+    try {
+      url = new URL(raw.indexOf("://") !== -1 ? raw : "https://" + raw.replace(/^\/\//, ""));
+    } catch (_) {
+      return false;
+    }
+    const hostname = url.hostname.toLowerCase();
+    if (IP_RE.test(hostname) || XY_MCDN_RE.test(hostname) ||
+        isMcdnHost(hostname) || isKnownP2pHost(hostname)) {
+      return true;
+    }
+    if (config.portHeuristic && hasNonDefaultPort(url)) {
+      return true;
+    }
+    return typeof extra === "string" && /(?:^|[?&])os=mcdn(?:&|$)/i.test(extra);
+  }
+
+  // Drop PCDN/MCDN entries from live url_info host lists, keeping the official
+  // CDN entries the player can fail over to. Never removes the last usable host:
+  // if every entry looks slow, the list is left untouched. Returns rewrite-shaped
+  // entries ({original, url, reason}) so callers can log them like URL rewrites.
+  function filterLiveUrlInfo(payload, rawConfig, depth, seen) {
+    const config = normalizeConfig(rawConfig);
+    const level = depth || 0;
+    const visited = seen || new WeakSet();
+    const result = { changed: false, rewrites: [] };
+
+    if (!config.enabled || config.mode === "off" ||
+        payload == null || typeof payload !== "object" ||
+        level > config.maxDepth || visited.has(payload)) {
+      return result;
+    }
+    visited.add(payload);
+
+    const list = payload.url_info;
+    if (Array.isArray(list) && list.length > 1 &&
+        list.every(function (item) { return item && typeof item.host === "string"; })) {
+      const kept = list.filter(function (item) {
+        return !isSlowLiveHost(item.host, item.extra, config);
+      });
+      if (kept.length > 0 && kept.length < list.length) {
+        list.forEach(function (item) {
+          if (kept.indexOf(item) === -1) {
+            result.rewrites.push({
+              changed: true,
+              original: item.host,
+              url: kept[0].host,
+              reason: "live-pcdn-filter"
+            });
+          }
+        });
+        list.length = 0;
+        kept.forEach(function (item) { list.push(item); });
+        result.changed = true;
+      }
+    }
+
+    const keys = Array.isArray(payload)
+      ? payload.map(function (_, i) { return i; })
+      : Object.keys(payload);
+    for (let i = 0; i < keys.length; i += 1) {
+      const child = filterLiveUrlInfo(payload[keys[i]], config, level + 1, visited);
+      if (child.changed) {
+        result.changed = true;
+        result.rewrites = result.rewrites.concat(child.rewrites);
+      }
+    }
+    return result;
+  }
+
   function rewriteJsonText(text, rawConfig) {
     const state = { changed: false, rewrites: [] };
     const parsed = JSON.parse(text);
@@ -461,6 +585,8 @@
     normalizeConfig,
     hasMediaSignal: hasBiliMediaSignal,
     classify,
+    isSlowLiveHost,
+    filterLiveUrlInfo,
     selectTarget,
     alternativesFor,
     throughputMbps,
