@@ -31,9 +31,10 @@
   // stored or bridged config can be validated back to a known-good default.
   const ACCENT_KEYS = Object.freeze([
     "bili",     // Bilibili blue (default — unchanged for existing users)
-    "pink",     // Little-TV pink
-    "violet",
+    "teal",
     "emerald",
+    "violet",
+    "pink",     // Little-TV pink
     "sunset",
     "graphite"
   ]);

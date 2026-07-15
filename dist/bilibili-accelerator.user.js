@@ -48,9 +48,10 @@
   // stored or bridged config can be validated back to a known-good default.
   const ACCENT_KEYS = Object.freeze([
     "bili",     // Bilibili blue (default — unchanged for existing users)
-    "pink",     // Little-TV pink
-    "violet",
+    "teal",
     "emerald",
+    "violet",
+    "pink",     // Little-TV pink
     "sunset",
     "graphite"
   ]);
@@ -722,12 +723,17 @@
   // `strong` the pressed/hover shade, `gradA`/`gradB` the ⚡ toggle gradient.
   const ACCENT_PRESETS = {
     bili:     { hex: "#00aeec", strong: "#0091cc", gradA: "#00b5f5", gradB: "#0091cc" },
-    pink:     { hex: "#fb7299", strong: "#e85d86", gradA: "#ff86ab", gradB: "#e85d86" },
-    violet:   { hex: "#7c5cff", strong: "#6544e0", gradA: "#8f74ff", gradB: "#6544e0" },
+    teal:     { hex: "#0d9488", strong: "#0b7d73", gradA: "#14b8a6", gradB: "#0b7d73" },
     emerald:  { hex: "#10b981", strong: "#0e9d6e", gradA: "#25c894", gradB: "#0e9d6e" },
+    violet:   { hex: "#7c5cff", strong: "#6544e0", gradA: "#8f74ff", gradB: "#6544e0" },
+    pink:     { hex: "#fb7299", strong: "#e85d86", gradA: "#ff86ab", gradB: "#e85d86" },
     sunset:   { hex: "#f97316", strong: "#db5f0c", gradA: "#ff8a3d", gradB: "#db5f0c" },
     graphite: { hex: "#46566a", strong: "#33404f", gradA: "#556579", gradB: "#33404f" }
   };
+
+  // Header theme-toggle glyphs; swapped by updateAppearanceControls per resolved theme.
+  const SUN_SVG = "<svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path fill=\"currentColor\" d=\"M12 17a5 5 0 1 0 0-10 5 5 0 0 0 0 10Zm0-13a1 1 0 0 1 1 1v1a1 1 0 1 1-2 0V5a1 1 0 0 1 1-1Zm0 14a1 1 0 0 1 1 1v1a1 1 0 1 1-2 0v-1a1 1 0 0 1 1-1ZM4 12a1 1 0 0 1 1-1h1a1 1 0 1 1 0 2H5a1 1 0 0 1-1-1Zm14 0a1 1 0 0 1 1-1h1a1 1 0 1 1 0 2h-1a1 1 0 0 1-1-1ZM6.3 6.3a1 1 0 0 1 1.4 0l.7.7a1 1 0 1 1-1.4 1.4l-.7-.7a1 1 0 0 1 0-1.4Zm9.3 9.3a1 1 0 0 1 1.4 0l.7.7a1 1 0 1 1-1.4 1.4l-.7-.7a1 1 0 0 1 0-1.4Zm1.4-9.3a1 1 0 0 1 0 1.4l-.7.7a1 1 0 1 1-1.4-1.4l.7-.7a1 1 0 0 1 1.4 0ZM7.7 15.6a1 1 0 0 1 0 1.4l-.7.7a1 1 0 0 1-1.4-1.4l.7-.7a1 1 0 0 1 1.4 0Z\"/></svg>";
+  const MOON_SVG = "<svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path fill=\"currentColor\" d=\"M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z\"/></svg>";
 
   // Surface tokens per resolved theme; the accent tokens are layered on top.
   const SURFACES = {
@@ -816,6 +822,14 @@
     } catch (_) {
       // matchMedia unavailable — system theme just won't live-update.
     }
+  }
+
+  // Header sun/moon toggle: flip to the opposite of what's showing and remember
+  // it as an explicit choice. Default stays "system" until the user taps once.
+  function toggleTheme() {
+    const next = resolveTheme() === "dark" ? "light" : "dark";
+    saveConfig(Object.assign({}, config, { theme: next }));
+    applyTheme();
   }
 
   function regionKey() {
@@ -1994,11 +2008,11 @@
       boost: "Still buffering? Boost harder",
       advShow: "Advanced settings",
       advHide: "Hide advanced",
-      fAccent: "Accent", fTheme: "Theme",
-      themeSystem: "System", themeLight: "Light", themeDark: "Dark",
+      fAccent: "Accent",
+      themeToDark: "Switch to dark", themeToLight: "Switch to light",
       accents: {
-        bili: "Bilibili Blue", pink: "Pink", violet: "Violet",
-        emerald: "Emerald", sunset: "Sunset", graphite: "Graphite"
+        bili: "Bilibili Blue", teal: "Teal", emerald: "Emerald", violet: "Violet",
+        pink: "Pink", sunset: "Sunset", graphite: "Graphite"
       },
       fServer: "Server", fWhen: "When", fFixed: "Fixed server", fMcdn: "MCDN",
       selAuto: "Auto (pick fastest)", selFixed: "Use a fixed server",
@@ -2033,11 +2047,11 @@
       boost: "还在卡？再加把劲",
       advShow: "高级设置",
       advHide: "收起高级设置",
-      fAccent: "主题色", fTheme: "外观",
-      themeSystem: "跟随系统", themeLight: "浅色", themeDark: "深色",
+      fAccent: "主题色",
+      themeToDark: "切换到深色", themeToLight: "切换到浅色",
       accents: {
-        bili: "哔哩蓝", pink: "少女粉", violet: "星紫",
-        emerald: "翠绿", sunset: "落日橙", graphite: "石墨灰"
+        bili: "哔哩蓝", teal: "青碧", emerald: "翠绿", violet: "星紫",
+        pink: "少女粉", sunset: "落日橙", graphite: "石墨灰"
       },
       fServer: "服务器", fWhen: "何时", fFixed: "固定服务器", fMcdn: "MCDN",
       selAuto: "自动（选最快）", selFixed: "使用固定服务器",
@@ -2115,9 +2129,14 @@
         b.setAttribute("aria-label", name);
       }
     });
-    const themeSel = shadow.getElementById("ba-theme-select");
-    if (themeSel) {
-      themeSel.value = config.theme;
+    const themeBtn = shadow.getElementById("ba-theme-btn");
+    if (themeBtn) {
+      // Show the glyph for the current theme; the tooltip names where a tap goes.
+      const dark = resolveTheme() === "dark";
+      themeBtn.innerHTML = dark ? MOON_SVG : SUN_SVG;
+      const tip = t(dark ? "themeToLight" : "themeToDark");
+      themeBtn.title = tip;
+      themeBtn.setAttribute("aria-label", tip);
     }
   }
 
@@ -2299,8 +2318,10 @@
       ".ba-panel.open{display:flex}",
       ".ba-body{overflow-y:auto;min-height:0}",
       ".ba-head{display:flex;align-items:center;gap:8px;margin-bottom:14px}",
-      ".ba-head svg{width:18px;height:18px;color:var(--ba-accent);flex:0 0 auto}",
-      ".ba-title{font-size:14px;font-weight:800;margin:0;color:var(--ba-ink-strong)}",
+      ".ba-head>svg{width:18px;height:18px;color:var(--ba-accent);flex:0 0 auto}",
+      ".ba-theme-btn{display:grid;place-items:center;width:26px;height:26px;padding:0;border:none;border-radius:7px;background:none;color:var(--ba-ink-soft);cursor:pointer;transition:color .14s ease,background .14s ease}",
+      ".ba-theme-btn:hover{color:var(--ba-accent);background:var(--ba-dot-bg)}",
+      ".ba-theme-btn svg{width:16px;height:16px;display:block}",
       ".ba-lang{margin-left:auto;display:inline-flex;border:1px solid var(--ba-border-in);border-radius:8px;overflow:hidden;flex:0 0 auto}",
       ".ba-lang-btn{border:none;background:var(--ba-card);color:var(--ba-ink-soft);font-size:11px;font-weight:700;padding:4px 10px;cursor:pointer;line-height:1.4}",
       ".ba-lang-btn+.ba-lang-btn{border-left:1px solid var(--ba-border)}",
@@ -2365,15 +2386,19 @@
     panel.className = "ba-panel";
     panel.id = PANEL_ID;
 
-    // Header
+    // Header: ⚡ mark + theme toggle (left), language toggle (right). The product
+    // name is dropped — the mark carries identity and frees room for the toggle.
     const head = document.createElement("div");
     head.className = "ba-head";
     head.innerHTML = "<svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path fill=\"currentColor\" d=\"M13 2 4 14h7l-1 8 10-13h-7l1-7Z\"/></svg>";
-    const title = document.createElement("p");
-    title.className = "ba-title";
-    title.dataset.i18n = "title";
-    title.textContent = t("title");
-    head.appendChild(title);
+
+    const themeBtn = document.createElement("button");
+    themeBtn.className = "ba-theme-btn";
+    themeBtn.id = "ba-theme-btn";
+    themeBtn.type = "button";
+    themeBtn.innerHTML = SUN_SVG;
+    themeBtn.addEventListener("click", toggleTheme);
+    head.appendChild(themeBtn);
 
     // Language toggle (upper-right). Defaults to English.
     const langWrap = document.createElement("div");
@@ -2494,16 +2519,6 @@
       setAdvToggleLabel(open);
     });
 
-    const themeSelect = createSelect([
-      { value: "system", key: "themeSystem" },
-      { value: "light", key: "themeLight" },
-      { value: "dark", key: "themeDark" }
-    ], config.theme, function (value) {
-      saveConfig(Object.assign({}, config, { theme: value }));
-      applyTheme();
-    });
-    themeSelect.id = "ba-theme-select";
-
     const selection = createSelect([
       { value: "auto", key: "selAuto" },
       { value: "fixed", key: "selFixed" }
@@ -2592,7 +2607,6 @@
     actions.appendChild(reload);
 
     adv.appendChild(createSwatchField("fAccent", createAccentPicker()));
-    adv.appendChild(createField("fTheme", themeSelect));
     adv.appendChild(createField("fServer", selection));
     adv.appendChild(createField("fWhen", mode));
     adv.appendChild(createField("fFixed", hostInput));

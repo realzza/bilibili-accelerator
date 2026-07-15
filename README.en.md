@@ -95,8 +95,8 @@ In web fullscreen the ⚡ icon fades out so it never covers the video; move the 
 
 0.3.0 is a frontend release — the panel becomes yours to personalize:
 
-- **Accent themes** — pick from six curated accents (Bilibili Blue, Pink, Violet, Emerald, Sunset, Graphite) under **Advanced settings → Accent**. Defaults to the original Bilibili blue, so nothing changes until you choose otherwise.
-- **Light / Dark / System surface** — the panel now has a proper dark theme instead of a bright white box on dark pages. **Theme** follows your OS by default and live-updates when the system flips.
+- **Accent themes** — pick from seven curated accents (Bilibili Blue, Teal, Emerald, Violet, Pink, Sunset, Graphite) under **Advanced settings → Accent**. Defaults to the original Bilibili blue, so nothing changes until you choose otherwise.
+- **Light / dark toggle** — a sun/moon switch in the panel header gives it a proper dark theme instead of a bright white box on dark pages. It follows your OS by default and remembers your choice once you tap it.
 - **Under the hood** — every color routes through a small token layer, so accent and surface are one consistent system across the status hero, the live speed chart, switches, and the ⚡ badge.
 
 ## Tested Case
