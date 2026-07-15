@@ -807,12 +807,42 @@
     }
   }
 
-  // Header sun/moon toggle: flip to the opposite of what's showing and remember
-  // it as an explicit choice. Default stays "system" until the user taps once.
-  function toggleTheme() {
-    const next = resolveTheme() === "dark" ? "light" : "dark";
-    saveConfig(Object.assign({}, config, { theme: next }));
-    applyTheme();
+  // A two-option sliding toggle (the header language + theme pills share it).
+  // Both cells are equal width, so the 50%-wide thumb slides exactly one cell.
+  // Mounts with the active index already set, so it never animates on first
+  // paint — only later taps slide. options: [{ html, value, label }].
+  function createSegToggle(id, options, activeIndex, onSelect) {
+    const seg = document.createElement("div");
+    seg.className = "ba-seg";
+    seg.id = id;
+    seg.dataset.active = String(activeIndex);
+    const thumb = document.createElement("span");
+    thumb.className = "ba-seg-thumb";
+    seg.appendChild(thumb);
+    options.forEach(function (opt, i) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "ba-seg-opt";
+      btn.innerHTML = opt.html;
+      btn.setAttribute("aria-pressed", i === activeIndex ? "true" : "false");
+      if (opt.label) {
+        btn.title = opt.label;
+        btn.setAttribute("aria-label", opt.label);
+      }
+      btn.addEventListener("click", function () { onSelect(opt.value, i); });
+      seg.appendChild(btn);
+    });
+    return seg;
+  }
+
+  function setSegActive(seg, index) {
+    if (!seg) {
+      return;
+    }
+    seg.dataset.active = String(index);
+    seg.querySelectorAll(".ba-seg-opt").forEach(function (opt, i) {
+      opt.setAttribute("aria-pressed", i === index ? "true" : "false");
+    });
   }
 
   function regionKey() {
@@ -1992,7 +2022,7 @@
       advShow: "Advanced settings",
       advHide: "Hide advanced",
       fAccent: "Accent",
-      themeToDark: "Switch to dark", themeToLight: "Switch to light",
+      themeLight: "Light theme", themeDark: "Dark theme",
       accents: {
         bili: "Bilibili Blue", teal: "Teal", emerald: "Emerald", violet: "Violet",
         pink: "Pink", sunset: "Sunset", graphite: "Graphite"
@@ -2031,7 +2061,7 @@
       advShow: "高级设置",
       advHide: "收起高级设置",
       fAccent: "主题色",
-      themeToDark: "切换到深色", themeToLight: "切换到浅色",
+      themeLight: "浅色", themeDark: "深色",
       accents: {
         bili: "哔哩蓝", teal: "青碧", emerald: "翠绿", violet: "星紫",
         pink: "少女粉", sunset: "落日橙", graphite: "石墨灰"
@@ -2091,9 +2121,7 @@
     if (!shadow) {
       return;
     }
-    shadow.querySelectorAll(".ba-lang-btn").forEach(function (b) {
-      b.classList.toggle("active", b.dataset.lang === lang());
-    });
+    setSegActive(shadow.getElementById("ba-lang-seg"), lang() === "zh" ? 1 : 0);
   }
 
   // Reflect the stored accent + theme back onto the picker controls, and keep
@@ -2112,14 +2140,16 @@
         b.setAttribute("aria-label", name);
       }
     });
-    const themeBtn = shadow.getElementById("ba-theme-btn");
-    if (themeBtn) {
-      // Show the glyph for the current theme; the tooltip names where a tap goes.
-      const dark = resolveTheme() === "dark";
-      themeBtn.innerHTML = dark ? MOON_SVG : SUN_SVG;
-      const tip = t(dark ? "themeToLight" : "themeToDark");
-      themeBtn.title = tip;
-      themeBtn.setAttribute("aria-label", tip);
+    const themeSeg = shadow.getElementById("ba-theme-seg");
+    if (themeSeg) {
+      // Slide the thumb to the resolved theme (also animates when the OS flips).
+      setSegActive(themeSeg, resolveTheme() === "dark" ? 1 : 0);
+      const opts = themeSeg.querySelectorAll(".ba-seg-opt");
+      const labels = [t("themeLight"), t("themeDark")];
+      opts.forEach(function (opt, i) {
+        opt.title = labels[i];
+        opt.setAttribute("aria-label", labels[i]);
+      });
     }
   }
 
@@ -2302,13 +2332,14 @@
       ".ba-body{overflow-y:auto;min-height:0}",
       ".ba-head{display:flex;align-items:center;gap:8px;margin-bottom:14px}",
       ".ba-head>svg{width:18px;height:18px;color:var(--ba-accent);flex:0 0 auto}",
-      ".ba-theme-btn{display:grid;place-items:center;width:26px;height:26px;padding:0;border:none;border-radius:7px;background:none;color:var(--ba-ink-soft);cursor:pointer;transition:color .14s ease,background .14s ease}",
-      ".ba-theme-btn:hover{color:var(--ba-accent);background:var(--ba-dot-bg)}",
-      ".ba-theme-btn svg{width:16px;height:16px;display:block}",
-      ".ba-lang{margin-left:auto;display:inline-flex;border:1px solid var(--ba-border-in);border-radius:8px;overflow:hidden;flex:0 0 auto}",
-      ".ba-lang-btn{border:none;background:var(--ba-card);color:var(--ba-ink-soft);font-size:11px;font-weight:700;padding:4px 10px;cursor:pointer;line-height:1.4}",
-      ".ba-lang-btn+.ba-lang-btn{border-left:1px solid var(--ba-border)}",
-      ".ba-lang-btn.active{background:var(--ba-accent);color:#fff}",
+      ".ba-seg{position:relative;display:inline-grid;grid-template-columns:32px 32px;height:24px;border:1px solid var(--ba-border-in);border-radius:8px;background:var(--ba-dot-bg);overflow:hidden;flex:0 0 auto}",
+      ".ba-seg-end{margin-left:auto}",
+      ".ba-seg-thumb{position:absolute;z-index:0;top:0;bottom:0;left:0;width:50%;background:var(--ba-accent);border-radius:7px;transition:transform .2s cubic-bezier(.4,0,.2,1)}",
+      ".ba-seg[data-active=\"1\"] .ba-seg-thumb{transform:translateX(100%)}",
+      ".ba-seg-opt{position:relative;z-index:1;display:grid;place-items:center;border:none;background:none;padding:0;cursor:pointer;color:var(--ba-ink-soft);font-size:11px;font-weight:700;line-height:1;transition:color .18s ease}",
+      ".ba-seg-opt svg{width:15px;height:15px;display:block}",
+      ".ba-seg-opt[aria-pressed=\"true\"]{color:#fff}",
+      "@media (prefers-reduced-motion:reduce){.ba-seg-thumb{transition:none}}",
       ".ba-hero{display:flex;flex-direction:column;align-items:center;text-align:center;padding:4px 0 14px}",
       ".ba-dot{width:46px;height:46px;border-radius:50%;display:grid;place-items:center;margin-bottom:8px;background:var(--ba-dot-bg)}",
       ".ba-dot:after{content:'';width:14px;height:14px;border-radius:50%;background:var(--ba-dot)}",
@@ -2375,33 +2406,30 @@
     head.className = "ba-head";
     head.innerHTML = "<svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path fill=\"currentColor\" d=\"M13 2 4 14h7l-1 8 10-13h-7l1-7Z\"/></svg>";
 
-    const themeBtn = document.createElement("button");
-    themeBtn.className = "ba-theme-btn";
-    themeBtn.id = "ba-theme-btn";
-    themeBtn.type = "button";
-    themeBtn.innerHTML = SUN_SVG;
-    themeBtn.addEventListener("click", toggleTheme);
-    head.appendChild(themeBtn);
-
-    // Language toggle (upper-right). Defaults to English.
-    const langWrap = document.createElement("div");
-    langWrap.className = "ba-lang";
-    [["en", "EN"], ["zh", "中"]].forEach(function (pair) {
-      const b = document.createElement("button");
-      b.type = "button";
-      b.className = "ba-lang-btn";
-      b.dataset.lang = pair[0];
-      b.textContent = pair[1];
-      b.addEventListener("click", function () {
-        if (config.lang === pair[0]) {
-          return;
-        }
-        saveConfig(Object.assign({}, config, { lang: pair[0] }));
-        applyLang();
-      });
-      langWrap.appendChild(b);
+    // Theme toggle (sun | moon). Tapping a side picks it explicitly; the thumb
+    // sits on the resolved side until then. Default stays "system".
+    const themeSeg = createSegToggle("ba-theme-seg", [
+      { html: SUN_SVG, value: "light", label: t("themeLight") },
+      { html: MOON_SVG, value: "dark", label: t("themeDark") }
+    ], resolveTheme() === "dark" ? 1 : 0, function (value) {
+      saveConfig(Object.assign({}, config, { theme: value }));
+      applyTheme();
     });
-    head.appendChild(langWrap);
+    head.appendChild(themeSeg);
+
+    // Language toggle (EN | 中), pushed to the right edge of the header.
+    const langSeg = createSegToggle("ba-lang-seg", [
+      { html: "EN", value: "en" },
+      { html: "中", value: "zh" }
+    ], lang() === "zh" ? 1 : 0, function (value) {
+      if (config.lang === value) {
+        return;
+      }
+      saveConfig(Object.assign({}, config, { lang: value }));
+      applyLang();
+    });
+    langSeg.classList.add("ba-seg-end");
+    head.appendChild(langSeg);
 
     // Hero status
     const hero = document.createElement("div");
