@@ -17,7 +17,7 @@
 - [Greasy Fork 官方脚本页](https://greasyfork.org/en/scripts/582026-bilibili-accelerator)
 - [直接安装 `.user.js`](https://update.greasyfork.org/scripts/582026/Bilibili%20Accelerator.user.js)
 - [GitHub Raw 备用源](https://raw.githubusercontent.com/realzza/bilibili-accelerator/main/dist/bilibili-accelerator.user.js)
-- [GitHub Release v0.2.3](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.2.3)
+- [GitHub Release v0.3.0](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.3.0)
 
 装好后打开任意 B 站视频。右下角出现 ⚡ 小图标，就说明脚本已经生效。
 
@@ -90,6 +90,14 @@ proxy-tf-all-ws.bilivideo.com
 - **漏网更少** —— `URL` 对象请求、协议相对地址、番剧（`video_info.dash`）返回、老式 `durl` 播放列表全部覆盖。
 - **卡顿恢复更执着** —— 现在记录真正卡住的服务器（而不是播放器内部的 blob 地址），并且在持续缓冲时不断轮换，而不是只切一次。
 - **带宽保护加固** —— 可选的带宽保护同时屏蔽 B 站 P2P SDK 入口（`PCDNLoader`、`BPP2PSDK`、`SeederSDK`）。
+
+## 0.3.0 更新
+
+0.3.0 是一次前端升级 —— 面板可以按你的喜好来了：
+
+- **主题色可选** —— 在 **高级设置 → 主题色** 里从六种精选配色中挑（哔哩蓝、少女粉、星紫、翠绿、落日橙、石墨灰）。默认仍是原来的哔哩蓝，不选就不变。
+- **浅色 / 深色 / 跟随系统** —— 面板终于有了正经的深色模式，不再是深色页面上一块刺眼的白框。**外观** 默认跟随系统，系统切换时实时生效。
+- **底层重构** —— 所有颜色都走一层轻量 token，主题色与明暗背景在状态区、实时速度图、开关和 ⚡ 图标之间保持一致。
 
 ## 已测样本
 
