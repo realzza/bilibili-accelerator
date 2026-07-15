@@ -1,34 +1,34 @@
-# Bilibili Accelerator：海外 B 站加速
+# Bilibili Accelerator
 
 [English](./README.en.md)
 
-海外看 B 站，热门视频通常还行，冷门视频却经常一会儿流畅、一会儿卡死。
+Bilibili Accelerator 是一个面向 B 站网页端的用户脚本，主要处理海外网络下冷门视频命中慢速 CDN、MCDN/PCDN 节点后反复缓冲的问题。脚本只改写可疑的播放地址，正常 CDN 默认不动。
 
-**Bilibili Accelerator** 是一个用户脚本。它会在播放器开始缓冲前，自动改写 Bilibili 返回的慢 CDN 播放地址，专治海外网络下常见的 `upos-*ov` 海外镜像、MCDN/PCDN 节点和糟糕路由。
+| ☀️ 浅色 | 🌙 深色 |
+| :---: | :---: |
+| <img src="docs/assets/panel-light.jpg" alt="Bilibili Accelerator 浅色面板" width="360"> | <img src="docs/assets/panel-dark.jpg" alt="Bilibili Accelerator 深色面板" width="360"> |
 
-<p align="center">
-  <img src="docs/assets/panel.png" alt="Bilibili Accelerator 面板：实时下载速度曲线、状态、一键加速" width="360">
-</p>
+## 安装
 
-## 立即安装
+推荐通过 Greasy Fork 安装用户脚本：
 
-推荐从 Greasy Fork 安装，Chrome、Safari、Firefox、Edge 都可以用。
-
-- [Greasy Fork 官方脚本页](https://greasyfork.org/en/scripts/582026-bilibili-accelerator)
+- [Greasy Fork 脚本页](https://greasyfork.org/en/scripts/582026-bilibili-accelerator)
 - [直接安装 `.user.js`](https://update.greasyfork.org/scripts/582026/Bilibili%20Accelerator.user.js)
-- [GitHub Raw 备用源](https://raw.githubusercontent.com/realzza/bilibili-accelerator/main/dist/bilibili-accelerator.user.js)
-- [GitHub Release v0.3.0](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.3.0)
+- [GitHub Raw 备用地址](https://raw.githubusercontent.com/realzza/bilibili-accelerator/main/dist/bilibili-accelerator.user.js)
+- [GitHub Releases](https://github.com/realzza/bilibili-accelerator/releases/latest)
 
-装好后打开任意 B 站视频。右下角出现 ⚡ 小图标，就说明脚本已经生效。
+Chrome、Edge 和 Firefox 安装 [Tampermonkey](https://www.tampermonkey.net/) 或 [Violentmonkey](https://violentmonkey.github.io/) 后，打开 Greasy Fork 页面安装即可。装好后刷新 B 站视频页，右下角出现 ⚡ 图标就说明脚本已经加载。
 
-## Chrome / Edge
+### Safari
 
-1. 安装 [Tampermonkey](https://www.tampermonkey.net/) 或 [Violentmonkey](https://violentmonkey.github.io/)。
-2. 打开 [Greasy Fork 脚本页](https://greasyfork.org/en/scripts/582026-bilibili-accelerator)。
-3. 点击 Install。
-4. 刷新 B 站视频页。
+1. 安装 Safari 扩展 [Userscripts](https://apps.apple.com/us/app/userscripts/id1463298887)。
+2. 在 Safari 设置中启用 Userscripts，并允许访问 `bilibili.com`。
+3. 打开 Greasy Fork 脚本页或 GitHub Raw 地址完成安装。
+4. 刷新已经打开的 B 站页面。
 
-也可以加载解压扩展：
+### 加载本地扩展
+
+仓库同时提供 Chrome / Edge 可加载的 Manifest V3 扩展：
 
 ```sh
 npm run build
@@ -36,78 +36,50 @@ npm run build
 
 然后打开 `chrome://extensions`，开启「开发者模式」，选择 `dist/extension`。
 
-## Safari
+## 工作方式
 
-1. 安装 Safari 扩展 [Userscripts](https://apps.apple.com/us/app/userscripts/id1463298887)。
-2. 在 Safari 设置里启用 Userscripts，并允许访问 `bilibili.com`。
-3. 打开 [Greasy Fork 脚本页](https://greasyfork.org/en/scripts/582026-bilibili-accelerator) 或 [GitHub Raw 备用源](https://raw.githubusercontent.com/realzza/bilibili-accelerator/main/dist/bilibili-accelerator.user.js)。
-4. Userscripts 提示安装后，刷新 B 站视频页。
-
-## 它改了什么
-
-Bilibili 会给同一个视频返回多条带签名的媒体 URL。海外网络下，冷门视频常被分到这些地址：
+B 站通常会为同一段视频返回多条带签名的媒体地址。海外网络下，问题地址常见于：
 
 ```text
 upos-sz-mirrorcosov.bilivideo.com
 xy153x35x231x78xy.mcdn.bilivideo.cn:8082
 ```
 
-脚本会把慢路径换成更稳的播放路径，默认类似：
+脚本会在播放器发起分片请求前识别这些地址，并按当前配置切到更稳的官方 CDN 或代理线路，例如：
 
 ```text
 upos-sz-mirrorcos.bilivideo.com
 proxy-tf-all-ws.bilivideo.com
 ```
 
-正常 CDN 默认不动。遇到特别顽固的视频，可以点右下角 ⚡ 图标，按 **Still buffering? Boost harder（再加把劲）**。
+默认行为：
 
-网页全屏时 ⚡ 图标会自动淡出，不挡视频；把鼠标移到右下角即可重新唤出。
+- 只处理已知慢镜像、MCDN/PCDN、异常端口和带 `os=mcdn` 的播放节点。
+- 自动探测候选 CDN，按当前地区缓存可用线路；也可以在高级设置中固定服务器。
+- 播放持续缓冲时自动轮换线路，不需要刷新页面或重新找进度。
+- 直播地址（`/live-bvc/`）不会被改写到点播服务器；脚本只从直播线路列表中过滤明显的 PCDN/MCDN 节点，并保留最后一个可用地址。
+- `fetch`、`XMLHttpRequest`、页面播放数据和清晰度切换都走同一套改写逻辑。
 
-## 0.2 新功能
+## 面板与设置
 
-0.2 是一次大升级，重点是「自动识别更多慢节点」并且「尽量不打扰你」：
+- 面板显示当前状态、已处理连接数和实时下载速度；拿不到字节数时会显示前方缓冲时长。
+- 明暗模式默认跟随系统。点击顶部的日 / 月按钮后，会保存为明确的浅色或深色设置。
+- 高级设置提供 7 套主题色：哔哩蓝、青碧、翠绿、星紫、少女粉、落日橙和石墨灰。
+- 「还在卡？再加把劲」会切到更积极的改写策略，并刷新当前页面。
+- 可选的带宽保护会阻止 B 站 P2P SDK 和 WebRTC 上传入口，开启后需要刷新页面。
+- 网页全屏时 ⚡ 图标会淡出；把鼠标移到右下角即可重新唤出。
 
-- **能抓 B 站新出的隐藏 PCDN**（例如 `*.edge.mountaintoys.cn`）：凡是用了奇怪端口或带 `os=mcdn` 的播放节点都按慢节点处理，不再依赖一份要不断更新的域名清单。
-- **覆盖所有请求路径**：在 `fetch`、`JSON.parse`、页面全局变量之外，新增 `XMLHttpRequest` 拦截，切清晰度、看番剧不再漏网。
-- **自动挑最快的服务器**：自动探测候选节点，按你所在区域记住最快的那个，而不是把所有人都钉死在一个固定地址。
-- **卡顿自动恢复**：缓冲时实时切换服务器，无需刷新页面。
-- **大白话面板**：一个状态（流畅播放 / 正在找更快的服务器）、一个开关、一个「再加把劲」按钮。所有老选项都收进 **Advanced settings（高级设置）**。
-- **可选的带宽保护**：阻止 B 站通过 WebRTC P2P 占用你的上传带宽（默认关闭）。
-- **浏览器扩展新增工具栏弹窗与设置同步。**
-- **实时速度图** *(0.2.1，0.2.2 优化)*：面板内置实时下载速度曲线。速度按真正在传输数据的时段来计算，因此快网络会稳定显示高速，而不会在缓冲填满的间隙频繁掉到 0；当 CDN 不暴露字节数时自动回退为缓冲时长。
+## 遇到问题
 
-<p align="center">
-  <img src="docs/assets/panel-advanced.png" alt="高级设置：自动选最快服务器、隐藏 PCDN 识别、卡顿自动恢复、带宽保护" width="360">
-</p>
+先确认页面右下角有 ⚡ 图标。刚安装或更新后，需要刷新已经打开的 B 站页面。
 
-## 0.2.3 更新
+如果仍然卡顿，打开「高级设置」，点击「复制诊断报告」，然后在 [Issues](https://github.com/realzza/bilibili-accelerator/issues) 中附上视频地址、所在地区和具体现象。诊断报告只保留域名与改写原因，不包含带签名参数的完整媒体 URL。
 
-0.2.3 是一次正确性与覆盖率升级：
+## 限制
 
-- **直播不再误伤** —— 直播（`/live-bvc/`）地址不再被换到点播镜像（那些服务器根本放不了直播），并且会从直播间的服务器列表里过滤掉 PCDN/MCDN 节点，让直播播放器只连官方 CDN。
-- **测速更聪明** —— 探测候选服务器时会读取真实 HTTP 状态（秒回错误的服务器不会再赢得排名），并在拿到响应后立刻中断下载，不再在每次探测时偷偷拉整段视频。
-- **识别更多 PCDN 家族** —— 新增 `upos-*302*` 跳转节点及其落地的家用宽带域名，以及伪装成镜像名的 PCDN 服务器。
-- **漏网更少** —— `URL` 对象请求、协议相对地址、番剧（`video_info.dash`）返回、老式 `durl` 播放列表全部覆盖。
-- **卡顿恢复更执着** —— 现在记录真正卡住的服务器（而不是播放器内部的 blob 地址），并且在持续缓冲时不断轮换，而不是只切一次。
-- **带宽保护加固** —— 可选的带宽保护同时屏蔽 B 站 P2P SDK 入口（`PCDNLoader`、`BPP2PSDK`、`SeederSDK`）。
-
-## 0.3.0 更新
-
-0.3.0 主要折腾界面，让面板能调成你喜欢的样子：
-
-- **主题色随便挑** —— 高级设置里内置了 7 种配色（哔哩蓝、青碧、翠绿、星紫、少女粉、落日橙、石墨灰），默认还是哔哩蓝，不动它就和以前一样。
-- **深色模式** —— 面板顶上多了个日 / 月开关，深色网页下不再是白花花一块。默认跟随系统，手动切过一次就记住。
-- **配色重构** —— 顺手把面板配色统一成了一套 token，换主题色、切深浅的时候，状态、速度图、开关、⚡ 图标都会一起变，不会漏掉哪一块。
-
-## 已测样本
-
-这个视频曾被反馈特别卡：
-
-```text
-https://www.bilibili.com/video/BV1NnVK6cEXs
-```
-
-页面播放数据返回了 `upos-sz-mirrorcosov.bilivideo.com`。脚本会自动改成 `upos-sz-mirrorcos.bilivideo.com`。
+- 这个项目只处理浏览器中的 B 站网页播放器，不直接支持 Apple TV 或手机 App。
+- CDN 状态会随地区和运营商变化；脚本能绕开已知慢线路，但不能解决版权区域限制、源文件异常或本地网络故障。
+- 软路由方案及原生 App 的证书限制见 [docs/router-proxy.md](docs/router-proxy.md)。
 
 ## 开发
 
@@ -116,17 +88,15 @@ npm test
 npm run build
 ```
 
-输出：
+构建产物：
 
 ```text
 dist/bilibili-accelerator.user.js
 dist/extension/
 ```
 
-## 软路由 / Apple TV / 手机 App？
+`package.json` 是版本号的唯一来源；构建脚本会同步用户脚本头和扩展 manifest。提交前请确保重新构建后的 `dist/` 没有未提交差异。
 
-经常有人问能不能放进软路由，让原生 App 也加速。结论和限制见 [docs/router-proxy.md](docs/router-proxy.md)：网页端可行，但 Apple TV / 手机 App 受证书安装与证书固定限制，基本做不到。
+## License
 
-## 为什么值得 Star
-
-如果你也在海外看 B 站，这个项目能把很多“玄学卡顿”变成一个可控开关。
+[MIT](./LICENSE)
