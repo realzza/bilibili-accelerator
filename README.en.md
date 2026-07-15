@@ -17,7 +17,7 @@ Greasy Fork is the recommended install path. It works with Chrome, Safari, Firef
 - [Greasy Fork script page](https://greasyfork.org/en/scripts/582026-bilibili-accelerator)
 - [Direct `.user.js` install](https://update.greasyfork.org/scripts/582026/Bilibili%20Accelerator.user.js)
 - [GitHub Raw fallback](https://raw.githubusercontent.com/realzza/bilibili-accelerator/main/dist/bilibili-accelerator.user.js)
-- [GitHub Release v0.2.3](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.2.3)
+- [GitHub Release v0.3.0](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.3.0)
 
 After installation, open any Bilibili video. A small ⚡ icon in the lower-right corner means the script is active.
 
@@ -90,6 +90,14 @@ In web fullscreen the ⚡ icon fades out so it never covers the video; move the 
 - **Fewer escapes** — requests made with `URL` objects, protocol-relative URLs, bangumi (`video_info.dash`) payloads, and legacy `durl` playlists are all covered now.
 - **Stall recovery that keeps trying** — recovery now tracks the server that actually stalled (not the player's internal blob URL) and keeps rotating while buffering persists instead of switching exactly once.
 - **Bandwidth guard hardening** — the opt-in guard also stubs Bilibili's P2P SDK entry points (`PCDNLoader`, `BPP2PSDK`, `SeederSDK`).
+
+## What's New in 0.3.0
+
+0.3.0 is a frontend release — the panel becomes yours to personalize:
+
+- **Accent themes** — pick from seven curated accents (Bilibili Blue, Teal, Emerald, Violet, Pink, Sunset, Graphite) under **Advanced settings → Accent**. Defaults to the original Bilibili blue, so nothing changes until you choose otherwise.
+- **Light / dark toggle** — a sun/moon switch in the panel header gives it a proper dark theme instead of a bright white box on dark pages. It follows your OS by default and remembers your choice once you tap it.
+- **Under the hood** — every color routes through a small token layer, so accent and surface are one consistent system across the status hero, the live speed chart, switches, and the ⚡ badge.
 
 ## Tested Case
 

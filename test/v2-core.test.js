@@ -37,6 +37,27 @@ test("language defaults to English and accepts zh", () => {
   assert.equal(core.normalizeConfig({ lang: "zh" }).lang, "zh");
 });
 
+test("appearance defaults to Bilibili blue on the system theme", () => {
+  const cfg = core.normalizeConfig();
+  assert.equal(cfg.accent, "bili");
+  assert.equal(cfg.theme, "system");
+});
+
+test("normalizeConfig accepts known accents and theme modes", () => {
+  core.ACCENT_KEYS.forEach((key) => {
+    assert.equal(core.normalizeConfig({ accent: key }).accent, key);
+  });
+  core.THEME_MODES.forEach((mode) => {
+    assert.equal(core.normalizeConfig({ theme: mode }).theme, mode);
+  });
+});
+
+test("normalizeConfig rejects unknown accent and theme values", () => {
+  const cfg = core.normalizeConfig({ accent: "chartreuse", theme: "sepia" });
+  assert.equal(cfg.accent, "bili");
+  assert.equal(cfg.theme, "system");
+});
+
 test("classify flags non-default ports as PCDN", () => {
   const url = new URL("https://1.2.3.4:8082/upgcxcode/x.m4s?abc=1");
   const v = core.classify(url, {});

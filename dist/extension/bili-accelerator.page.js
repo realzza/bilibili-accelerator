@@ -26,6 +26,20 @@
     "upos-sz-mirrorhwov.bilivideo.com"
   ]);
 
+  // Panel appearance options. Keys only — the actual accent hexes and dark/light
+  // surface tokens live in the page UI; core just owns the allowed values so a
+  // stored or bridged config can be validated back to a known-good default.
+  const ACCENT_KEYS = Object.freeze([
+    "bili",     // Bilibili blue (default — unchanged for existing users)
+    "teal",
+    "emerald",
+    "violet",
+    "pink",     // Little-TV pink
+    "sunset",
+    "graphite"
+  ]);
+  const THEME_MODES = Object.freeze(["system", "light", "dark"]);
+
   // Candidates that are safe to auto-probe and rank: non-akamai, non-overseas
   // mirrors that work well as generic rewrite targets.
   const CANDIDATE_POOL = Object.freeze([
@@ -39,6 +53,8 @@
   const DEFAULT_CONFIG = Object.freeze({
     enabled: true,
     lang: "en",                                    // en | zh (UI language)
+    accent: "bili",                                // panel accent (see ACCENT_KEYS)
+    theme: "system",                               // system | light | dark surface
     mode: "bad-only",                              // bad-only | force | off
     selection: "auto",                             // auto | fixed
     pcdnHost: "upos-sz-mirrorcos.bilivideo.com",
@@ -100,6 +116,12 @@
     }
     if (merged.lang !== "en" && merged.lang !== "zh") {
       merged.lang = DEFAULT_CONFIG.lang;
+    }
+    if (ACCENT_KEYS.indexOf(merged.accent) === -1) {
+      merged.accent = DEFAULT_CONFIG.accent;
+    }
+    if (THEME_MODES.indexOf(merged.theme) === -1) {
+      merged.theme = DEFAULT_CONFIG.theme;
     }
     merged.schemaVersion = SCHEMA_VERSION;
     return merged;
@@ -581,6 +603,8 @@
     SCHEMA_VERSION,
     CDN_HOSTS,
     CANDIDATE_POOL,
+    ACCENT_KEYS,
+    THEME_MODES,
     DEFAULT_CONFIG,
     normalizeConfig,
     hasMediaSignal: hasBiliMediaSignal,
@@ -610,7 +634,7 @@
   }
   root.__BILI_ACCELERATOR_INSTALLED__ = true;
 
-  const VERSION = "0.2.3";
+  const VERSION = "0.3.0";
   const STORAGE_KEY = "biliAccelerator.config.v2";
   const LEGACY_KEY = "biliAccelerator.config.v1";
   const RANK_PREFIX = "biliAccelerator.rank.";
@@ -674,6 +698,151 @@
     } catch (_) {
       // storage may be unavailable; in-memory config still applies.
     }
+  }
+
+  // ---- panel appearance ---------------------------------------------------
+
+  // Accent presets keyed by core.ACCENT_KEYS. `hex` is the primary accent,
+  // `strong` the pressed/hover shade, `gradA`/`gradB` the ⚡ toggle gradient.
+  const ACCENT_PRESETS = {
+    bili:     { hex: "#00aeec", strong: "#0091cc", gradA: "#00b5f5", gradB: "#0091cc" },
+    teal:     { hex: "#0d9488", strong: "#0b7d73", gradA: "#14b8a6", gradB: "#0b7d73" },
+    emerald:  { hex: "#10b981", strong: "#0e9d6e", gradA: "#25c894", gradB: "#0e9d6e" },
+    violet:   { hex: "#7c5cff", strong: "#6544e0", gradA: "#8f74ff", gradB: "#6544e0" },
+    pink:     { hex: "#fb7299", strong: "#e85d86", gradA: "#ff86ab", gradB: "#e85d86" },
+    sunset:   { hex: "#f97316", strong: "#db5f0c", gradA: "#ff8a3d", gradB: "#db5f0c" },
+    graphite: { hex: "#46566a", strong: "#33404f", gradA: "#556579", gradB: "#33404f" }
+  };
+
+  // Header theme-toggle glyphs; swapped by updateAppearanceControls per resolved theme.
+  const SUN_SVG = "<svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path fill=\"currentColor\" d=\"M12 17a5 5 0 1 0 0-10 5 5 0 0 0 0 10Zm0-13a1 1 0 0 1 1 1v1a1 1 0 1 1-2 0V5a1 1 0 0 1 1-1Zm0 14a1 1 0 0 1 1 1v1a1 1 0 1 1-2 0v-1a1 1 0 0 1 1-1ZM4 12a1 1 0 0 1 1-1h1a1 1 0 1 1 0 2H5a1 1 0 0 1-1-1Zm14 0a1 1 0 0 1 1-1h1a1 1 0 1 1 0 2h-1a1 1 0 0 1-1-1ZM6.3 6.3a1 1 0 0 1 1.4 0l.7.7a1 1 0 1 1-1.4 1.4l-.7-.7a1 1 0 0 1 0-1.4Zm9.3 9.3a1 1 0 0 1 1.4 0l.7.7a1 1 0 1 1-1.4 1.4l-.7-.7a1 1 0 0 1 0-1.4Zm1.4-9.3a1 1 0 0 1 0 1.4l-.7.7a1 1 0 1 1-1.4-1.4l.7-.7a1 1 0 0 1 1.4 0ZM7.7 15.6a1 1 0 0 1 0 1.4l-.7.7a1 1 0 0 1-1.4-1.4l.7-.7a1 1 0 0 1 1.4 0Z\"/></svg>";
+  const MOON_SVG = "<svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path fill=\"currentColor\" d=\"M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z\"/></svg>";
+
+  // Surface tokens per resolved theme; the accent tokens are layered on top.
+  const SURFACES = {
+    light: {
+      "--ba-surface": "rgba(255,255,255,.97)", "--ba-card": "#ffffff",
+      "--ba-border": "#e5eaf0", "--ba-border-in": "#d5dde5",
+      "--ba-ink": "#17202a", "--ba-ink-strong": "#111827", "--ba-ink-mid": "#46515c",
+      "--ba-ink-soft": "#6b7785", "--ba-ink-faint": "#8a95a1",
+      "--ba-dot-bg": "#eef2f6", "--ba-dot": "#9aa6b2",
+      "--ba-good-bg": "#e6f8ee", "--ba-good": "#19a974",
+      "--ba-warn-bg": "#fff4e0", "--ba-warn": "#e8910c",
+      "--ba-slider-off": "#c9d3dd", "--ba-panel-shadow": "rgba(21,32,43,.24)"
+    },
+    dark: {
+      "--ba-surface": "rgba(22,26,32,.975)", "--ba-card": "#1c222b",
+      "--ba-border": "#2b323d", "--ba-border-in": "#38414d",
+      "--ba-ink": "#e8edf2", "--ba-ink-strong": "#f4f7fa", "--ba-ink-mid": "#b9c3ce",
+      "--ba-ink-soft": "#93a0ac", "--ba-ink-faint": "#6f7b87",
+      "--ba-dot-bg": "#262d37", "--ba-dot": "#6f7b87",
+      "--ba-good-bg": "rgba(25,169,116,.16)", "--ba-good": "#2ed3a0",
+      "--ba-warn-bg": "rgba(232,145,12,.16)", "--ba-warn": "#f0a838",
+      "--ba-slider-off": "#3a434f", "--ba-panel-shadow": "rgba(0,0,0,.5)"
+    }
+  };
+
+  // The speed canvas can't cheaply read CSS vars per frame, so applyTheme caches
+  // the values it needs: accent for the line/fill, card for the endpoint halo.
+  const speedPaint = { accent: "#00aeec", accentRgb: "0,174,236", card: "#ffffff" };
+
+  function resolveTheme() {
+    if (config.theme === "light" || config.theme === "dark") {
+      return config.theme;
+    }
+    try {
+      return root.matchMedia && root.matchMedia("(prefers-color-scheme: dark)").matches
+        ? "dark" : "light";
+    } catch (_) {
+      return "light";
+    }
+  }
+
+  function hexToRgb(hex) {
+    const n = parseInt(hex.slice(1), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255].join(",");
+  }
+
+  // Push the resolved accent + surface onto the shadow host as CSS custom
+  // properties; the panel styles read them through var(). Custom properties
+  // inherit across the shadow boundary, so setting them on the host is enough.
+  function applyTheme() {
+    const host = document.getElementById(BUTTON_ID);
+    if (!host) {
+      return;
+    }
+    const accent = ACCENT_PRESETS[config.accent] || ACCENT_PRESETS.bili;
+    const surface = SURFACES[resolveTheme()] || SURFACES.light;
+    Object.keys(surface).forEach(function (name) {
+      host.style.setProperty(name, surface[name]);
+    });
+    const rgb = hexToRgb(accent.hex);
+    host.style.setProperty("--ba-accent", accent.hex);
+    host.style.setProperty("--ba-accent-strong", accent.strong);
+    host.style.setProperty("--ba-grad-a", accent.gradA);
+    host.style.setProperty("--ba-grad-b", accent.gradB);
+    host.style.setProperty("--ba-accent-shadow", "rgba(" + rgb + ",.42)");
+    speedPaint.accent = accent.hex;
+    speedPaint.accentRgb = rgb;
+    speedPaint.card = surface["--ba-card"];
+    drawSpeed();
+    updateAppearanceControls();
+  }
+
+  function watchSystemTheme() {
+    try {
+      const mq = root.matchMedia("(prefers-color-scheme: dark)");
+      const onChange = function () {
+        if (config.theme === "system") {
+          applyTheme();
+        }
+      };
+      if (typeof mq.addEventListener === "function") {
+        mq.addEventListener("change", onChange);
+      } else if (typeof mq.addListener === "function") {
+        mq.addListener(onChange);
+      }
+    } catch (_) {
+      // matchMedia unavailable — system theme just won't live-update.
+    }
+  }
+
+  // A two-option sliding toggle (the header language + theme pills share it).
+  // Both cells are equal width, so the 50%-wide thumb slides exactly one cell.
+  // Mounts with the active index already set, so it never animates on first
+  // paint — only later taps slide. options: [{ html, value, label }].
+  function createSegToggle(id, options, activeIndex, onSelect) {
+    const seg = document.createElement("div");
+    seg.className = "ba-seg";
+    seg.id = id;
+    seg.dataset.active = String(activeIndex);
+    const thumb = document.createElement("span");
+    thumb.className = "ba-seg-thumb";
+    seg.appendChild(thumb);
+    options.forEach(function (opt, i) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "ba-seg-opt";
+      btn.innerHTML = opt.html;
+      btn.setAttribute("aria-pressed", i === activeIndex ? "true" : "false");
+      if (opt.label) {
+        btn.title = opt.label;
+        btn.setAttribute("aria-label", opt.label);
+      }
+      btn.addEventListener("click", function () { onSelect(opt.value, i); });
+      seg.appendChild(btn);
+    });
+    return seg;
+  }
+
+  function setSegActive(seg, index) {
+    if (!seg) {
+      return;
+    }
+    seg.dataset.active = String(index);
+    seg.querySelectorAll(".ba-seg-opt").forEach(function (opt, i) {
+      opt.setAttribute("aria-pressed", i === index ? "true" : "false");
+    });
   }
 
   function regionKey() {
@@ -1665,8 +1834,8 @@
     ctx.lineTo(xs[0], h);
     ctx.closePath();
     const grad = ctx.createLinearGradient(0, 0, 0, h);
-    grad.addColorStop(0, "rgba(0,174,236,0.30)");
-    grad.addColorStop(1, "rgba(0,174,236,0.02)");
+    grad.addColorStop(0, "rgba(" + speedPaint.accentRgb + ",0.30)");
+    grad.addColorStop(1, "rgba(" + speedPaint.accentRgb + ",0.02)");
     ctx.fillStyle = grad;
     ctx.fill();
 
@@ -1674,7 +1843,7 @@
     ctx.beginPath();
     tracePath(ctx, xs, ys, tan);
     ctx.lineWidth = 2;
-    ctx.strokeStyle = "#00aeec";
+    ctx.strokeStyle = speedPaint.accent;
     ctx.lineJoin = "round";
     ctx.lineCap = "round";
     ctx.stroke();
@@ -1684,10 +1853,10 @@
     const ly = ys[ys.length - 1];
     ctx.beginPath();
     ctx.arc(lx, ly, 3.2, 0, Math.PI * 2);
-    ctx.fillStyle = "#00aeec";
+    ctx.fillStyle = speedPaint.accent;
     ctx.fill();
     ctx.lineWidth = 1.5;
-    ctx.strokeStyle = "#ffffff";
+    ctx.strokeStyle = speedPaint.card;
     ctx.stroke();
   }
 
@@ -1852,6 +2021,12 @@
       boost: "Still buffering? Boost harder",
       advShow: "Advanced settings",
       advHide: "Hide advanced",
+      fAccent: "Accent",
+      themeLight: "Light theme", themeDark: "Dark theme",
+      accents: {
+        bili: "Bilibili Blue", teal: "Teal", emerald: "Emerald", violet: "Violet",
+        pink: "Pink", sunset: "Sunset", graphite: "Graphite"
+      },
       fServer: "Server", fWhen: "When", fFixed: "Fixed server", fMcdn: "MCDN",
       selAuto: "Auto (pick fastest)", selFixed: "Use a fixed server",
       modeBad: "Only fix slow servers", modeForce: "Always switch server",
@@ -1885,6 +2060,12 @@
       boost: "还在卡？再加把劲",
       advShow: "高级设置",
       advHide: "收起高级设置",
+      fAccent: "主题色",
+      themeLight: "浅色", themeDark: "深色",
+      accents: {
+        bili: "哔哩蓝", teal: "青碧", emerald: "翠绿", violet: "星紫",
+        pink: "少女粉", sunset: "落日橙", graphite: "石墨灰"
+      },
       fServer: "服务器", fWhen: "何时", fFixed: "固定服务器", fMcdn: "MCDN",
       selAuto: "自动（选最快）", selFixed: "使用固定服务器",
       modeBad: "仅修复慢服务器", modeForce: "总是切换服务器",
@@ -1930,6 +2111,7 @@
     const adv = shadow.querySelector(".ba-adv");
     setAdvToggleLabel(adv && adv.classList.contains("open"));
     updateLangButtons();
+    updateAppearanceControls();
     updateSpeedReadouts();
     renderStatus();
   }
@@ -1939,9 +2121,36 @@
     if (!shadow) {
       return;
     }
-    shadow.querySelectorAll(".ba-lang-btn").forEach(function (b) {
-      b.classList.toggle("active", b.dataset.lang === lang());
+    setSegActive(shadow.getElementById("ba-lang-seg"), lang() === "zh" ? 1 : 0);
+  }
+
+  // Reflect the stored accent + theme back onto the picker controls, and keep
+  // the swatch tooltips localized. Safe to call before the panel exists.
+  function updateAppearanceControls() {
+    const shadow = getShadow();
+    if (!shadow) {
+      return;
+    }
+    const names = STRINGS[lang()].accents || {};
+    shadow.querySelectorAll(".ba-sw").forEach(function (b) {
+      b.setAttribute("aria-pressed", b.dataset.accent === config.accent ? "true" : "false");
+      const name = names[b.dataset.accent];
+      if (name) {
+        b.title = name;
+        b.setAttribute("aria-label", name);
+      }
     });
+    const themeSeg = shadow.getElementById("ba-theme-seg");
+    if (themeSeg) {
+      // Slide the thumb to the resolved theme (also animates when the OS flips).
+      setSegActive(themeSeg, resolveTheme() === "dark" ? 1 : 0);
+      const opts = themeSeg.querySelectorAll(".ba-seg-opt");
+      const labels = [t("themeLight"), t("themeDark")];
+      opts.forEach(function (opt, i) {
+        opt.title = labels[i];
+        opt.setAttribute("aria-label", labels[i]);
+      });
+    }
   }
 
   function setAdvToggleLabel(open) {
@@ -1987,6 +2196,42 @@
     label.appendChild(caption);
     label.appendChild(control);
     return label;
+  }
+
+  // Like createField but a plain <div> instead of <label>, so a row of buttons
+  // (the accent swatches) doesn't forward stray clicks to the first button.
+  function createSwatchField(key, control) {
+    const row = document.createElement("div");
+    row.className = "ba-field";
+    const caption = document.createElement("span");
+    caption.dataset.i18n = key;
+    caption.textContent = t(key);
+    row.appendChild(caption);
+    row.appendChild(control);
+    return row;
+  }
+
+  function createAccentPicker() {
+    const wrap = document.createElement("div");
+    wrap.className = "ba-swatches";
+    core.ACCENT_KEYS.forEach(function (key) {
+      const preset = ACCENT_PRESETS[key];
+      if (!preset) {
+        return;
+      }
+      const swatch = document.createElement("button");
+      swatch.type = "button";
+      swatch.className = "ba-sw";
+      swatch.dataset.accent = key;
+      swatch.style.background = preset.hex;
+      swatch.setAttribute("aria-pressed", key === config.accent ? "true" : "false");
+      swatch.addEventListener("click", function () {
+        saveConfig(Object.assign({}, config, { accent: key }));
+        applyTheme();
+      });
+      wrap.appendChild(swatch);
+    });
+    return wrap;
   }
 
   function createSwitchRow(titleKey, noteKey, checked, onChange) {
@@ -2070,66 +2315,77 @@
     const shadow = host.attachShadow({ mode: "open" });
     const style = document.createElement("style");
     style.textContent = [
-      ":host{position:fixed;right:18px;bottom:18px;z-index:2147483647;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#17202a;transition:opacity .25s ease}",
+      // Appearance tokens (light + Bilibili-blue baseline). applyTheme() layers
+      // the resolved accent + dark/light surface over these via inline vars on
+      // the host, which inherit across the shadow boundary.
+      ":host{--ba-accent:#00aeec;--ba-accent-strong:#0091cc;--ba-grad-a:#00b5f5;--ba-grad-b:#0091cc;--ba-accent-shadow:rgba(0,174,236,.42);--ba-surface:rgba(255,255,255,.97);--ba-card:#fff;--ba-border:#e5eaf0;--ba-border-in:#d5dde5;--ba-ink:#17202a;--ba-ink-strong:#111827;--ba-ink-mid:#46515c;--ba-ink-soft:#6b7785;--ba-ink-faint:#8a95a1;--ba-dot-bg:#eef2f6;--ba-dot:#9aa6b2;--ba-good-bg:#e6f8ee;--ba-good:#19a974;--ba-warn-bg:#fff4e0;--ba-warn:#e8910c;--ba-slider-off:#c9d3dd;--ba-panel-shadow:rgba(21,32,43,.24)}",
+      ":host{position:fixed;right:18px;bottom:18px;z-index:2147483647;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:var(--ba-ink);transition:opacity .25s ease}",
       ":host(.ba-immersed){opacity:0;pointer-events:none}",
       ":host(.ba-lifted){bottom:84px}",
       "*{box-sizing:border-box}",
       "button,input,select{font:inherit}",
-      ".ba-toggle{display:grid;place-items:center;width:40px;height:40px;border:1px solid rgba(255,255,255,.4);border-radius:50%;background:linear-gradient(135deg,#00b5f5,#0091cc);color:#fff;box-shadow:0 8px 22px rgba(0,174,236,.42),0 1px 0 rgba(255,255,255,.45) inset;cursor:pointer;padding:0;transition:transform .16s ease,box-shadow .16s ease}",
+      ".ba-toggle{display:grid;place-items:center;width:40px;height:40px;border:1px solid rgba(255,255,255,.4);border-radius:50%;background:linear-gradient(135deg,var(--ba-grad-a),var(--ba-grad-b));color:#fff;box-shadow:0 8px 22px var(--ba-accent-shadow),0 1px 0 rgba(255,255,255,.45) inset;cursor:pointer;padding:0;transition:transform .16s ease,box-shadow .16s ease}",
       ".ba-toggle:hover{transform:translateY(-1px)}",
       ".ba-toggle svg{width:20px;height:20px;display:block}",
-      ".ba-panel{display:none;flex-direction:column;position:absolute;right:0;bottom:48px;width:min(340px,calc(100vw - 36px));max-height:calc(100vh - 96px);padding:16px;border:1px solid rgba(23,32,42,.12);border-radius:14px;background:rgba(255,255,255,.97);box-shadow:0 18px 46px rgba(21,32,43,.24);backdrop-filter:saturate(180%) blur(18px);-webkit-backdrop-filter:saturate(180%) blur(18px)}",
+      ".ba-panel{display:none;flex-direction:column;position:absolute;right:0;bottom:48px;width:min(340px,calc(100vw - 36px));max-height:calc(100vh - 96px);padding:16px;border:1px solid var(--ba-border);border-radius:14px;background:var(--ba-surface);box-shadow:0 18px 46px var(--ba-panel-shadow);backdrop-filter:saturate(180%) blur(18px);-webkit-backdrop-filter:saturate(180%) blur(18px)}",
       ".ba-panel.open{display:flex}",
       ".ba-body{overflow-y:auto;min-height:0}",
       ".ba-head{display:flex;align-items:center;gap:8px;margin-bottom:14px}",
-      ".ba-head svg{width:18px;height:18px;color:#00aeec;flex:0 0 auto}",
-      ".ba-title{font-size:14px;font-weight:800;margin:0;color:#111827}",
-      ".ba-lang{margin-left:auto;display:inline-flex;border:1px solid #d5dde5;border-radius:8px;overflow:hidden;flex:0 0 auto}",
-      ".ba-lang-btn{border:none;background:#fff;color:#6b7785;font-size:11px;font-weight:700;padding:4px 10px;cursor:pointer;line-height:1.4}",
-      ".ba-lang-btn+.ba-lang-btn{border-left:1px solid #e5eaf0}",
-      ".ba-lang-btn.active{background:#00aeec;color:#fff}",
+      ".ba-head>svg{width:18px;height:18px;color:var(--ba-accent);flex:0 0 auto}",
+      ".ba-seg{position:relative;display:inline-grid;grid-template-columns:32px 32px;height:24px;border:1px solid var(--ba-border-in);border-radius:8px;background:var(--ba-dot-bg);overflow:hidden;flex:0 0 auto}",
+      ".ba-seg-end{margin-left:auto}",
+      ".ba-seg-thumb{position:absolute;z-index:0;top:0;bottom:0;left:0;width:50%;background:var(--ba-accent);border-radius:7px;transition:transform .2s cubic-bezier(.4,0,.2,1)}",
+      ".ba-seg[data-active=\"1\"] .ba-seg-thumb{transform:translateX(100%)}",
+      ".ba-seg-opt{position:relative;z-index:1;display:grid;place-items:center;border:none;background:none;padding:0;cursor:pointer;color:var(--ba-ink-soft);font-size:11px;font-weight:700;line-height:1;transition:color .18s ease}",
+      ".ba-seg-opt svg{width:15px;height:15px;display:block}",
+      ".ba-seg-opt[aria-pressed=\"true\"]{color:#fff}",
+      "@media (prefers-reduced-motion:reduce){.ba-seg-thumb{transition:none}}",
       ".ba-hero{display:flex;flex-direction:column;align-items:center;text-align:center;padding:4px 0 14px}",
-      ".ba-dot{width:46px;height:46px;border-radius:50%;display:grid;place-items:center;margin-bottom:8px;background:#eef2f6}",
-      ".ba-dot:after{content:'';width:14px;height:14px;border-radius:50%;background:#9aa6b2}",
-      ".ba-dot.ba-smooth{background:#e6f8ee}.ba-dot.ba-smooth:after{background:#19a974}",
-      ".ba-dot.ba-optimizing,.ba-dot.ba-buffering{background:#fff4e0}.ba-dot.ba-optimizing:after,.ba-dot.ba-buffering:after{background:#e8910c}",
-      ".ba-dot.ba-off:after{background:#9aa6b2}",
-      ".ba-word{font-size:15px;font-weight:800;color:#1b2733}",
-      ".ba-subnote{font-size:11px;color:#6b7785;margin-top:2px;line-height:1.4}",
-      ".ba-count{font-size:11px;color:#8a95a1;margin-top:6px}",
-      ".ba-speed{margin:0 0 10px;padding:10px 12px;border:1px solid #e5eaf0;border-radius:10px;background:#fff}",
+      ".ba-dot{width:46px;height:46px;border-radius:50%;display:grid;place-items:center;margin-bottom:8px;background:var(--ba-dot-bg)}",
+      ".ba-dot:after{content:'';width:14px;height:14px;border-radius:50%;background:var(--ba-dot)}",
+      ".ba-dot.ba-smooth{background:var(--ba-good-bg)}.ba-dot.ba-smooth:after{background:var(--ba-good)}",
+      ".ba-dot.ba-optimizing,.ba-dot.ba-buffering{background:var(--ba-warn-bg)}.ba-dot.ba-optimizing:after,.ba-dot.ba-buffering:after{background:var(--ba-warn)}",
+      ".ba-dot.ba-off:after{background:var(--ba-dot)}",
+      ".ba-word{font-size:15px;font-weight:800;color:var(--ba-ink)}",
+      ".ba-subnote{font-size:11px;color:var(--ba-ink-soft);margin-top:2px;line-height:1.4}",
+      ".ba-count{font-size:11px;color:var(--ba-ink-faint);margin-top:6px}",
+      ".ba-speed{margin:0 0 10px;padding:10px 12px;border:1px solid var(--ba-border);border-radius:10px;background:var(--ba-card)}",
       ".ba-speed-top{display:flex;align-items:baseline;justify-content:space-between;gap:8px}",
-      ".ba-speed-label{font-size:12px;font-weight:700;color:#46515c}",
-      ".ba-speed-val{font-size:11px;color:#8a95a1;white-space:nowrap}",
-      ".ba-speed-val b{font-size:17px;color:#00aeec;font-weight:800;margin-right:3px}",
+      ".ba-speed-label{font-size:12px;font-weight:700;color:var(--ba-ink-mid)}",
+      ".ba-speed-val{font-size:11px;color:var(--ba-ink-faint);white-space:nowrap}",
+      ".ba-speed-val b{font-size:17px;color:var(--ba-accent);font-weight:800;margin-right:3px}",
       ".ba-spd-canvas{display:block;width:100%;height:46px;margin-top:6px}",
-      ".ba-spd-foot{font-size:10px;color:#8a95a1;margin-top:4px}",
-      ".ba-spd-empty{display:none;font-size:11px;color:#8a95a1;padding:8px 0 4px;text-align:center}",
+      ".ba-spd-foot{font-size:10px;color:var(--ba-ink-faint);margin-top:4px}",
+      ".ba-spd-empty{display:none;font-size:11px;color:var(--ba-ink-faint);padding:8px 0 4px;text-align:center}",
       ".ba-speed.empty .ba-spd-canvas,.ba-speed.empty .ba-spd-foot,.ba-speed.empty .ba-speed-val{display:none}",
       ".ba-speed.empty .ba-spd-empty{display:block}",
-      ".ba-switch-row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:8px 0;padding:10px 12px;border:1px solid #e5eaf0;border-radius:10px;background:#fff}",
+      ".ba-switch-row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:8px 0;padding:10px 12px;border:1px solid var(--ba-border);border-radius:10px;background:var(--ba-card)}",
       ".ba-switch-text{display:grid;gap:2px}",
-      ".ba-switch-title{font-size:13px;font-weight:750;color:#202a33}",
-      ".ba-switch-note{font-size:11px;color:#6b7785;line-height:1.3}",
+      ".ba-switch-title{font-size:13px;font-weight:750;color:var(--ba-ink)}",
+      ".ba-switch-note{font-size:11px;color:var(--ba-ink-soft);line-height:1.3}",
       ".ba-switch{position:relative;display:inline-flex;width:42px;height:24px;flex:0 0 auto}",
       ".ba-switch input{position:absolute;opacity:0;width:1px;height:1px}",
-      ".ba-slider{position:absolute;inset:0;border-radius:999px;background:#c9d3dd;cursor:pointer;transition:background .16s ease}",
+      ".ba-slider{position:absolute;inset:0;border-radius:999px;background:var(--ba-slider-off);cursor:pointer;transition:background .16s ease}",
       ".ba-slider:before{content:'';position:absolute;width:20px;height:20px;left:2px;top:2px;border-radius:50%;background:#fff;box-shadow:0 2px 6px rgba(0,0,0,.22);transition:transform .16s ease}",
-      ".ba-switch input:checked+.ba-slider{background:#00aeec}",
+      ".ba-switch input:checked+.ba-slider{background:var(--ba-accent)}",
       ".ba-switch input:checked+.ba-slider:before{transform:translateX(18px)}",
-      ".ba-boost{display:none;width:100%;height:38px;margin-top:4px;border:1px solid #00aeec;border-radius:10px;background:#00aeec;color:#fff;font-size:13px;font-weight:700;cursor:pointer}",
-      ".ba-boost:hover{background:#0099cf}",
-      ".ba-adv-toggle{display:flex;align-items:center;justify-content:center;gap:5px;width:100%;flex:0 0 auto;margin-top:10px;padding-top:11px;border:none;border-top:1px solid #eef1f4;background:none;color:#6b7785;font-size:11px;font-weight:650;cursor:pointer}",
-      ".ba-adv-toggle:hover{color:#00aeec}",
+      ".ba-boost{display:none;width:100%;height:38px;margin-top:4px;border:1px solid var(--ba-accent);border-radius:10px;background:var(--ba-accent);color:#fff;font-size:13px;font-weight:700;cursor:pointer}",
+      ".ba-boost:hover{background:var(--ba-accent-strong);border-color:var(--ba-accent-strong)}",
+      ".ba-adv-toggle{display:flex;align-items:center;justify-content:center;gap:5px;width:100%;flex:0 0 auto;margin-top:10px;padding-top:11px;border:none;border-top:1px solid var(--ba-border);background:none;color:var(--ba-ink-soft);font-size:11px;font-weight:650;cursor:pointer}",
+      ".ba-adv-toggle:hover{color:var(--ba-accent)}",
       ".ba-adv{display:none;margin-top:8px}",
       ".ba-adv.open{display:block}",
       ".ba-field{display:grid;grid-template-columns:96px 1fr;align-items:center;gap:9px;margin:9px 0;font-size:12px}",
-      ".ba-field span{color:#46515c;font-weight:650}",
-      ".ba-control,.ba-field input[type=text],.ba-field select{width:100%;min-width:0;height:32px;border:1px solid #d5dde5;border-radius:8px;padding:0 9px;background:#fff;color:#17202a;outline:none;font-size:11px}",
+      ".ba-field span{color:var(--ba-ink-mid);font-weight:650}",
+      ".ba-control,.ba-field input[type=text],.ba-field select{width:100%;min-width:0;height:32px;border:1px solid var(--ba-border-in);border-radius:8px;padding:0 9px;background:var(--ba-card);color:var(--ba-ink);outline:none;font-size:11px}",
+      ".ba-swatches{display:flex;align-items:center;gap:7px;min-height:32px;flex-wrap:wrap}",
+      ".ba-sw{width:22px;height:22px;border-radius:50%;padding:0;border:none;cursor:pointer;box-shadow:0 0 0 1px var(--ba-border-in) inset;transition:transform .12s ease}",
+      ".ba-sw:hover{transform:scale(1.12)}",
+      ".ba-sw[aria-pressed=\"true\"]{box-shadow:0 0 0 2px var(--ba-card),0 0 0 4px var(--ba-accent)}",
       ".ba-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}",
-      ".ba-actions button{height:32px;border:1px solid #d5dde5;border-radius:8px;background:#fff;color:#25313d;padding:0 11px;cursor:pointer;font-size:12px;font-weight:700}",
-      ".ba-actions button.primary{border-color:#00aeec;background:#00aeec;color:#fff}",
-      ".ba-mini{font-size:11px;color:#6b7785;margin:8px 0 0;line-height:1.4}"
+      ".ba-actions button{height:32px;border:1px solid var(--ba-border-in);border-radius:8px;background:var(--ba-card);color:var(--ba-ink);padding:0 11px;cursor:pointer;font-size:12px;font-weight:700}",
+      ".ba-actions button.primary{border-color:var(--ba-accent);background:var(--ba-accent);color:#fff}",
+      ".ba-mini{font-size:11px;color:var(--ba-ink-soft);margin:8px 0 0;line-height:1.4}"
     ].join("");
 
     const toggle = document.createElement("button");
@@ -2144,35 +2400,36 @@
     panel.className = "ba-panel";
     panel.id = PANEL_ID;
 
-    // Header
+    // Header: ⚡ mark + theme toggle (left), language toggle (right). The product
+    // name is dropped — the mark carries identity and frees room for the toggle.
     const head = document.createElement("div");
     head.className = "ba-head";
     head.innerHTML = "<svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path fill=\"currentColor\" d=\"M13 2 4 14h7l-1 8 10-13h-7l1-7Z\"/></svg>";
-    const title = document.createElement("p");
-    title.className = "ba-title";
-    title.dataset.i18n = "title";
-    title.textContent = t("title");
-    head.appendChild(title);
 
-    // Language toggle (upper-right). Defaults to English.
-    const langWrap = document.createElement("div");
-    langWrap.className = "ba-lang";
-    [["en", "EN"], ["zh", "中"]].forEach(function (pair) {
-      const b = document.createElement("button");
-      b.type = "button";
-      b.className = "ba-lang-btn";
-      b.dataset.lang = pair[0];
-      b.textContent = pair[1];
-      b.addEventListener("click", function () {
-        if (config.lang === pair[0]) {
-          return;
-        }
-        saveConfig(Object.assign({}, config, { lang: pair[0] }));
-        applyLang();
-      });
-      langWrap.appendChild(b);
+    // Theme toggle (sun | moon). Tapping a side picks it explicitly; the thumb
+    // sits on the resolved side until then. Default stays "system".
+    const themeSeg = createSegToggle("ba-theme-seg", [
+      { html: SUN_SVG, value: "light", label: t("themeLight") },
+      { html: MOON_SVG, value: "dark", label: t("themeDark") }
+    ], resolveTheme() === "dark" ? 1 : 0, function (value) {
+      saveConfig(Object.assign({}, config, { theme: value }));
+      applyTheme();
     });
-    head.appendChild(langWrap);
+    head.appendChild(themeSeg);
+
+    // Language toggle (EN | 中), pushed to the right edge of the header.
+    const langSeg = createSegToggle("ba-lang-seg", [
+      { html: "EN", value: "en" },
+      { html: "中", value: "zh" }
+    ], lang() === "zh" ? 1 : 0, function (value) {
+      if (config.lang === value) {
+        return;
+      }
+      saveConfig(Object.assign({}, config, { lang: value }));
+      applyLang();
+    });
+    langSeg.classList.add("ba-seg-end");
+    head.appendChild(langSeg);
 
     // Hero status
     const hero = document.createElement("div");
@@ -2360,6 +2617,7 @@
     actions.appendChild(diag);
     actions.appendChild(reload);
 
+    adv.appendChild(createSwatchField("fAccent", createAccentPicker()));
     adv.appendChild(createField("fServer", selection));
     adv.appendChild(createField("fWhen", mode));
     adv.appendChild(createField("fFixed", hostInput));
@@ -2432,6 +2690,8 @@
     shadow.appendChild(toggle);
     document.documentElement.appendChild(host);
     applyLang();
+    applyTheme();
+    watchSystemTheme();
   }
 
   // ---- external config bridge (extension popup → page) -------------------
@@ -2448,13 +2708,14 @@
       if (data && data.__biliAccel === "config" && data.config) {
         saveConfig(Object.assign({}, config, data.config));
         applyLang();
+        applyTheme();
       }
     });
   }
 
   root.BiliAccelerator = {
     getConfig: function () { return Object.assign({}, config); },
-    setConfig: function (next) { saveConfig(Object.assign({}, config, next || {})); renderStatus(); return this.getConfig(); },
+    setConfig: function (next) { saveConfig(Object.assign({}, config, next || {})); renderStatus(); applyTheme(); return this.getConfig(); },
     getStats: function () { return JSON.parse(JSON.stringify(state)); },
     getDiagnostics: function () { return buildDiagnostics(); },
     rewriteUrl: function (url) { return core.rewriteUrl(url, config); }

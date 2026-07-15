@@ -26,6 +26,20 @@
     "upos-sz-mirrorhwov.bilivideo.com"
   ]);
 
+  // Panel appearance options. Keys only — the actual accent hexes and dark/light
+  // surface tokens live in the page UI; core just owns the allowed values so a
+  // stored or bridged config can be validated back to a known-good default.
+  const ACCENT_KEYS = Object.freeze([
+    "bili",     // Bilibili blue (default — unchanged for existing users)
+    "teal",
+    "emerald",
+    "violet",
+    "pink",     // Little-TV pink
+    "sunset",
+    "graphite"
+  ]);
+  const THEME_MODES = Object.freeze(["system", "light", "dark"]);
+
   // Candidates that are safe to auto-probe and rank: non-akamai, non-overseas
   // mirrors that work well as generic rewrite targets.
   const CANDIDATE_POOL = Object.freeze([
@@ -39,6 +53,8 @@
   const DEFAULT_CONFIG = Object.freeze({
     enabled: true,
     lang: "en",                                    // en | zh (UI language)
+    accent: "bili",                                // panel accent (see ACCENT_KEYS)
+    theme: "system",                               // system | light | dark surface
     mode: "bad-only",                              // bad-only | force | off
     selection: "auto",                             // auto | fixed
     pcdnHost: "upos-sz-mirrorcos.bilivideo.com",
@@ -100,6 +116,12 @@
     }
     if (merged.lang !== "en" && merged.lang !== "zh") {
       merged.lang = DEFAULT_CONFIG.lang;
+    }
+    if (ACCENT_KEYS.indexOf(merged.accent) === -1) {
+      merged.accent = DEFAULT_CONFIG.accent;
+    }
+    if (THEME_MODES.indexOf(merged.theme) === -1) {
+      merged.theme = DEFAULT_CONFIG.theme;
     }
     merged.schemaVersion = SCHEMA_VERSION;
     return merged;
@@ -581,6 +603,8 @@
     SCHEMA_VERSION,
     CDN_HOSTS,
     CANDIDATE_POOL,
+    ACCENT_KEYS,
+    THEME_MODES,
     DEFAULT_CONFIG,
     normalizeConfig,
     hasMediaSignal: hasBiliMediaSignal,
