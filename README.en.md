@@ -1,8 +1,10 @@
 # Bilibili Accelerator
 
-[中文](./README.md)
+[中文](./README.md) · [Greasy Fork](https://greasyfork.org/en/scripts/582026-bilibili-accelerator) · v0.3.0
 
-Bilibili Accelerator is a userscript for Bilibili's web player. It handles a common overseas failure mode: a video lands on a slow CDN, MCDN/PCDN node, or poor route and buffers even though the connection itself is fine. Only suspicious playback URLs are rewritten; healthy CDN traffic is left alone by default.
+Watching Bilibili from outside mainland China, popular videos are usually fine. Everything else tends to land on a slow overseas mirror or an MCDN/PCDN node, and then it buffers every few seconds.
+
+This userscript does one thing: before the player fetches a segment, it swaps those bad playback URLs for healthier official CDN hosts. Healthy CDN traffic is left alone.
 
 | ☀️ Light | 🌙 Dark |
 | :---: | :---: |
@@ -10,76 +12,94 @@ Bilibili Accelerator is a userscript for Bilibili's web player. It handles a com
 
 ## Install
 
-The recommended install path is Greasy Fork:
+On Chrome, Edge, or Firefox, install [Tampermonkey](https://www.tampermonkey.net/) or [Violentmonkey](https://violentmonkey.github.io/) first, then grab the script from any of these:
 
-- [Greasy Fork script page](https://greasyfork.org/en/scripts/582026-bilibili-accelerator)
-- [Direct `.user.js` install](https://update.greasyfork.org/scripts/582026/Bilibili%20Accelerator.user.js)
+- [Greasy Fork](https://greasyfork.org/en/scripts/582026-bilibili-accelerator) — recommended, auto-updates
+- [Direct `.user.js`](https://update.greasyfork.org/scripts/582026/Bilibili%20Accelerator.user.js)
 - [GitHub Raw fallback](https://raw.githubusercontent.com/realzza/bilibili-accelerator/main/dist/bilibili-accelerator.user.js)
 - [GitHub Releases](https://github.com/realzza/bilibili-accelerator/releases/latest)
 
-On Chrome, Edge, or Firefox, install [Tampermonkey](https://www.tampermonkey.net/) or [Violentmonkey](https://violentmonkey.github.io/), then install the script from Greasy Fork. Reload the Bilibili tab after installation. The ⚡ button in the lower-right corner confirms that the script is running.
+Reload any Bilibili tab you already had open. The ⚡ badge in the lower-right corner means it's running.
 
 ### Safari
 
-1. Install the Safari extension [Userscripts](https://apps.apple.com/us/app/userscripts/id1463298887).
-2. Enable Userscripts in Safari Settings and allow access to `bilibili.com`.
-3. Install the script from Greasy Fork or the GitHub Raw URL.
-4. Reload any Bilibili tabs that were already open.
+Safari has no Tampermonkey, so use the [Userscripts](https://apps.apple.com/us/app/userscripts/id1463298887) extension:
 
-### Load the unpacked extension
+1. Install Userscripts from the App Store.
+2. Enable it in Safari Settings and allow access to `bilibili.com`.
+3. Install the script from Greasy Fork or the GitHub Raw URL above.
+4. Reload any open Bilibili tabs.
 
-The repository also builds a Manifest V3 extension for Chrome and Edge:
+### Unpacked extension (Chrome / Edge)
+
+If you'd rather not use a script manager, the repo also builds a Manifest V3 extension:
 
 ```sh
 npm run build
 ```
 
-Open `chrome://extensions`, enable Developer mode, and load `dist/extension`.
+Open `chrome://extensions`, turn on Developer mode, and load `dist/extension`.
 
-## How it works
+## What it actually does
 
-Bilibili normally returns several signed media URLs for each video. Overseas viewers often run into slow routes such as:
+Bilibili returns several signed playback URLs for the same video. Overseas, the problematic ones look like this:
 
 ```text
 upos-sz-mirrorcosov.bilivideo.com
 xy153x35x231x78xy.mcdn.bilivideo.cn:8082
 ```
 
-Before the player requests a segment, the script classifies the URL and, when needed, switches it to a healthier official CDN or proxy route, for example:
+The script spots them before the request goes out and rewrites them to something like:
 
 ```text
 upos-sz-mirrorcos.bilivideo.com
 proxy-tf-all-ws.bilivideo.com
 ```
 
-By default, it:
+Detection isn't a hand-maintained domain blocklist. Odd ports, `os=mcdn`, the residential domains that `upos-*302*` redirects land on, and PCDN hosts wearing mirror-style names all count as slow. When Bilibili rotates to a new batch of PCDN domains, this usually keeps working without a change here.
 
-- rewrites known slow mirrors, MCDN/PCDN hosts, odd-port nodes, and playback URLs marked with `os=mcdn`;
-- probes a small CDN candidate pool and caches the working order for the current region, with a fixed-server option available under Advanced settings;
-- rotates routes when playback keeps stalling, without reloading the page or losing the current position;
-- never rewrites live (`/live-bvc/`) URLs to VOD servers; it filters obvious PCDN/MCDN entries from the live route list while keeping at least one usable URL; and
-- applies the same rules to `fetch`, `XMLHttpRequest`, page play data, and quality changes.
+A few other things happen by default:
+
+- Candidate CDNs get probed for real, and the working order is cached per region. If you'd rather pin one host, Advanced settings has a fixed-server option.
+- When playback keeps stalling, it rotates to another route — no reload, no losing your position.
+- Live URLs (`/live-bvc/`) are never rewritten. Live and VOD run on separate CDN tiers, so a rewritten live URL simply won't play. Instead, obvious PCDN/MCDN entries are filtered out of the live room's server list, and at least one usable server always survives.
+- `fetch`, `XMLHttpRequest`, in-page play data, and quality switches all run through the same rewrite path.
 
 ## Panel and settings
 
-- The panel shows playback status, rewrite count, and live download speed. It falls back to buffer-ahead time when byte counts are unavailable.
-- Appearance follows the system theme by default. Choosing the sun or moon in the header saves an explicit light or dark preference.
-- Advanced settings include seven accents: Bilibili Blue, Teal, Emerald, Violet, Pink, Sunset, and Graphite.
-- **Still buffering? Boost harder** switches to the more aggressive rewrite mode and reloads the current page.
-- The optional bandwidth guard blocks Bilibili's P2P SDK and WebRTC upload entry points. Reload the page after enabling it.
-- In web fullscreen, the ⚡ button fades out. Move the pointer to the lower-right corner to reveal it again.
+- The top of the panel shows status and how many connections were rewritten; below it is a live download-speed graph. When the CDN hides byte counts, it falls back to how many seconds are buffered ahead.
+- Appearance follows the system theme. Once you pick the sun or moon in the header, that choice sticks.
+- Advanced settings has seven accents: Bilibili Blue, Teal, Emerald, Violet, Pink, Sunset, and Graphite.
+- **Still buffering? Boost harder** switches to the aggressive rewrite mode and reloads the page.
+- The bandwidth guard is off by default. Turning it on blocks Bilibili's P2P SDK and WebRTC upload entry points; reload the page afterwards.
+- In web fullscreen the ⚡ badge fades out. Move the pointer to the lower-right corner to bring it back.
+
+## Releases
+
+Full notes live in [Releases](https://github.com/realzza/bilibili-accelerator/releases).
+
+| Version | What changed |
+| --- | --- |
+| [v0.3.0](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.3.0) | Light/dark panel and seven accent themes; header theme and language share one sliding control. Acceleration untouched |
+| [v0.2.3](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.2.3) | Live streams no longer get rewritten; probes read real HTTP status; more hidden PCDN caught; stall recovery keeps rotating |
+| [v0.2.2](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.2.2) | Speed measured over the time data is actually flowing, so a full buffer no longer reads as 0 Mbps |
+| [v0.2.1](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.2.1) | Live download-speed graph in the panel, with a buffer-health fallback |
+| [v0.2.0](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.2.0) | Big one: behavioral slow-node detection, automatic server selection, stall recovery, EN/中 panel, optional bandwidth guard |
+| [v0.1.3](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.1.3) | Lightning-only badge, auto-hide in web fullscreen, stops covering the fullscreen button |
+| [v0.1.2](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.1.2) | Rebuilt the floating control and settings panel |
+| [v0.1.1](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.1.1) | First installable userscript release |
 
 ## Troubleshooting
 
-First check that the ⚡ button is present. Tabs that were open during installation or an update need to be reloaded.
+Check for the ⚡ badge first. Tabs that were open during install or an update have to be reloaded.
 
-If playback still stalls, open Advanced settings, select **Copy report**, and attach the report to a [GitHub issue](https://github.com/realzza/bilibili-accelerator/issues) along with the video URL, your region, and what you observed. Reports contain hostnames and rewrite reasons only; signed media URLs and query tokens are not included.
+If it still stalls, open Advanced settings, hit **Copy report**, and file an [issue](https://github.com/realzza/bilibili-accelerator/issues) with the video URL, your region, and what you saw. The report contains hostnames and rewrite reasons only — no signed media URLs or query tokens.
 
 ## Limits
 
-- This project targets Bilibili's browser player. It does not directly support Apple TV or the native mobile apps.
-- CDN health varies by region and ISP. The script can route around known slow nodes, but it cannot fix regional licensing, a broken source file, or a local network problem.
-- See [docs/router-proxy.md](docs/router-proxy.md) for router-level options and the certificate constraints on native apps.
+- Browser player only. Apple TV and the native mobile apps are out of scope.
+- CDN health varies by region and ISP. This routes around known-bad nodes; it can't fix regional licensing, a broken source file, or your local network.
+- For why router-level proxying mostly doesn't help (and the certificate pinning problem on native apps), see [docs/router-proxy.md](docs/router-proxy.md).
 
 ## Development
 
@@ -95,7 +115,7 @@ dist/bilibili-accelerator.user.js
 dist/extension/
 ```
 
-`package.json` is the single source of truth for the version. The build stamps it into the userscript header and extension manifest. Before committing, rebuild and make sure `dist/` has no uncommitted changes.
+The version lives in `package.json` and nowhere else; the build stamps it into the userscript header and the extension manifest. `dist/` is committed, and CI checks it against `src/`, so rebuild before you commit.
 
 ## License
 
