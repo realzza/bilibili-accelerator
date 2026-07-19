@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Bilibili Accelerator",
   "version": "0.3.0",
-  "description": "Speeds up slow Bilibili playback by rewriting weak CDN/PCDN URLs before buffering.",
+  "description": "Smoother Bilibili playback for overseas viewers.",
   "icons": {},
   "permissions": [
     "storage"
