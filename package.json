@@ -2,7 +2,7 @@
   "name": "bilibili-accelerator",
   "version": "0.3.0",
   "private": true,
-  "description": "Safari-friendly Bilibili playback CDN accelerator.",
+  "description": "Smoother Bilibili playback for overseas viewers.",
   "scripts": {
     "build": "node scripts/build.mjs",
     "test": "node --test",
