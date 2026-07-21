@@ -859,7 +859,12 @@
   }
 
   function handleStall() {
-    if (!watchedVideo || watchedVideo.paused || watchedVideo.ended) {
+    // Browsers throttle media/MSE work in background tabs, which can make the
+    // player emit a transient waiting/stalled event. Rotating CDN hosts in that
+    // state turns a harmless suspension into a real interruption, so defer the
+    // decision until the page is visible again.
+    stallTimer = null;
+    if (document.hidden || !watchedVideo || watchedVideo.paused || watchedVideo.ended) {
       return;
     }
     if (watchedVideo.readyState >= 3) {
@@ -884,6 +889,10 @@
   function onWaiting() {
     if (stallTimer) {
       clearTimeout(stallTimer);
+      stallTimer = null;
+    }
+    if (document.hidden) {
+      return;
     }
     stallTimer = setTimeout(handleStall, STALL_GRACE_MS);
   }
@@ -896,6 +905,26 @@
     if (state.status === "buffering") {
       state.status = "smooth";
       renderStatus();
+    }
+  }
+
+  function onVisibilityChange() {
+    if (document.hidden) {
+      if (stallTimer) {
+        clearTimeout(stallTimer);
+        stallTimer = null;
+      }
+      return;
+    }
+
+    // A waiting event fired while hidden is deliberately ignored. Re-evaluate
+    // once foregrounded so a genuine, still-active stall keeps the normal grace
+    // period and recovery behavior.
+    if (watchedVideo && !watchedVideo.paused && !watchedVideo.ended &&
+        watchedVideo.readyState < 3) {
+      onWaiting();
+    } else {
+      onPlaying();
     }
   }
 
@@ -1365,6 +1394,7 @@
     document.addEventListener("mousemove", handlePointerMove, { passive: true });
     document.addEventListener("fullscreenchange", refreshImmersive);
     document.addEventListener("webkitfullscreenchange", refreshImmersive);
+    document.addEventListener("visibilitychange", onVisibilityChange);
     ensurePlayerObserver();
     setInterval(ensurePlayerObserver, 1500);
   }

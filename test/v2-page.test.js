@@ -42,6 +42,91 @@ function loadPage() {
   return sandbox;
 }
 
+function loadPageWithVideo() {
+  const core = fs.readFileSync(path.join(__dirname, "../src/core/rewrite.js"), "utf8");
+  const page = fs.readFileSync(path.join(__dirname, "../src/page/bili-accelerator.page.js"), "utf8");
+  const documentListeners = new Map();
+  const videoListeners = new Map();
+  const timers = new Map();
+  let nextTimer = 1;
+
+  const video = {
+    paused: false,
+    ended: false,
+    readyState: 1,
+    currentTime: 10,
+    currentSrc: "blob:https://www.bilibili.com/media-source",
+    addEventListener(type, listener) {
+      videoListeners.set(type, listener);
+    },
+    dispatch(type) {
+      const listener = videoListeners.get(type);
+      if (listener) listener();
+    }
+  };
+
+  const document = {
+    readyState: "complete",
+    documentElement: null,
+    head: null,
+    hidden: false,
+    addEventListener(type, listener) {
+      documentListeners.set(type, listener);
+    },
+    dispatch(type) {
+      const listener = documentListeners.get(type);
+      if (listener) listener();
+    },
+    getElementById: () => null,
+    querySelector(selector) {
+      return selector === "video" ? video : null;
+    },
+    createElement: () => ({})
+  };
+
+  const sandbox = {
+    JSON: { parse: JSON.parse, stringify: JSON.stringify },
+    URL, Date, WeakSet, Headers, Response, Request, Promise, Math, Intl,
+    performance: { now: () => 1 },
+    XMLHttpRequest: class FakeXHR {
+      open() {}
+      send() {}
+      addEventListener() {}
+    },
+    navigator: { language: "en-US", clipboard: { writeText() {} } },
+    console: { info() {}, warn() {}, error() {} },
+    localStorage: { getItem: () => null, setItem() {} },
+    location: { href: "https://www.bilibili.com/video/x", reload() {} },
+    document,
+    setTimeout(callback, delay) {
+      const id = nextTimer++;
+      timers.set(id, { callback, delay, interval: false });
+      return id;
+    },
+    clearTimeout(id) { timers.delete(id); },
+    setInterval(callback, delay) {
+      const id = nextTimer++;
+      timers.set(id, { callback, delay, interval: true });
+      return id;
+    },
+    clearInterval(id) { timers.delete(id); }
+  };
+  sandbox.globalThis = sandbox;
+  sandbox.window = sandbox;
+  sandbox.addEventListener = () => {};
+  sandbox.runTimeouts = function runTimeouts(delay) {
+    const due = Array.from(timers.entries()).filter(([, timer]) =>
+      !timer.interval && (delay == null || timer.delay === delay));
+    due.forEach(([id, timer]) => {
+      timers.delete(id);
+      timer.callback();
+    });
+  };
+
+  vm.runInNewContext(`${core}\n${page}`, sandbox);
+  return { sandbox, document, video };
+}
+
 test("XHR open() rewrites a renamed PCDN segment URL (mountaintoys)", () => {
   const sandbox = loadPage();
   const xhr = new sandbox.XMLHttpRequest();
@@ -49,6 +134,24 @@ test("XHR open() rewrites a renamed PCDN segment URL (mountaintoys)", () => {
   xhr.open("GET", bad);
   assert.equal(new URL(xhr._url).hostname, "upos-sz-mirrorcos.bilivideo.com");
   assert.equal(new URL(xhr._url).port, "");
+});
+
+test("stall recovery waits until a hidden video tab is visible again", () => {
+  const { sandbox, document, video } = loadPageWithVideo();
+
+  video.dispatch("waiting");
+  document.hidden = true;
+  document.dispatch("visibilitychange");
+  video.dispatch("waiting");
+  sandbox.runTimeouts(2500);
+  assert.equal(sandbox.BiliAccelerator.getStats().recoveries, 0,
+    "does not rotate CDN hosts after the tab becomes hidden");
+
+  document.hidden = false;
+  document.dispatch("visibilitychange");
+  sandbox.runTimeouts(2500);
+  assert.equal(sandbox.BiliAccelerator.getStats().recoveries, 1,
+    "rechecks an unresolved stall after the tab becomes visible");
 });
 
 test("playinfo rewrite also adds DASH backupUrl fan-out in auto mode", () => {
