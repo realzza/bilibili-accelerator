@@ -634,7 +634,7 @@
   }
   root.__BILI_ACCELERATOR_INSTALLED__ = true;
 
-  const VERSION = "0.3.1";
+  const VERSION = "0.3.2";
   const STORAGE_KEY = "biliAccelerator.config.v2";
   const LEGACY_KEY = "biliAccelerator.config.v1";
   const RANK_PREFIX = "biliAccelerator.rank.";
@@ -1489,8 +1489,8 @@
   function handleStall() {
     // Browsers throttle media/MSE work in background tabs, which can make the
     // player emit a transient waiting/stalled event. Rotating CDN hosts in that
-    // state turns a harmless suspension into a real interruption, so defer the
-    // decision until the page is visible again.
+    // state turns a harmless suspension into a real interruption, so ignore it;
+    // a genuine foreground stall will emit its own waiting/stalled event.
     stallTimer = null;
     if (document.hidden || !watchedVideo || watchedVideo.paused || watchedVideo.ended) {
       return;
@@ -1533,26 +1533,6 @@
     if (state.status === "buffering") {
       state.status = "smooth";
       renderStatus();
-    }
-  }
-
-  function onVisibilityChange() {
-    if (document.hidden) {
-      if (stallTimer) {
-        clearTimeout(stallTimer);
-        stallTimer = null;
-      }
-      return;
-    }
-
-    // A waiting event fired while hidden is deliberately ignored. Re-evaluate
-    // once foregrounded so a genuine, still-active stall keeps the normal grace
-    // period and recovery behavior.
-    if (watchedVideo && !watchedVideo.paused && !watchedVideo.ended &&
-        watchedVideo.readyState < 3) {
-      onWaiting();
-    } else {
-      onPlaying();
     }
   }
 
@@ -2005,7 +1985,6 @@
     document.addEventListener("mousemove", handlePointerMove, { passive: true });
     document.addEventListener("fullscreenchange", refreshImmersive);
     document.addEventListener("webkitfullscreenchange", refreshImmersive);
-    document.addEventListener("visibilitychange", onVisibilityChange);
     ensurePlayerObserver();
     setInterval(ensurePlayerObserver, 1500);
   }

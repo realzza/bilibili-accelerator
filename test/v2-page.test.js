@@ -155,7 +155,7 @@ test("fetch media responses are returned without cloning or reading their bodies
   assert.equal(cloneCalls, 0);
 });
 
-test("stall recovery waits until a hidden video tab is visible again", () => {
+test("tab visibility transitions never trigger stall recovery", () => {
   const { sandbox, document, video } = loadPageWithVideo();
 
   video.dispatch("waiting");
@@ -169,8 +169,13 @@ test("stall recovery waits until a hidden video tab is visible again", () => {
   document.hidden = false;
   document.dispatch("visibilitychange");
   sandbox.runTimeouts(2500);
+  assert.equal(sandbox.BiliAccelerator.getStats().recoveries, 0,
+    "does not recheck playback merely because the tab became visible");
+
+  video.dispatch("waiting");
+  sandbox.runTimeouts(2500);
   assert.equal(sandbox.BiliAccelerator.getStats().recoveries, 1,
-    "rechecks an unresolved stall after the tab becomes visible");
+    "still recovers from a foreground waiting event");
 });
 
 test("playinfo rewrite also adds DASH backupUrl fan-out in auto mode", () => {

@@ -1,6 +1,6 @@
 # Bilibili Accelerator
 
-[中文](./README.md) · [Greasy Fork](https://greasyfork.org/en/scripts/582026-bilibili-accelerator) · v0.3.1
+[中文](./README.md) · [Greasy Fork](https://greasyfork.org/en/scripts/582026-bilibili-accelerator) · v0.3.2
 
 Watching Bilibili from outside mainland China, popular videos are usually fine. Everything else tends to stutter — smooth one moment, buffering the next.
 
@@ -55,7 +55,7 @@ Full notes live in [Releases](https://github.com/realzza/bilibili-accelerator/re
 
 | Version | What changed |
 | --- | --- |
-| v0.3.1 | Keeps background playback isolated from stall recovery and speed measurement |
+| v0.3.2 | Keeps tab transitions isolated from stall recovery and speed measurement |
 | [v0.3.0](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.3.0) | Light/dark panel and seven accent themes; header theme and language share one sliding control. Core behavior untouched |
 | [v0.2.3](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.2.3) | Stability fixes for live playback, more accurate probing, and stall recovery that keeps retrying |
 | [v0.2.2](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.2.2) | Speed measured over the time data is actually flowing, so a full buffer no longer reads as 0 Mbps |

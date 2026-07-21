@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Bilibili Accelerator",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Smoother Bilibili playback for overseas viewers.",
   "icons": {},
   "permissions": [
