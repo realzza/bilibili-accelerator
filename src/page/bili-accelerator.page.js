@@ -7,7 +7,7 @@
   }
   root.__BILI_ACCELERATOR_INSTALLED__ = true;
 
-  const VERSION = "0.3.0";
+  const VERSION = "0.3.1";
   const STORAGE_KEY = "biliAccelerator.config.v2";
   const LEGACY_KEY = "biliAccelerator.config.v1";
   const RANK_PREFIX = "biliAccelerator.rank.";
@@ -537,11 +537,12 @@
         const isBinary = !contentType ||
           (!contentType.includes("json") && !contentType.includes("text"));
 
-        // Measure real throughput ourselves — Bilibili's CDN omits
-        // Timing-Allow-Origin, so Resource Timing reports 0 bytes. Reading a
-        // clone is non-invasive: the player still gets the original response.
+        // Never clone or consume media bodies here. In particular, Safari may
+        // throttle the page-world reader after a tab is backgrounded; teeing the
+        // player's response for the optional speed graph can then interfere with
+        // MSE playback. XHR transfers are still measured below, and fetch-based
+        // playback falls back to the buffer-ahead graph.
         if (isMedia && isBinary) {
-          measureFetchBytes(response);
           return response;
         }
 
@@ -989,9 +990,10 @@
   }
 
   // Record one completed media transfer for the active-throughput window. Bytes
-  // are measured at the fetch/XHR layer (see measureFetchBytes and the XHR
-  // loadend counter) rather than via Resource Timing, because Bilibili's media
-  // CDN omits Timing-Allow-Origin and would report 0 transferSize.
+  // are measured at the XHR layer rather than via Resource Timing, because
+  // Bilibili's media CDN omits Timing-Allow-Origin and would report 0
+  // transferSize. Fetch media bodies stay completely untouched; the graph falls
+  // back to buffer health when the player uses fetch.
   function recordTransfer(start, end, bytes) {
     if (!(bytes > 0)) {
       return;
@@ -1001,24 +1003,6 @@
     // spike the rate to absurd values, so only their "bytes seen" flag matters.
     if (end - start >= MIN_TRANSFER_MS) {
       speed.transfers.push({ start: start, end: end, bytes: bytes });
-    }
-  }
-
-  // Count a media response's bytes by reading a clone — the player still gets
-  // the original response untouched, and cloning tees the stream (no re-download).
-  // The clone drains as fast as the network delivers, so start→arrayBuffer is a
-  // clean transfer-duration proxy that excludes idle time between segments.
-  function measureFetchBytes(response) {
-    const start = nowMs();
-    try {
-      response.clone().arrayBuffer().then(function (buf) {
-        recordTransfer(start, nowMs(), buf && buf.byteLength);
-      }).catch(function () {});
-    } catch (_) {
-      const cl = response.headers && response.headers.get("content-length");
-      if (cl && parseInt(cl, 10) > 0) {
-        speed.sawBytes = true;
-      }
     }
   }
 

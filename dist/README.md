@@ -1,6 +1,6 @@
 # Bilibili Accelerator
 
-[English](./README.en.md) · [Greasy Fork](https://greasyfork.org/en/scripts/582026-bilibili-accelerator) · 当前版本 v0.3.0
+[English](./README.en.md) · [Greasy Fork](https://greasyfork.org/en/scripts/582026-bilibili-accelerator) · 当前版本 v0.3.1
 
 海外看 B 站，热门视频一般没什么问题，冷门视频经常一会儿流畅、一会儿卡死。
 
@@ -55,6 +55,7 @@ npm run build
 
 | 版本 | 主要变化 |
 | --- | --- |
+| v0.3.1 | 后台播放不再触发卡顿恢复或下载速度采样 |
 | [v0.3.0](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.3.0) | 面板深浅色 + 7 套主题色；顶部主题 / 语言改成同一套滑动控件。核心逻辑没动 |
 | [v0.2.3](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.2.3) | 直播场景的稳定性修复；探测逻辑更准确；卡顿恢复会持续重试 |
 | [v0.2.2](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.2.2) | 速度曲线按「数据真正在传输的时段」算，缓冲填满时不再假装掉到 0 |
