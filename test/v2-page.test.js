@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-function loadPage() {
+function loadPage(extra) {
   const core = fs.readFileSync(path.join(__dirname, "../src/core/rewrite.js"), "utf8");
   const page = fs.readFileSync(path.join(__dirname, "../src/page/bili-accelerator.page.js"), "utf8");
 
@@ -16,7 +16,7 @@ function loadPage() {
   }
 
   const store = new Map();
-  const sandbox = {
+  const sandbox = Object.assign({
     // Each sandbox gets its own JSON object: the page script patches JSON.parse
     // in place, and handing it the host realm's JSON would stack patches across
     // tests (and patch the test runner's own JSON).
@@ -34,7 +34,7 @@ function loadPage() {
       addEventListener() {}, getElementById: () => null,
       querySelector: () => null, createElement: () => ({})
     }
-  };
+  }, extra || {});
   sandbox.globalThis = sandbox;
   sandbox.window = sandbox;
   sandbox.addEventListener = () => {};
@@ -136,7 +136,26 @@ test("XHR open() rewrites a renamed PCDN segment URL (mountaintoys)", () => {
   assert.equal(new URL(xhr._url).port, "");
 });
 
-test("stall recovery waits until a hidden video tab is visible again", () => {
+test("fetch media responses are returned without cloning or reading their bodies", async () => {
+  let cloneCalls = 0;
+  const response = {
+    headers: { get: () => "video/mp4" },
+    clone() {
+      cloneCalls += 1;
+      throw new Error("media response body must stay untouched");
+    }
+  };
+  const sandbox = loadPage({ fetch: async () => response });
+
+  const result = await sandbox.fetch(
+    "https://upos-sz-mirrorcos.bilivideo.com/upgcxcode/video.m4s?x=1"
+  );
+
+  assert.equal(result, response);
+  assert.equal(cloneCalls, 0);
+});
+
+test("tab visibility transitions never trigger stall recovery", () => {
   const { sandbox, document, video } = loadPageWithVideo();
 
   video.dispatch("waiting");
@@ -150,8 +169,13 @@ test("stall recovery waits until a hidden video tab is visible again", () => {
   document.hidden = false;
   document.dispatch("visibilitychange");
   sandbox.runTimeouts(2500);
+  assert.equal(sandbox.BiliAccelerator.getStats().recoveries, 0,
+    "does not recheck playback merely because the tab became visible");
+
+  video.dispatch("waiting");
+  sandbox.runTimeouts(2500);
   assert.equal(sandbox.BiliAccelerator.getStats().recoveries, 1,
-    "rechecks an unresolved stall after the tab becomes visible");
+    "still recovers from a foreground waiting event");
 });
 
 test("playinfo rewrite also adds DASH backupUrl fan-out in auto mode", () => {
