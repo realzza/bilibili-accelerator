@@ -41,14 +41,33 @@ test("rewrites szbdyd URLs to xy_usource", () => {
   assert.equal(new URL(detail.url).hostname, "upos-sz-mirrorcos.bilivideo.com");
 });
 
-test("rewrites known slow overseas mirror hosts", () => {
-  const original = "https://upos-sz-mirroraliov.bilivideo.com/upgcxcode/file.m4s?abc=1";
-  const detail = core.rewriteUrlDetail(original, {
-    pcdnHost: "upos-sz-mirrorhw.bilivideo.com"
+test("leaves Bilibili's overseas mirrors alone — they are the fast host overseas", () => {
+  // upos-*mirror*ov* are Bilibili's overseas mirrors. For this tool's overseas
+  // audience they are the correct, fast host; rewriting them to a mainland host
+  // starved the buffer and stalled backgrounded tabs.
+  ["upos-sz-mirrorcosov.bilivideo.com",
+    "upos-sz-mirroraliov.bilivideo.com",
+    "upos-sz-mirrorhwov.bilivideo.com"
+  ].forEach((host) => {
+    const original = "https://" + host + "/upgcxcode/file.m4s?abc=1";
+    const detail = core.rewriteUrlDetail(original, { pcdnHost: "upos-sz-mirrorhw.bilivideo.com" });
+    assert.equal(detail.changed, false, host + " should be left alone");
+    assert.equal(detail.url, original);
   });
+});
 
-  assert.equal(detail.changed, true);
-  assert.equal(new URL(detail.url).hostname, "upos-sz-mirrorhw.bilivideo.com");
+test("leaves Akamai alone by default, rewrites it only when opted in", () => {
+  const akamai = "https://upos-hz-mirrorakam.akamaized.net/upgcxcode/file.m4s?abc=1";
+
+  const off = core.rewriteUrlDetail(akamai, { pcdnHost: "upos-sz-mirrorcos.bilivideo.com" });
+  assert.equal(off.changed, false, "Akamai must not be rewritten with the default rewriteAkamai:false");
+
+  const on = core.rewriteUrlDetail(akamai, {
+    rewriteAkamai: true,
+    pcdnHost: "upos-sz-mirrorcos.bilivideo.com"
+  });
+  assert.equal(on.changed, true, "the rewriteAkamai opt-in still works for users who want it");
+  assert.equal(new URL(on.url).hostname, "upos-sz-mirrorcos.bilivideo.com");
 });
 
 test("does not rewrite healthy CDN hosts in bad-only mode", () => {

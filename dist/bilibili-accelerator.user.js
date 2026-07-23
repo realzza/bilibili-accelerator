@@ -2,7 +2,7 @@
 // @name         Bilibili Accelerator
 // @name:zh-CN   Bilibili Accelerator - B站海外播放加速
 // @namespace    https://github.com/realzza/bilibili-accelerator
-// @version      0.3.2
+// @version      0.4.0
 // @description  Smoother Bilibili playback for overseas viewers.
 // @description:zh-CN 缓解海外用户看 B 站冷门视频时的卡顿。
 // @author       realzza
@@ -210,12 +210,6 @@
     return url.searchParams.get("os") === "mcdn" || /(?:^|[?&])os=mcdn(?:&|$)/i.test(url.search);
   }
 
-  function isOverseasMirror(hostname) {
-    return hostname.includes("mirroraliov") ||
-      hostname.includes("mirrorcosov") ||
-      hostname.includes("mirrorhwov");
-  }
-
   // Single source of truth for "what is this host, and is it slow for us".
   // Behavior-based so renamed PCDN families (e.g. *.edge.mountaintoys.cn) are
   // caught by the port/os=mcdn heuristics without needing a hostname update.
@@ -251,9 +245,13 @@
       kind = "upos";
     }
 
-    const isSlow = isPcdn ||
-      isOverseasMirror(hostname) ||
-      (config.rewriteAkamai && akamai);
+    // Only genuinely bad hosts are "slow": P2P/PCDN families, plus Akamai when a
+    // user explicitly opts in. Bilibili's overseas UPOS mirrors (mirrorcosov /
+    // mirroraliov / mirrorhwov) are deliberately NOT slow — this tool is for
+    // overseas viewers, and those mirrors are the geographically-correct, fast
+    // hosts for them. Rewriting them to a mainland host built a thin forward
+    // buffer that Safari's background-tab throttling then starved into a stall.
+    const isSlow = isPcdn || (config.rewriteAkamai && akamai);
 
     return {
       host: hostname,
@@ -651,7 +649,7 @@
   }
   root.__BILI_ACCELERATOR_INSTALLED__ = true;
 
-  const VERSION = "0.3.2";
+  const VERSION = "0.4.0";
   const STORAGE_KEY = "biliAccelerator.config.v2";
   const LEGACY_KEY = "biliAccelerator.config.v1";
   const RANK_PREFIX = "biliAccelerator.rank.";
