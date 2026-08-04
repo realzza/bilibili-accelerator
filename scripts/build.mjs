@@ -1,12 +1,15 @@
 import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-const root = path.resolve(new URL("..", import.meta.url).pathname);
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dist = path.join(root, "dist");
 const extensionDist = path.join(dist, "extension");
 
 const pkg = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
 const core = await readFile(path.join(root, "src/core/rewrite.js"), "utf8");
+const liveCore = await readFile(path.join(root, "src/core/live-stability.js"), "utf8");
+const liveRuntime = await readFile(path.join(root, "src/page/live-stability.runtime.js"), "utf8");
 const page = await readFile(path.join(root, "src/page/bili-accelerator.page.js"), "utf8");
 const content = await readFile(path.join(root, "src/extension/content.js"), "utf8");
 const manifest = JSON.parse(await readFile(path.join(root, "src/extension/manifest.json"), "utf8"));
@@ -38,8 +41,9 @@ const userscriptHeader = `// ==UserScript==
 await rm(dist, { recursive: true, force: true });
 await mkdir(extensionDist, { recursive: true });
 
-await writeFile(path.join(dist, "bilibili-accelerator.user.js"), `${userscriptHeader}\n${core}\n${page}\n`);
-await writeFile(path.join(extensionDist, "bili-accelerator.page.js"), `${core}\n${page}\n`);
+const pageBundle = `${core}\n${liveCore}\n${liveRuntime}\n${page}\n`;
+await writeFile(path.join(dist, "bilibili-accelerator.user.js"), `${userscriptHeader}\n${pageBundle}`);
+await writeFile(path.join(extensionDist, "bili-accelerator.page.js"), pageBundle);
 await writeFile(path.join(extensionDist, "content.js"), content);
 await writeFile(path.join(extensionDist, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
 await writeFile(path.join(extensionDist, "popup.html"), popupHtml);

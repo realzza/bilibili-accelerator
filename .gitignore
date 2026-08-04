@@ -1,2 +1,10 @@
 node_modules/
 .DS_Store
+
+/browser-tests/
+/dist/bilibili-accelerator-extension.zip
+/docs/analysis/upstream-video-acceleration.md
+/package-lock.json
+/test/live-prefetch-runtime.test.js
+/test/live-stability.test.js
+/test/page-live-integration.test.js

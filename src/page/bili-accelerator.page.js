@@ -37,6 +37,45 @@
   const nativeJsonParse = JSON.parse;
   const nativeFetch = root.fetch;
   const NativeXHR = root.XMLHttpRequest;
+  const NativeResponse = root.Response;
+  const NativeAbortController = root.AbortController;
+  const NativeReadableStream = root.ReadableStream;
+  const NativeTextDecoder = root.TextDecoder;
+  const liveCore = root.BiliAcceleratorLiveStability;
+  const liveRuntimeModule = root.BiliAcceleratorLiveRuntime;
+
+  function isSupportedLiveBrowser() {
+    try {
+      const navigator = root.navigator || {};
+      const ua = String(navigator.userAgent || "");
+      const excluded = /(?:OPR\/|Opera|Vivaldi|YaBrowser|Brave)/i.test(ua) || Boolean(navigator.brave);
+      if (excluded) {
+        return false;
+      }
+      const brands = navigator.userAgentData && navigator.userAgentData.brands;
+      if (!Array.isArray(brands)) {
+        return false;
+      }
+      const names = brands.map(function brandName(item) { return String(item && item.brand || ""); });
+      if (names.some(function excludedBrand(name) { return /Opera|Vivaldi|YaBrowser|Brave/i.test(name); })) {
+        return false;
+      }
+      return names.some(function supportedBrand(name) { return /Google Chrome|Microsoft Edge/i.test(name); });
+    } catch (_) {
+      return false;
+    }
+  }
+
+  const liveIntegrationSupported = Boolean(liveCore && liveRuntimeModule &&
+    typeof nativeFetch === "function" &&
+    typeof NativeResponse === "function" &&
+    typeof NativeAbortController === "function" &&
+    typeof NativeReadableStream === "function" &&
+    typeof NativeTextDecoder === "function" &&
+    typeof liveCore.transformPlayInfo === "function" &&
+    typeof liveCore.classifyRequest === "function" &&
+    typeof liveRuntimeModule.createLivePrefetchRuntime === "function" &&
+    isSupportedLiveBrowser());
 
   let immersive = false;
   let revealTimer = null;
@@ -59,6 +98,7 @@
     recoveries: 0,
     p2pBlocked: 0,
     ranking: [],
+    livePrefetchMetrics: [],
     probedAt: null,
     installedAt: new Date().toISOString()
   };
@@ -76,14 +116,49 @@
   }
 
   let config = loadConfig();
+  let liveRuntime = null;
+  let livePlan = [];
+  let livePlanKey = "[]";
+  let liveConfigKey = "";
+  let liveRuntimePaused = Boolean(document.hidden);
+
+  function livePolicyKey(value) {
+    return JSON.stringify({
+      enabled: value.enabled,
+      mode: value.mode,
+      liveProtocolPreference: value.liveProtocolPreference,
+      livePrefetchEnabled: value.livePrefetchEnabled,
+      livePrefetchTargetSeconds: value.livePrefetchTargetSeconds,
+      livePrefetchMaxSegments: value.livePrefetchMaxSegments,
+      livePrefetchConcurrency: value.livePrefetchConcurrency,
+      livePrefetchCacheMiB: value.livePrefetchCacheMiB
+    });
+  }
+
+  function configureLiveRuntime(force) {
+    if (!liveRuntime || liveRuntimePaused) {
+      return;
+    }
+    const nextKey = livePolicyKey(config);
+    if (!force && nextKey === liveConfigKey) {
+      return;
+    }
+    liveConfigKey = nextKey;
+    liveRuntime.configure({ policy: config, plan: livePlan });
+  }
 
   function saveConfig(nextConfig) {
+    const previousLiveKey = livePolicyKey(config);
     config = core.normalizeConfig(nextConfig);
     try {
       root.localStorage.setItem(STORAGE_KEY, JSON.stringify(config));
     } catch (_) {
       // storage may be unavailable; in-memory config still applies.
     }
+    if (previousLiveKey !== livePolicyKey(config)) {
+      configureLiveRuntime(false);
+    }
+    updateLiveControls();
   }
 
   // ---- panel appearance ---------------------------------------------------
@@ -348,13 +423,18 @@
   function mergeBackups(entry, key, base) {
     const alts = core.alternativesFor(base, config, backupPool());
     if (!alts.length) {
-      return;
+      return false;
     }
     const existing = Array.isArray(entry[key]) ? entry[key] : [];
     const merged = alts.concat(existing).filter(function uniq(u, i, arr) {
       return arr.indexOf(u) === i;
     });
-    entry[key] = merged.slice(0, 8);
+    const next = merged.slice(0, 8);
+    if (next.length === existing.length && next.every(function same(value, index) { return value === existing[index]; })) {
+      return false;
+    }
+    entry[key] = next;
+    return true;
   }
 
   // Add host-swapped alternatives to DASH/durl entries so Bilibili's own
@@ -364,9 +444,11 @@
   // uses camelCase (baseUrl/backupUrl); app-style payloads and durl use
   // snake_case (base_url/backup_url).
   function enrichBackups(payload) {
-    if (config.selection !== "auto" || !payload || typeof payload !== "object") {
-      return;
+    if (!config.enabled || config.mode === "off" || config.selection !== "auto" ||
+        !payload || typeof payload !== "object") {
+      return false;
     }
+    let changed = false;
     const containers = [
       payload.data,
       payload.result,
@@ -377,15 +459,17 @@
       if (!container || typeof container !== "object") {
         return;
       }
-      enrichDash(container.dash);
-      enrichDurl(container.durl);
+      changed = enrichDash(container.dash) || changed;
+      changed = enrichDurl(container.durl) || changed;
     });
+    return changed;
   }
 
   function enrichDash(dash) {
     if (!dash || typeof dash !== "object") {
-      return;
+      return false;
     }
+    let changed = false;
     ["video", "audio"].forEach(function eachKind(kind) {
       const list = dash[kind];
       if (!Array.isArray(list)) {
@@ -396,52 +480,76 @@
           return;
         }
         if (typeof entry.baseUrl === "string") {
-          mergeBackups(entry, "backupUrl", entry.baseUrl);
+          changed = mergeBackups(entry, "backupUrl", entry.baseUrl) || changed;
         }
         if (typeof entry.base_url === "string") {
-          mergeBackups(entry, "backup_url", entry.base_url);
+          changed = mergeBackups(entry, "backup_url", entry.base_url) || changed;
         }
       });
     });
+    return changed;
   }
 
   function enrichDurl(durl) {
     if (!Array.isArray(durl)) {
-      return;
+      return false;
     }
+    let changed = false;
     durl.forEach(function eachEntry(entry) {
       if (entry && typeof entry.url === "string") {
-        mergeBackups(entry, "backup_url", entry.url);
+        changed = mergeBackups(entry, "backup_url", entry.url) || changed;
       }
     });
+    return changed;
+  }
+
+  function updateLivePlan(result) {
+    if (!liveRuntime || !result || !result.matched) {
+      return;
+    }
+    const nextPlan = Array.isArray(result.plan) ? result.plan : [];
+    const nextKey = JSON.stringify(nextPlan);
+    if (nextKey === livePlanKey) {
+      return;
+    }
+    livePlan = nextPlan;
+    livePlanKey = nextKey;
+    configureLiveRuntime(true);
+  }
+
+  function processPayload(payload, source) {
+    const tracker = { changed: false, rewrites: [] };
+    const empty = { payload, changed: false, rewrites: [], plan: [], matched: false };
+    if (!config.enabled || config.mode === "off") {
+      return empty;
+    }
+    try {
+      const rewritten = core.rewriteObject(payload, config, tracker);
+      const backupsChanged = enrichBackups(rewritten);
+      const filtered = core.filterLiveUrlInfo(rewritten, config);
+      const transformed = liveIntegrationSupported
+        ? liveCore.transformPlayInfo(rewritten, config)
+        : { changed: false, rewrites: [], plan: [], matched: false };
+      const rewrites = tracker.rewrites.concat(filtered.rewrites || [], transformed.rewrites || []);
+      const result = {
+        payload: rewritten,
+        changed: Boolean(tracker.changed || backupsChanged || filtered.changed || transformed.changed),
+        rewrites,
+        plan: transformed.plan || [],
+        matched: Boolean(transformed.matched)
+      };
+      record(rewrites, source);
+      rememberSample(rewritten);
+      updateLivePlan(result);
+      return result;
+    } catch (error) {
+      console.warn("[BiliAccelerator] rewrite failed", error);
+      return empty;
+    }
   }
 
   function rewritePayload(payload, source) {
-    const tracker = { changed: false, rewrites: [] };
-    try {
-      const rewritten = core.rewriteObject(payload, config, tracker);
-      enrichBackups(rewritten);
-      record(tracker.rewrites, source);
-      filterLivePcdn(rewritten, source);
-      rememberSample(rewritten);
-      return rewritten;
-    } catch (error) {
-      console.warn("[BiliAccelerator] rewrite failed", error);
-      return payload;
-    }
-  }
-
-  // Live playurl payloads list candidate hosts (url_info) instead of full URLs;
-  // drop the PCDN/MCDN entries so the live player only ever dials official CDN.
-  function filterLivePcdn(payload, source) {
-    try {
-      const filtered = core.filterLiveUrlInfo(payload, config);
-      if (filtered.changed) {
-        record(filtered.rewrites, source);
-      }
-    } catch (_) {
-      // never let live filtering break payload delivery.
-    }
+    return processPayload(payload, source).payload;
   }
 
   // Quick check on a response body: does it plausibly carry media URLs?
@@ -452,6 +560,7 @@
         text.indexOf("mcdn") !== -1 ||
         text.indexOf("upgcxcode") !== -1 ||
         text.indexOf("os=mcdn") !== -1 ||
+        text.indexOf("playurl_info") !== -1 ||
         text.indexOf("akamaized") !== -1);
   }
 
@@ -507,7 +616,7 @@
   function patchJsonParse() {
     JSON.parse = function patchedJsonParse(text) {
       const parsed = nativeJsonParse.apply(this, arguments);
-      if (config.enabled && bodyHasSignal(text)) {
+      if (config.enabled && config.mode !== "off" && bodyHasSignal(text)) {
         return rewritePayload(parsed, "JSON.parse");
       }
       return parsed;
@@ -534,8 +643,23 @@
     root.fetch = function patchedFetch(input, init) {
       let args = arguments;
       const reqUrl = requestUrlOf(input);
-      const isMedia = !!reqUrl && core.hasMediaSignal(reqUrl);
-      if (config.enabled && isMedia) {
+      let liveMeta = null;
+      if (liveRuntime && config.enabled && config.mode !== "off") {
+        try {
+          liveMeta = liveCore.classifyRequest(input, init);
+          liveMeta.transport = "fetch";
+          liveMeta.bufferedSeconds = currentBufferedSeconds();
+          const cached = liveRuntime.beforeFetch(liveMeta);
+          if (cached) {
+            return Promise.resolve(cached);
+          }
+        } catch (_) {
+          liveMeta = null;
+        }
+      }
+      const isMedia = Boolean((reqUrl && core.hasMediaSignal(reqUrl)) ||
+        (liveMeta && (liveMeta.kind === "playlist" || liveMeta.kind === "segment" || liveMeta.kind === "flv")));
+      if (config.enabled && config.mode !== "off" && reqUrl && core.hasMediaSignal(reqUrl)) {
         const swapped = rewriteRequestUrl(reqUrl);
         if (swapped !== reqUrl) {
           // string and URL inputs can be replaced by the string directly; only a
@@ -548,7 +672,13 @@
       }
 
       return nativeFetch.apply(this, args).then(function handleResponse(response) {
-        if (!config.enabled) {
+        if (liveRuntime && liveMeta) {
+          try { liveRuntime.observeResponse(liveMeta, response); } catch (_) {}
+        }
+        if (isMedia && liveMeta && (liveMeta.kind === "flv" || liveMeta.kind === "segment")) {
+          return response;
+        }
+        if (!config.enabled || config.mode === "off") {
           return response;
         }
         const contentType = response.headers && response.headers.get("content-type");
@@ -560,7 +690,7 @@
         // player's response for the optional speed graph can then interfere with
         // MSE playback. XHR transfers are still measured below, and fetch-based
         // playback falls back to the buffer-ahead graph.
-        if (isMedia && isBinary) {
+        if (isMedia) {
           return response;
         }
 
@@ -571,27 +701,18 @@
           if (!bodyHasSignal(text)) {
             return response;
           }
-          let parsed;
-          const tracker = { changed: false, rewrites: [] };
-          let live = { changed: false, rewrites: [] };
+          let result;
           try {
-            parsed = nativeJsonParse(text);
-            core.rewriteObject(parsed, config, tracker);
-            enrichBackups(parsed);
-            live = core.filterLiveUrlInfo(parsed, config);
+            result = processPayload(nativeJsonParse(text), "fetch");
           } catch (_) {
             return response;
           }
-          if (!tracker.changed && !live.changed) {
-            rememberSample(parsed);
+          if (!result.changed) {
             return response;
           }
-          record(tracker.rewrites, "fetch");
-          record(live.rewrites, "fetch");
-          rememberSample(parsed);
           const headers = new Headers(response.headers);
           headers.delete("content-length");
-          return new Response(JSON.stringify(parsed), {
+          return new NativeResponse(JSON.stringify(result.payload), {
             status: response.status,
             statusText: response.statusText,
             headers
@@ -619,7 +740,7 @@
         : (url && typeof url.href === "string" ? url.href : "");
       this.__baAccel = { url: urlStr };
       let finalUrl = url;
-      if (config.enabled && urlStr && core.hasMediaSignal(urlStr)) {
+      if (config.enabled && config.mode !== "off" && urlStr && core.hasMediaSignal(urlStr)) {
         finalUrl = rewriteRequestUrl(urlStr);
       }
       return open.apply(this, [method, finalUrl].concat([].slice.call(arguments, 2)));
@@ -636,7 +757,7 @@
 
       // Count downloaded bytes for media segments (free via loadend.loaded) and
       // time send→loadend as the transfer duration for the throughput window.
-      if (config.enabled && isMedia) {
+      if (config.enabled && config.mode !== "off" && isMedia) {
         const startTs = nowMs();
         xhr.addEventListener("loadend", function onLoadEnd(event) {
           if (event && typeof event.loaded === "number") {
@@ -645,26 +766,24 @@
         });
       }
 
-      if (config.enabled && interesting) {
+      if (config.enabled && config.mode !== "off" && interesting && !isMedia) {
         xhr.addEventListener("load", function onLoad() {
           try {
             const ct = xhr.getResponseHeader && xhr.getResponseHeader("content-type");
             if (ct && !ct.includes("json") && !ct.includes("text")) {
               return;
             }
-            const text = xhr.responseText;
+            const jsonResponse = xhr.responseType === "json";
+            const original = jsonResponse ? xhr.response : xhr.responseText;
+            const text = jsonResponse ? JSON.stringify(original) : original;
             if (!bodyHasSignal(text)) {
               return;
             }
-            const parsed = nativeJsonParse(text);
-            const tracker = { changed: false, rewrites: [] };
-            core.rewriteObject(parsed, config, tracker);
-            enrichBackups(parsed);
-            const live = core.filterLiveUrlInfo(parsed, config);
-            rememberSample(parsed);
-            if (!tracker.changed && !live.changed) {
+            const result = processPayload(jsonResponse ? original : nativeJsonParse(text), "xhr");
+            if (!result.changed) {
               return;
             }
+            const parsed = result.payload;
             const rewrittenText = JSON.stringify(parsed);
             const shim = {
               configurable: true,
@@ -679,8 +798,6 @@
                 }
               });
             } catch (_) {}
-            record(tracker.rewrites, "xhr");
-            record(live.rewrites, "xhr");
           } catch (_) {
             // leave the original response intact on any failure.
           }
@@ -938,6 +1055,22 @@
     return null;
   }
 
+  function currentBufferedSeconds() {
+    const video = watchedVideo || (document.querySelector && document.querySelector("video"));
+    try {
+      if (!video || !video.buffered || !video.buffered.length) {
+        return null;
+      }
+      const current = Number(video.currentTime) || 0;
+      for (let i = 0; i < video.buffered.length; i += 1) {
+        if (video.buffered.start(i) <= current && video.buffered.end(i) >= current) {
+          return Math.max(0, video.buffered.end(i) - current);
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
+
   function handleStall() {
     // Browsers throttle media/MSE work in background tabs, which can make the
     // player emit a transient waiting/stalled event. Rotating CDN hosts in that
@@ -997,12 +1130,19 @@
 
   function onVisibilityChange() {
     if (document.hidden) {
+      liveRuntimePaused = true;
+      if (liveRuntime) {
+        liveRuntime.reset("hidden");
+      }
       if (stallTimer) {
         clearTimeout(stallTimer);
         stallTimer = null;
       }
       return;
     }
+
+    liveRuntimePaused = false;
+    configureLiveRuntime(true);
 
     // A waiting event fired while hidden is deliberately ignored. Re-evaluate
     // once foregrounded so a genuine, still-active stall keeps the normal grace
@@ -1021,6 +1161,11 @@
     const video = document.querySelector("video");
     if (!video || video === watchedVideo) {
       return;
+    }
+
+    if (watchedVideo && liveRuntime) {
+      liveRuntime.reset("video-replaced");
+      configureLiveRuntime(true);
     }
     watchedVideo = video;
     video.addEventListener("waiting", onWaiting, { passive: true });
@@ -1046,7 +1191,8 @@
       },
       ranking: state.ranking,
       probedAt: state.probedAt,
-      recentRewrites: state.rewrites.slice(-15)
+      recentRewrites: state.rewrites.slice(-15),
+      livePrefetch: state.livePrefetchMetrics.slice(-15)
     };
   }
 
@@ -1407,15 +1553,7 @@
     setBadgeHidden(immersive && !panelIsOpen());
   }
 
-  // Live rooms run a different player: no .bpx-player-container, no data-screen,
-  // nothing detectScreenMode() can read (checked against a real room — a live
-  // page has zero bpx-* elements). Without this the badge sits permanently over
-  // the chat column.
-  //
-  // Kept separate from detectScreenMode() on purpose. That function answers
-  // "what screen mode is the player in", and answering "web" for a live page
-  // would also satisfy the setLifted() test below, nudging the badge to
-  // bottom:84px on every live page as a side effect.
+  // Live rooms use a different player without the usual screen-mode markers.
   function isLivePage() {
     const host = root.location && typeof root.location.hostname === "string"
       ? root.location.hostname.toLowerCase()
@@ -1482,7 +1620,6 @@
     document.addEventListener("mousemove", handlePointerMove, { passive: true });
     document.addEventListener("fullscreenchange", refreshImmersive);
     document.addEventListener("webkitfullscreenchange", refreshImmersive);
-    document.addEventListener("visibilitychange", onVisibilityChange);
     ensurePlayerObserver();
     setInterval(ensurePlayerObserver, 1500);
   }
@@ -1526,6 +1663,11 @@
       stallTitle: "Auto-recover", stallNote: "Switch servers live if it stalls — no reload",
       akamaiTitle: "Rewrite Akamai", akamaiNote: "Only if Akamai is slow on your network",
       p2pTitle: "Stop bandwidth sharing", p2pNote: "Block Bilibili's P2P upload (reload to apply)",
+      liveProtocol: "Live protocol", liveProtocolOriginal: "Bilibili default",
+      liveProtocolStable: "Stable first (experimental)",
+      livePrefetchTitle: "Live prefetch", livePrefetchNote: "Read a few upcoming live segments",
+      liveTargetSeconds: "Target seconds", liveMaxSegments: "Max segments",
+      liveConcurrency: "Concurrent reads", liveCacheMiB: "Cache (MiB)",
       diag: "Copy report", diagCopied: "Copied ✓", diagConsole: "See console",
       reload: "Reload"
     },
@@ -1565,10 +1707,19 @@
       stallTitle: "自动恢复", stallNote: "卡顿时实时切换服务器，无需刷新",
       akamaiTitle: "改写 Akamai", akamaiNote: "仅当 Akamai 在你的网络上很慢时使用",
       p2pTitle: "停止带宽共享", p2pNote: "阻止 B 站的 P2P 上传（刷新后生效）",
+      liveProtocol: "直播协议", liveProtocolOriginal: "B 站默认",
+      liveProtocolStable: "稳定优先（实验）",
+      livePrefetchTitle: "直播预读取", livePrefetchNote: "提前读取少量后续直播分片",
+      liveTargetSeconds: "目标秒数", liveMaxSegments: "最大分片数",
+      liveConcurrency: "并发读取数", liveCacheMiB: "缓存（MiB）",
       diag: "复制诊断报告", diagCopied: "已复制 ✓", diagConsole: "见控制台",
       reload: "刷新"
     }
   };
+  const LIVE_PROTOCOL_I18N = Object.freeze({
+    original: "liveProtocolOriginal",
+    stable: "liveProtocolStable"
+  });
 
   function lang() {
     return config.lang === "zh" ? "zh" : "en";
@@ -1581,6 +1732,29 @@
   function getShadow() {
     const host = document.getElementById(BUTTON_ID);
     return host && host.shadowRoot;
+  }
+
+  function updateLiveControls() {
+    const shadow = getShadow();
+    if (!shadow || !liveIntegrationSupported) {
+      return;
+    }
+    const protocol = shadow.getElementById("ba-live-protocol");
+    const prefetch = shadow.getElementById("ba-live-prefetch");
+    if (protocol) {
+      protocol.value = config.liveProtocolPreference;
+    }
+    if (prefetch) {
+      prefetch.checked = config.livePrefetchEnabled;
+    }
+    ["livePrefetchTargetSeconds", "livePrefetchMaxSegments",
+      "livePrefetchConcurrency", "livePrefetchCacheMiB"].forEach(function updateNumber(key) {
+      const input = shadow.getElementById("ba-" + key);
+      if (input) {
+        input.value = String(config[key]);
+        input.disabled = !config.livePrefetchEnabled;
+      }
+    });
   }
 
   function currentStatusKey() {
@@ -1687,6 +1861,25 @@
     label.appendChild(caption);
     label.appendChild(control);
     return label;
+  }
+
+  function createLiveNumberInput(key, onChange) {
+    const setting = core.LIVE_SETTINGS[key];
+    const input = document.createElement("input");
+    input.type = "number";
+    input.className = "ba-control ba-live-number";
+    input.id = "ba-" + key;
+    input.value = String(config[key]);
+    input.min = String(setting.min);
+    input.max = String(setting.max);
+    input.step = String(setting.step);
+    input.disabled = !config.livePrefetchEnabled;
+    input.addEventListener("change", function () {
+      const rawValue = String(input.value || "").trim();
+      onChange(rawValue === "" ? setting.default : Number(rawValue));
+      input.value = String(config[key]);
+    });
+    return input;
   }
 
   // Like createField but a plain <div> instead of <label>, so a row of buttons
@@ -1868,7 +2061,8 @@
       ".ba-adv.open{display:block}",
       ".ba-field{display:grid;grid-template-columns:96px 1fr;align-items:center;gap:9px;margin:9px 0;font-size:12px}",
       ".ba-field span{color:var(--ba-ink-mid);font-weight:650}",
-      ".ba-control,.ba-field input[type=text],.ba-field select{width:100%;min-width:0;height:32px;border:1px solid var(--ba-border-in);border-radius:8px;padding:0 9px;background:var(--ba-card);color:var(--ba-ink);outline:none;font-size:11px}",
+      ".ba-control,.ba-field input[type=text],.ba-field input[type=number],.ba-field select{width:100%;min-width:0;height:32px;border:1px solid var(--ba-border-in);border-radius:8px;padding:0 9px;background:var(--ba-card);color:var(--ba-ink);outline:none;font-size:11px}",
+      ".ba-control:disabled,.ba-switch-row:has(input:disabled){opacity:.5;cursor:not-allowed}",
       ".ba-swatches{display:flex;align-items:center;gap:7px;min-height:32px;flex-wrap:wrap}",
       ".ba-sw{width:22px;height:22px;border-radius:50%;padding:0;border:none;cursor:pointer;box-shadow:0 0 0 1px var(--ba-border-in) inset;transition:transform .12s ease}",
       ".ba-sw:hover{transform:scale(1.12)}",
@@ -2080,6 +2274,42 @@
         saveConfig(Object.assign({}, config, { p2pGuard: checked }));
       });
 
+    const liveControls = [];
+    if (liveIntegrationSupported) {
+      const liveProtocolOptions = core.LIVE_SETTINGS.liveProtocolPreference.values.map(function liveProtocolOption(value) {
+        return { value, key: LIVE_PROTOCOL_I18N[value] };
+      });
+      const liveProtocol = createSelect(liveProtocolOptions, config.liveProtocolPreference, function (value) {
+        saveConfig(Object.assign({}, config, { liveProtocolPreference: value }));
+      });
+      liveProtocol.id = "ba-live-protocol";
+      liveControls.push(createField("liveProtocol", liveProtocol));
+
+      const numberKeys = [
+        ["livePrefetchTargetSeconds", "liveTargetSeconds"],
+        ["livePrefetchMaxSegments", "liveMaxSegments"],
+        ["livePrefetchConcurrency", "liveConcurrency"],
+        ["livePrefetchCacheMiB", "liveCacheMiB"]
+      ];
+      const numberInputs = numberKeys.map(function makeLiveNumber(item) {
+        const key = item[0];
+        const input = createLiveNumberInput(key, function (value) {
+          const next = {};
+          next[key] = value;
+          saveConfig(Object.assign({}, config, next));
+        });
+        liveControls.push(createField(item[1], input));
+        return input;
+      });
+      const prefetchRow = createSwitchRow("livePrefetchTitle", "livePrefetchNote",
+        config.livePrefetchEnabled, function (checked) {
+          saveConfig(Object.assign({}, config, { livePrefetchEnabled: checked }));
+          numberInputs.forEach(function updateDisabled(input) { input.disabled = !checked; });
+        });
+      prefetchRow.querySelector("input").id = "ba-live-prefetch";
+      liveControls.splice(1, 0, prefetchRow);
+    }
+
     const diag = document.createElement("button");
     diag.type = "button";
     diag.dataset.i18n = "diag";
@@ -2118,6 +2348,7 @@
     adv.appendChild(stallRow);
     adv.appendChild(akamaiRow);
     adv.appendChild(p2pRow);
+    liveControls.forEach(function appendLiveControl(control) { adv.appendChild(control); });
     adv.appendChild(actions);
 
     // Scrollable body holds everything; the advanced toggle is pinned below it
@@ -2180,12 +2411,52 @@
     shadow.appendChild(panel);
     shadow.appendChild(toggle);
     document.documentElement.appendChild(host);
+    updateLiveControls();
     applyLang();
     applyTheme();
     watchSystemTheme();
   }
 
   // ---- external config bridge (extension popup → page) -------------------
+
+  function installLiveRuntime() {
+    if (!liveIntegrationSupported || liveRuntime) {
+      return;
+    }
+    try {
+      liveRuntime = liveRuntimeModule.createLivePrefetchRuntime({
+        LiveCore: liveCore,
+        nativeFetch: typeof nativeFetch === "function"
+          ? function runtimeFetch(input, init) { return nativeFetch.call(root, input, init); }
+          : null,
+        createResponse: typeof NativeResponse === "function"
+          ? function createRuntimeResponse(body, init) { return new NativeResponse(body, init); }
+          : null,
+        createAbortController: typeof NativeAbortController === "function"
+          ? function createRuntimeController() { return new NativeAbortController(); }
+          : null,
+        ReadableStream: NativeReadableStream,
+        TextDecoder: NativeTextDecoder,
+        getBufferedSeconds: currentBufferedSeconds,
+        onMetric: function rememberLiveMetric(metric) {
+          state.livePrefetchMetrics.push({
+            host: String(metric && metric.host || ""),
+            sequence: metric && metric.sequence,
+            bytes: Math.max(0, Number(metric && metric.bytes) || 0),
+            reason: String(metric && metric.reason || "")
+          });
+          state.livePrefetchMetrics = state.livePrefetchMetrics.slice(-50);
+        }
+      });
+      configureLiveRuntime(true);
+      if (typeof root.addEventListener === "function") {
+        root.addEventListener("pagehide", function () { liveRuntime.reset("pagehide"); });
+        root.addEventListener("unload", function () { liveRuntime.dispose(); });
+      }
+    } catch (_) {
+      liveRuntime = null;
+    }
+  }
 
   function installConfigBridge() {
     if (typeof root.addEventListener !== "function") {
@@ -2198,6 +2469,7 @@
       const data = event.data;
       if (data && data.__biliAccel === "config" && data.config) {
         saveConfig(Object.assign({}, config, data.config));
+        updateLiveControls();
         applyLang();
         applyTheme();
       }
@@ -2206,7 +2478,7 @@
 
   root.BiliAccelerator = {
     getConfig: function () { return Object.assign({}, config); },
-    setConfig: function (next) { saveConfig(Object.assign({}, config, next || {})); renderStatus(); applyTheme(); return this.getConfig(); },
+    setConfig: function (next) { saveConfig(Object.assign({}, config, next || {})); updateLiveControls(); renderStatus(); applyTheme(); return this.getConfig(); },
     getStats: function () { return JSON.parse(JSON.stringify(state)); },
     getDiagnostics: function () { return buildDiagnostics(); },
     rewriteUrl: function (url) { return core.rewriteUrl(url, config); }
@@ -2214,6 +2486,7 @@
 
   const bootRanking = loadRanking();
   applyRanking(bootRanking && bootRanking.ranking);
+  installLiveRuntime();
   patchJsonParse();
   patchFetch();
   patchXHR();
@@ -2222,6 +2495,7 @@
   patchGlobalPlayInfo("__NEPTUNE_IS_MY_WAIFU__"); // live room initial state
   installP2PGuard();
   installConfigBridge();
+  document.addEventListener("visibilitychange", onVisibilityChange);
 
   function bootstrapUi() {
     installUi();

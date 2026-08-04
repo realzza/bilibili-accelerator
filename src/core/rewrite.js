@@ -9,7 +9,7 @@
 })(typeof globalThis !== "undefined" ? globalThis : window, function createCore() {
   "use strict";
 
-  const SCHEMA_VERSION = 3;
+  const SCHEMA_VERSION = 4;
 
   // Healthy UPOS mirrors we are willing to rewrite toward. The default target
   // is DEFAULT_CONFIG.pcdnHost and the auto-selection pool is CANDIDATE_POOL;
@@ -41,6 +41,20 @@
     "graphite"
   ]);
   const THEME_MODES = Object.freeze(["system", "light", "dark"]);
+
+  // Live controls deliberately remain flat in persisted configuration. Keeping
+  // their metadata here gives the UI and the runtime one validation authority.
+  const LIVE_SETTINGS = Object.freeze({
+    liveProtocolPreference: Object.freeze({
+      values: Object.freeze(["original", "stable"]),
+      default: "original"
+    }),
+    livePrefetchEnabled: Object.freeze({ default: false }),
+    livePrefetchTargetSeconds: Object.freeze({ default: 6, min: 2, max: 12, step: 1 }),
+    livePrefetchMaxSegments: Object.freeze({ default: 2, min: 1, max: 4, step: 1 }),
+    livePrefetchConcurrency: Object.freeze({ default: 1, min: 1, max: 2, step: 1 }),
+    livePrefetchCacheMiB: Object.freeze({ default: 24, min: 8, max: 64, step: 1 })
+  });
 
   // Candidates that are safe to auto-probe and rank as rewrite targets. Akamai
   // is excluded: it rejects a upos-signed path with 403, so it can never win a
@@ -87,6 +101,12 @@
     portHeuristic: true,                           // non-default port ⇒ PCDN
     stallRecovery: true,                           // live failover on buffering
     p2pGuard: false,                               // opt-in WebRTC/PCDN neutralizer
+    liveProtocolPreference: LIVE_SETTINGS.liveProtocolPreference.default,
+    livePrefetchEnabled: LIVE_SETTINGS.livePrefetchEnabled.default,
+    livePrefetchTargetSeconds: LIVE_SETTINGS.livePrefetchTargetSeconds.default,
+    livePrefetchMaxSegments: LIVE_SETTINGS.livePrefetchMaxSegments.default,
+    livePrefetchConcurrency: LIVE_SETTINGS.livePrefetchConcurrency.default,
+    livePrefetchCacheMiB: LIVE_SETTINGS.livePrefetchCacheMiB.default,
     maxDepth: 20,
     schemaVersion: SCHEMA_VERSION
   });
@@ -167,6 +187,23 @@
     if (THEME_MODES.indexOf(merged.theme) === -1) {
       merged.theme = DEFAULT_CONFIG.theme;
     }
+    if (LIVE_SETTINGS.liveProtocolPreference.values.indexOf(merged.liveProtocolPreference) === -1) {
+      merged.liveProtocolPreference = LIVE_SETTINGS.liveProtocolPreference.default;
+    }
+    if (typeof merged.livePrefetchEnabled !== "boolean") {
+      merged.livePrefetchEnabled = LIVE_SETTINGS.livePrefetchEnabled.default;
+    }
+    ["livePrefetchTargetSeconds", "livePrefetchMaxSegments",
+      "livePrefetchConcurrency", "livePrefetchCacheMiB"].forEach(function normalizeLiveNumber(key) {
+      const setting = LIVE_SETTINGS[key];
+      const value = merged[key];
+      if (typeof value !== "number" || !Number.isFinite(value)) {
+        merged[key] = setting.default;
+        return;
+      }
+      const clamped = Math.min(setting.max, Math.max(setting.min, value));
+      merged[key] = setting.min + Math.round((clamped - setting.min) / setting.step) * setting.step;
+    });
     merged.schemaVersion = SCHEMA_VERSION;
     return merged;
   }
@@ -672,6 +709,7 @@
     CANDIDATE_POOL,
     ACCENT_KEYS,
     THEME_MODES,
+    LIVE_SETTINGS,
     DEFAULT_CONFIG,
     normalizeConfig,
     hasMediaSignal: hasBiliMediaSignal,
