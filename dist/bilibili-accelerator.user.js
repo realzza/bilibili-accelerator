@@ -2300,13 +2300,11 @@
 
   // Live rooms run a different player: no .bpx-player-container, no data-screen,
   // nothing detectScreenMode() can read (checked against a real room — a live
-  // page has zero bpx-* elements). Without this the badge sits permanently over
-  // the chat column.
+  // page has zero bpx-* elements). Without this the badge sits at bottom:18px,
+  // right on top of the danmaku input bar.
   //
-  // Kept separate from detectScreenMode() on purpose. That function answers
-  // "what screen mode is the player in", and answering "web" for a live page
-  // would also satisfy the setLifted() test below, nudging the badge to
-  // bottom:84px on every live page as a side effect.
+  // Kept separate from detectScreenMode() on purpose: that function answers
+  // "what screen mode is the player in", and a live page is not in one.
   function isLivePage() {
     const host = root.location && typeof root.location.hostname === "string"
       ? root.location.hostname.toLowerCase()
@@ -2337,8 +2335,14 @@
 
   function refreshImmersive() {
     const mode = detectScreenMode();
-    setLifted(mode === "web" || mode === "full" || mode === "wide");
-    setImmersive(mode === "web" || mode === "full" || isLivePage());
+    // A live page lifts the badge clear of the danmaku bar; it does not hide it.
+    // Hiding was tried (immersive puts the badge at opacity:0 with pointer-events
+    // off until the pointer finds an undocumented 150px corner hotzone) and it
+    // reads as the script having vanished — reported the first time that build
+    // reached a viewer. Lifting answers the same complaint the hide was for: the
+    // badge no longer covers the chat column's input row.
+    setLifted(mode === "web" || mode === "full" || mode === "wide" || isLivePage());
+    setImmersive(mode === "web" || mode === "full");
   }
 
   function ensurePlayerObserver() {

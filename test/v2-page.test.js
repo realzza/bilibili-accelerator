@@ -408,17 +408,17 @@ test("live segment URLs pass through untouched (no VOD host swap)", () => {
   assert.equal(xhr._url, liveUrl);
 });
 
-test("live pages enter immersive mode so the badge can auto-hide", () => {
+test("live pages lift the badge clear of the danmaku bar, and keep it visible", () => {
   const { document } = loadPageWithLiveHost();
   const host = document.getElementById("bili-accelerator-button");
   assert.ok(host, "installs the floating badge");
-  assert.equal(host.classList.contains("ba-immersed"), true,
-    "live pages should hide the badge the same way web fullscreen does");
-  // isLivePage() is deliberately not routed through detectScreenMode(): a live
-  // page reporting "web" there would also satisfy refreshImmersive's setLifted
-  // test and shift the badge to bottom:84px, which nothing asked for.
-  assert.equal(host.classList.contains("ba-lifted"), false,
-    "hiding the badge on a live page must not also lift it");
+  assert.equal(host.classList.contains("ba-lifted"), true,
+    "the badge must clear the chat column's input row on a live page");
+  // Hiding it there instead was tried: immersive means opacity:0 and
+  // pointer-events:none until the pointer finds a 150px corner hotzone, which
+  // reads as the script having disappeared.
+  assert.equal(host.classList.contains("ba-immersed"), false,
+    "a live page must not make the badge invisible and unclickable");
 });
 
 test("bangumi video_info.dash gets backup fan-out; durl gets backup_url fan-out", () => {
