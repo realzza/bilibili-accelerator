@@ -128,7 +128,8 @@ function loadPageWithVideo(extra) {
   return { sandbox, document, video };
 }
 
-function loadPageWithLiveHost() {
+function loadPageWithLiveHost(videos, viewport) {
+  const players = videos || [];
   const core = fs.readFileSync(path.join(__dirname, "../src/core/rewrite.js"), "utf8");
   const page = fs.readFileSync(path.join(__dirname, "../src/page/bili-accelerator.page.js"), "utf8");
   const nodes = new Map();
@@ -211,7 +212,10 @@ function loadPageWithLiveHost() {
       return nodes.get(id) || null;
     },
     querySelector(selector) {
-      return selector === "video" ? null : null;
+      return selector === "video" ? (players[0] || null) : null;
+    },
+    querySelectorAll(selector) {
+      return selector === "video" ? players : [];
     },
     createElement(tagName) {
       return makeElement(tagName);
@@ -232,6 +236,8 @@ function loadPageWithLiveHost() {
     console: { info() {}, warn() {}, error() {} },
     localStorage: { getItem: () => null, setItem() {} },
     location: { href: "https://live.bilibili.com/123", hostname: "live.bilibili.com", reload() {} },
+    innerWidth: (viewport && viewport.width) || 0,
+    innerHeight: (viewport && viewport.height) || 0,
     document,
     setTimeout(callback) { callback(); return 1; },
     clearTimeout() {},
@@ -408,17 +414,38 @@ test("live segment URLs pass through untouched (no VOD host swap)", () => {
   assert.equal(xhr._url, liveUrl);
 });
 
-test("live pages lift the badge clear of the danmaku bar, and keep it visible", () => {
+test("an ordinary live page leaves the badge where it always sits", () => {
+  // Hiding it on every live page was tried and is what this replaces: immersive
+  // means opacity:0 and pointer-events:none until the pointer finds an
+  // undocumented 150px corner hotzone, which reads as the script having failed
+  // to load. Nor is it nudged upward — an ordinary live page gets the same
+  // placement as every other page.
   const { document } = loadPageWithLiveHost();
   const host = document.getElementById("bili-accelerator-button");
   assert.ok(host, "installs the floating badge");
-  assert.equal(host.classList.contains("ba-lifted"), true,
-    "the badge must clear the chat column's input row on a live page");
-  // Hiding it there instead was tried: immersive means opacity:0 and
-  // pointer-events:none until the pointer finds a 150px corner hotzone, which
-  // reads as the script having disappeared.
   assert.equal(host.classList.contains("ba-immersed"), false,
     "a live page must not make the badge invisible and unclickable");
+  assert.equal(host.classList.contains("ba-lifted"), false,
+    "and must not move it either");
+});
+
+test("a live player filling the window fades the badge, like web fullscreen", () => {
+  // A live room carries no .bpx-player-container and no data-screen, so web
+  // fullscreen is unreadable from the DOM — the player filling the window is
+  // the signal. This is the one live state where the badge sits on the stream.
+  const fullscreen = makeVideo({ clientWidth: 1280, clientHeight: 720 });
+  const { document } = loadPageWithLiveHost([fullscreen], { width: 1280, height: 720 });
+  const host = document.getElementById("bili-accelerator-button");
+  assert.equal(host.classList.contains("ba-immersed"), true,
+    "a full-window live player should fade the badge out");
+});
+
+test("a live player in its normal layout does not fade the badge", () => {
+  const windowed = makeVideo({ clientWidth: 900, clientHeight: 500 });
+  const { document } = loadPageWithLiveHost([windowed], { width: 1280, height: 800 });
+  const host = document.getElementById("bili-accelerator-button");
+  assert.equal(host.classList.contains("ba-immersed"), false,
+    "the ordinary live layout must keep the badge visible");
 });
 
 test("bangumi video_info.dash gets backup fan-out; durl gets backup_url fan-out", () => {
@@ -825,6 +852,9 @@ function makeVideo(props) {
     clientWidth: 0,
     clientHeight: 0,
     currentSrc: "blob:https://live.bilibili.com/media-source",
+    getBoundingClientRect() {
+      return { width: this.clientWidth, height: this.clientHeight, top: 0, left: 0 };
+    },
     addEventListener(type, listener) { listeners.set(type, listener); },
     dispatch(type) {
       const listener = listeners.get(type);
@@ -834,10 +864,11 @@ function makeVideo(props) {
   }, props || {});
 }
 
-function loadPageWithVideoList(videos) {
+function loadPageWithVideoList(videos, frames) {
   const core = fs.readFileSync(path.join(__dirname, "../src/core/rewrite.js"), "utf8");
   const page = fs.readFileSync(path.join(__dirname, "../src/page/bili-accelerator.page.js"), "utf8");
   const timers = new Map();
+  const intervals = new Map();
   let nextTimer = 1;
 
   const document = {
@@ -848,7 +879,8 @@ function loadPageWithVideoList(videos) {
     addEventListener() {},
     getElementById: () => null,
     querySelector: (selector) => (selector === "video" ? videos[0] || null : null),
-    querySelectorAll: (selector) => (selector === "video" ? videos : []),
+    querySelectorAll: (selector) =>
+      selector === "video" ? videos : (selector === "iframe" ? (frames || []) : []),
     createElement: () => ({})
   };
 
@@ -868,8 +900,12 @@ function loadPageWithVideoList(videos) {
       return id;
     },
     clearTimeout(id) { timers.delete(id); },
-    setInterval() { return 0; },
-    clearInterval() {}
+    setInterval(callback, delay) {
+      const id = nextTimer++;
+      intervals.set(id, { callback, delay });
+      return id;
+    },
+    clearInterval(id) { intervals.delete(id); }
   };
   sandbox.globalThis = sandbox;
   sandbox.window = sandbox;
@@ -881,6 +917,11 @@ function loadPageWithVideoList(videos) {
         timers.delete(id);
         timer.callback();
       });
+  };
+  sandbox.runIntervals = function runIntervals(delay) {
+    Array.from(intervals.values())
+      .filter((timer) => delay == null || timer.delay === delay)
+      .forEach((timer) => timer.callback());
   };
 
   vm.runInNewContext(`${core}\n${page}`, sandbox);
@@ -904,4 +945,87 @@ test("the watched <video> is the one playing, not just the first in the DOM", ()
   sandbox.runTimeouts(2500);
   assert.equal(sandbox.BiliAccelerator.getStats().stalls, 1,
     "a stall on the real player must be seen");
+});
+
+// A same-origin frame exposes contentDocument; a cross-origin one throws on it.
+function makeFrame(videos) {
+  return {
+    contentDocument: {
+      querySelectorAll: (selector) => (selector === "video" ? videos : [])
+    }
+  };
+}
+
+function makeCrossOriginFrame() {
+  return {
+    get contentDocument() {
+      throw new Error("Blocked a frame with origin from accessing a cross-origin frame");
+    }
+  };
+}
+
+test("a player embedded in a same-origin frame is still found and watched", () => {
+  // Event and esports live rooms wrap the player in an iframe, which leaves the
+  // top document with no video at all: no speed reading, no buffer fallback, no
+  // stall detection, and a panel reporting "Ready" beside a playing stream.
+  const framed = makeVideo({ paused: false, clientWidth: 960, clientHeight: 540 });
+  const { sandbox } = loadPageWithVideoList([], [makeCrossOriginFrame(), makeFrame([framed])]);
+
+  assert.ok(framed.listenerCount > 0,
+    "the framed player must be the watched element");
+
+  framed.dispatch("waiting");
+  sandbox.runTimeouts(2500);
+  assert.equal(sandbox.BiliAccelerator.getStats().stalls, 1,
+    "and its stalls must reach the panel");
+});
+
+test("a video in the top document still wins over one in a frame", () => {
+  const top = makeVideo({ paused: false, clientWidth: 1280, clientHeight: 720 });
+  const framed = makeVideo({ paused: false, clientWidth: 320, clientHeight: 180 });
+  loadPageWithVideoList([top], [makeFrame([framed])]);
+
+  assert.ok(top.listenerCount > 0, "the larger top-document player wins");
+  assert.equal(framed.listenerCount, 0, "the small framed one is not watched");
+});
+
+test("live throughput is read off the decoder when no transfer was measured", () => {
+  // Live segments arrive over fetch bodies the interceptor must never read, so
+  // recordTransfer never fires and the panel had no number at all on a live
+  // page. The decoder's own counters are safe to sample and give the rate the
+  // stream is really arriving at.
+  const player = makeVideo({ paused: false, clientWidth: 1280, clientHeight: 720 });
+  player.webkitVideoDecodedByteCount = 0;
+  player.webkitAudioDecodedByteCount = 0;
+  const { sandbox } = loadPageWithVideoList([player]);
+
+  let clock = 1000;
+  sandbox.performance.now = () => clock;
+  for (let i = 0; i < 8; i += 1) {
+    clock += 1000;
+    player.currentTime += 1;
+    player.webkitVideoDecodedByteCount += 500 * 1024;   // 500 KiB/s ≈ 4.1 Mbps
+    sandbox.runIntervals(1000);
+  }
+
+  const shown = sandbox.BiliAccelerator.getDiagnostics().speed;
+  assert.equal(shown.mode, "speed", "a measured rate must keep the graph on Mbps");
+  assert.ok(shown.mbps > 3.5 && shown.mbps < 4.5,
+    "expected roughly 4.1 Mbps from 500 KiB/s, got " + shown.mbps);
+});
+
+test("an engine without decoder counters still falls back to buffer-ahead", () => {
+  const player = makeVideo({ paused: false, clientWidth: 1280, clientHeight: 720 });
+  const { sandbox } = loadPageWithVideoList([player]);
+
+  let clock = 1000;
+  sandbox.performance.now = () => clock;
+  for (let i = 0; i < 8; i += 1) {
+    clock += 1000;
+    player.currentTime += 1;
+    sandbox.runIntervals(1000);
+  }
+
+  assert.equal(sandbox.BiliAccelerator.getDiagnostics().speed.mode, "buffer",
+    "with no bytes from either source the graph must show buffer seconds");
 });

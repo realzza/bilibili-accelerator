@@ -44,4 +44,14 @@ That left the accelerator with nothing to do on a live page — but the machiner
 
 The fix keeps live on its own rails: live URLs are never used as probe samples, live payloads are filtered in both shapes, live stalls are reported rather than "recovered", and probe rounds that measure nothing are retried instead of latched.
 
-Still open: the panel's speed meter reads 0.0 Mbps on live pages. Live segments arrive over `fetch` with a streaming body, which the interceptor deliberately never touches (teeing it can interfere with MSE on Safari), so no bytes are ever counted and the graph is supposed to fall back to buffer-ahead seconds. That fallback needs a `<video>` that is actually advancing; `watchVideo` now picks the playing element rather than the first in DOM order, which covers a paused hover-preview winning the lookup, but the fallback has not been confirmed against a real live room.
+### Why the panel had no numbers on a live page
+
+Three separate reasons, all of which had to go:
+
+1. **No bytes are ever counted on live.** Live segments arrive over `fetch` with a streaming body, and the interceptor must never read a media body — teeing one can stall MSE on Safari, which is what broke background playback in v0.4.0. `recordTransfer` only ever sees XHR transfers, so a live page produced no rate at all. The fix reads the media element's own `webkitVideoDecodedByteCount` / `webkitAudioDecodedByteCount`: read-only, free to sample, and their delta over a tick is the rate the stream is actually arriving at. Where those counters are missing the buffer-ahead fallback still stands.
+2. **The player is not always in this document.** Event and esports rooms embed the live player in a same-origin iframe, which leaves the top document with no `<video>` at all — no rate, no buffer fallback, no stall detection, and a panel reporting "Ready" beside a stream that is plainly playing. The player lookup now walks same-origin frames (a cross-origin one throws on `contentDocument` and is skipped) and prefers the element that is playing over the first in DOM order.
+3. **A paused preview could win the lookup.** `querySelector("video")` returns the first in DOM order, which on a page carrying hover-previews is not the player.
+
+### The badge
+
+The ⚡ auto-hide added for live pages made the badge `opacity:0` with `pointer-events:none` until the pointer found an undocumented 150px corner hotzone — it reads as the script having failed to load. An ordinary live page now leaves the badge exactly where it sits everywhere else. Only a live player filling the window fades it, matching what a video page does in web fullscreen; a live room carries no `.bpx-player-container` and no `data-screen`, so that state is measured geometrically rather than read off a class name. When the player is framed, the frame gets the reveal listener too — otherwise every mousemove lands in the frame and a faded badge can never be summoned back.

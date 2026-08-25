@@ -47,7 +47,7 @@ Open `chrome://extensions`, turn on Developer mode, and load `dist/extension`.
 - Advanced settings has seven accents: Bilibili Blue, Teal, Emerald, Violet, Pink, Sunset, and Graphite.
 - **Still buffering? Boost harder** switches to a more aggressive mode and reloads the page.
 - The bandwidth guard is off by default. Turning it on limits the page's use of your upload bandwidth; reload the page afterwards.
-- In web fullscreen the ⚡ badge fades out. Move the pointer to the lower-right corner to bring it back. On live pages it stays put, sitting above the danmaku input bar.
+- In web fullscreen the ⚡ badge fades out. Move the pointer to the lower-right corner to bring it back. Live pages work the same way: the badge stays put normally, and fades only in live web fullscreen.
 
 ## Releases
 
@@ -55,7 +55,7 @@ Full notes live in [Releases](https://github.com/realzza/bilibili-accelerator/re
 
 | Version | What changed |
 | --- | --- |
-| v0.4.1 | Fixes live rooms: the panel no longer sticks on "Finding the fastest server…". It had been probing with a live URL, and live streams run on a different CDN than videos do, so all eight candidates were bound to fail. Live now runs on its own rails — it is left out of probing, a live stall no longer claims a server switch, and the panel reports the live state. PCDN nodes are also filtered out of the legacy `durl` live payload. The ⚡ is visible again on live pages, lifted clear of the danmaku input bar — v0.4.0's auto-hide read as the script having vanished |
+| v0.4.1 | Fixes live rooms: the panel no longer sticks on "Finding the fastest server…". It had been probing with a live URL, and live streams run on a different CDN than videos do, so all eight candidates were bound to fail. Live now runs on its own rails — it is left out of probing, a live stall no longer claims a server switch, and the panel reports the live state. PCDN nodes are also filtered out of the legacy `durl` live payload. The ⚡ is visible again on live pages — v0.4.0's auto-hide read as the script having vanished — and now fades only in live web fullscreen, revealed from the lower-right corner. Live download speed shows a real number too, and the player is found even when a room embeds it in a same-origin iframe |
 | v0.4.0 | Fixes background playback for overseas viewers: switching tabs no longer stalls the video after a few seconds (worst on Safari). The accelerator had been rewriting Bilibili's own overseas mirrors onto mainland CDNs. Candidate servers now span both tiers and are all measured, ranking is by measured throughput instead of response time, and stall switching walks the full list. The ⚡ badge also auto-hides on live pages instead of covering the chat column |
 | [v0.3.0](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.3.0) | Light/dark panel and seven accent themes; header theme and language share one sliding control. Core behavior untouched |
 | [v0.2.3](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.2.3) | Stability fixes for live playback, more accurate probing, and stall recovery that keeps retrying |

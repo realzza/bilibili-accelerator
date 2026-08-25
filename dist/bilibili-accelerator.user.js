@@ -1879,11 +1879,42 @@
   // (a live panel reading 0.0 Mbps with the stream visibly playing). Prefer a
   // video that is playing, then the largest; with a single <video> on the page
   // this picks exactly what querySelector did.
+  // Collect every video element this document can reach, frames included. Some
+  // live rooms — event and esports skins especially — embed the player in a
+  // same-origin iframe, which leaves the top document with no <video> at all:
+  // no speed reading, no buffer fallback, no stall detection, and a panel that
+  // says "Ready" beside a stream that is plainly playing. A cross-origin frame
+  // throws on contentDocument and is skipped.
+  function collectVideos(doc, depth, out) {
+    if (!doc || typeof doc.querySelectorAll !== "function" || depth > 3) {
+      return out;
+    }
+    try {
+      const videos = doc.querySelectorAll("video");
+      for (let i = 0; i < videos.length; i += 1) {
+        out.push(videos[i]);
+      }
+      const frames = doc.querySelectorAll("iframe");
+      for (let i = 0; i < frames.length; i += 1) {
+        let inner = null;
+        try {
+          inner = frames[i].contentDocument;
+        } catch (_) {
+          inner = null;
+        }
+        collectVideos(inner, depth + 1, out);
+      }
+    } catch (_) {
+      // a frame that turns cross-origin mid-walk; take what we have.
+    }
+    return out;
+  }
+
   function findPlayerVideo() {
     if (typeof document.querySelectorAll !== "function") {
       return document.querySelector("video");
     }
-    const videos = document.querySelectorAll("video");
+    const videos = collectVideos(document, 0, []);
     let best = null;
     let bestScore = -1;
     for (let i = 0; i < videos.length; i += 1) {
@@ -1927,6 +1958,14 @@
       },
       ranking: state.ranking,
       probedAt: state.probedAt,
+      // What the speed card is showing and where the number came from. "0.0 Mbps
+      // on a live page" is a report this project has had to guess at twice.
+      speed: {
+        mode: speed.mode,
+        mbps: Math.round(speed.currentMbps * 10) / 10,
+        bufferSec: Math.round(speed.bufferSec * 10) / 10,
+        sawBytes: speed.sawBytes
+      },
       recentRewrites: state.rewrites.slice(-15)
     };
   }
@@ -1950,7 +1989,10 @@
     dispMax: 0,                   // eased y-axis maximum (smooth rescaling)
     sawBytes: false,
     activeTicks: 0,               // ticks where playback advanced
-    lastTime: 0
+    lastTime: 0,
+    decodedFor: null,             // element the decoded counters below belong to
+    lastDecoded: null,
+    lastDecodedAt: 0
   };
   let speedTimer = null;
 
@@ -1975,6 +2017,51 @@
     }
   }
 
+  // Bytes the media element has handed its decoder. Live playback never reaches
+  // recordTransfer — live segments arrive over fetch, and the interceptor must
+  // never read a media body (teeing one can stall MSE on Safari, which is what
+  // broke background playback in v0.4.0) — so the panel had no number to show on
+  // a live page at all. These counters are read-only, cost nothing to sample,
+  // and their delta over a tick is the rate the stream is actually arriving at.
+  // Non-standard, but present in Chrome and Safari; where they are missing this
+  // returns null and the buffer-ahead fallback stands as before.
+  function decodedByteCount(video) {
+    if (!video) {
+      return null;
+    }
+    const videoBytes = typeof video.webkitVideoDecodedByteCount === "number"
+      ? video.webkitVideoDecodedByteCount : 0;
+    const audioBytes = typeof video.webkitAudioDecodedByteCount === "number"
+      ? video.webkitAudioDecodedByteCount : 0;
+    if (!videoBytes && !audioBytes) {
+      return null;
+    }
+    return videoBytes + audioBytes;
+  }
+
+  // Rate implied by the decoder's byte counters since the last tick. 0 when
+  // there is no usable delta: a fresh element, a counter that reset on a source
+  // switch (quality change, live reconnect), or an engine without them.
+  function decodedRateMbps(now) {
+    if (watchedVideo !== speed.decodedFor) {
+      speed.decodedFor = watchedVideo;
+      speed.lastDecoded = null;
+      speed.lastDecodedAt = 0;
+    }
+    const total = decodedByteCount(watchedVideo);
+    if (total === null) {
+      return 0;
+    }
+    const previous = speed.lastDecoded;
+    const previousAt = speed.lastDecodedAt;
+    speed.lastDecoded = total;
+    speed.lastDecodedAt = now;
+    if (previous === null || !(total > previous) || !(now > previousAt)) {
+      return 0;
+    }
+    return core.throughputMbps(total - previous, now - previousAt);
+  }
+
   function installSpeedMeter() {
     if (!speedTimer && typeof setInterval === "function") {
       speedTimer = setInterval(tickSpeed, SPEED_TICK_MS);
@@ -1986,7 +2073,7 @@
     // Active throughput: bytes per second of time actually spent transferring in
     // the trailing window, so the player's idle gaps between burst downloads
     // don't drag a fast link to zero.
-    const sample = core.aggregateThroughput(speed.transfers, now, SPEED_WINDOW_MS);
+    let sample = core.aggregateThroughput(speed.transfers, now, SPEED_WINDOW_MS);
     speed.transfers = speed.transfers.filter(function keep(tr) {
       return tr.end > now - SPEED_WINDOW_MS;
     });
@@ -2018,6 +2105,19 @@
     if (playing && (state.status === "idle" || state.status === "optimizing")) {
       state.status = healthyStatus();
       renderStatus();
+    }
+
+    // Nothing measured at the transfer layer? Fall back to what the decoder has
+    // taken in. This is what puts a real number on a live page, where every byte
+    // arrives over a fetch body the interceptor is not allowed to touch.
+    if (!(sample > 0)) {
+      const decoded = decodedRateMbps(now);
+      if (decoded > 0) {
+        sample = decoded;
+        // Bytes are bytes: this also keeps the buffer-ahead fallback from
+        // taking over a graph that now has a rate to draw.
+        speed.sawBytes = true;
+      }
     }
 
     if (sample > 0) {
@@ -2333,16 +2433,42 @@
     }
   }
 
+  // Web fullscreen on a live page cannot be read off the DOM the way
+  // detectScreenMode() does it — a live room has no .bpx-player-container and no
+  // data-screen attribute — so measure it instead: in web fullscreen (and in
+  // native fullscreen) the player fills the window, and no other live layout
+  // comes close. Geometry also survives Bilibili renaming its classes.
+  function isLivePlayerFullscreen() {
+    if (document.fullscreenElement || document.webkitFullscreenElement) {
+      return true;
+    }
+    const video = findPlayerVideo();
+    if (!video || typeof video.getBoundingClientRect !== "function") {
+      return false;
+    }
+    const rect = video.getBoundingClientRect();
+    const width = root.innerWidth || 0;
+    const height = root.innerHeight || 0;
+    if (!(width > 0 && height > 0) || !(rect.width > 0 && rect.height > 0)) {
+      return false;
+    }
+    return rect.width >= width * 0.9 && rect.height >= height * 0.9;
+  }
+
   function refreshImmersive() {
     const mode = detectScreenMode();
-    // A live page lifts the badge clear of the danmaku bar; it does not hide it.
-    // Hiding was tried (immersive puts the badge at opacity:0 with pointer-events
-    // off until the pointer finds an undocumented 150px corner hotzone) and it
-    // reads as the script having vanished — reported the first time that build
-    // reached a viewer. Lifting answers the same complaint the hide was for: the
-    // badge no longer covers the chat column's input row.
-    setLifted(mode === "web" || mode === "full" || mode === "wide" || isLivePage());
-    setImmersive(mode === "web" || mode === "full");
+    // An ordinary live page leaves the badge exactly where it sits everywhere
+    // else. Only a live player filling the window fades it, matching what a
+    // video page does in web fullscreen — that is the one state where the badge
+    // would sit on top of the stream.
+    //
+    // Hiding it on every live page was tried, and is what this replaces:
+    // immersive means opacity:0 with pointer-events off until the pointer finds
+    // an undocumented 150px corner hotzone, which reads as the script having
+    // failed to load.
+    setLifted(mode === "web" || mode === "full" || mode === "wide");
+    setImmersive(mode === "web" || mode === "full" ||
+      (isLivePage() && isLivePlayerFullscreen()));
   }
 
   function ensurePlayerObserver() {
@@ -2360,6 +2486,7 @@
     }
     refreshImmersive();
     watchVideo();
+    watchFramesForReveal(document, 0);
   }
 
   function handlePointerMove(event) {
@@ -2373,10 +2500,46 @@
     }
   }
 
+  // The reveal hotzone only works if this document sees the pointer. When the
+  // player sits in a frame that covers the window — live web fullscreen with an
+  // embedded player — every mousemove lands in the frame instead, and a faded
+  // badge could never be summoned back. Give same-origin frames the same
+  // listener; addEventListener dedupes an identical registration, so re-running
+  // this on each sweep costs nothing. Frame-relative coordinates only have to
+  // line up in the one state this matters for, where the frame fills the window.
+  function watchFramesForReveal(doc, depth) {
+    if (!doc || typeof doc.querySelectorAll !== "function" || depth > 3) {
+      return;
+    }
+    let frames;
+    try {
+      frames = doc.querySelectorAll("iframe");
+    } catch (_) {
+      return;
+    }
+    for (let i = 0; i < frames.length; i += 1) {
+      let inner = null;
+      try {
+        inner = frames[i].contentDocument;
+      } catch (_) {
+        inner = null;   // cross-origin; nothing to attach to.
+      }
+      if (inner && typeof inner.addEventListener === "function") {
+        try {
+          inner.addEventListener("mousemove", handlePointerMove, { passive: true });
+        } catch (_) {}
+        watchFramesForReveal(inner, depth + 1);
+      }
+    }
+  }
+
   function installImmersiveWatch() {
     document.addEventListener("mousemove", handlePointerMove, { passive: true });
     document.addEventListener("fullscreenchange", refreshImmersive);
     document.addEventListener("webkitfullscreenchange", refreshImmersive);
+    // Live web fullscreen changes no class this script can watch — it just
+    // resizes the player, so the resize is the event.
+    root.addEventListener("resize", refreshImmersive, { passive: true });
     document.addEventListener("visibilitychange", onVisibilityChange);
     ensurePlayerObserver();
     setInterval(ensurePlayerObserver, 1500);
