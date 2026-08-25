@@ -123,3 +123,68 @@ test("filterLiveUrlInfo is disabled when the accelerator is off", () => {
   assert.equal(result.changed, false);
   assert.equal(payload.data.playurl_info.playurl.stream[0].format[0].codec[0].url_info.length, 3);
 });
+
+// ---- live durl filtering ------------------------------------------------------
+
+const LIVE_PCDN_URL =
+  "https://xy36x110x213x230xy.mcdn.bilivideo.cn:486/live-bvc/123/live_1234.flv?os=mcdn";
+const LIVE_CDN_URL =
+  "https://d1--cn-gotcha208.bilivideo.com/live-bvc/123/live_1234.flv?sig=1";
+
+test("isLiveUrl recognizes live paths, including one without a host", () => {
+  assert.equal(core.isLiveUrl(LIVE_CDN_URL), true);
+  assert.equal(core.isLiveUrl("//d1--cn-gotcha208.bilivideo.com/live-bvc/1/x.flv"), true);
+  // Live payloads carry base_url as a bare path; it is still a live URL.
+  assert.equal(core.isLiveUrl("/live-bvc/123/live_1234.flv?sig=abc"), true);
+  assert.equal(core.isLiveUrl(
+    "https://upos-sz-mirrorcos.bilivideo.com/upgcxcode/12/34/567-1-30280.m4s?x=1"), false);
+  assert.equal(core.isLiveUrl(""), false);
+});
+
+test("filterLiveUrlInfo drops PCDN entries from a legacy live durl list", () => {
+  // /room/v1/Room/playUrl returns complete signed URLs instead of a host list,
+  // so the url_info pass never saw it and every entry survived — including the
+  // residential PCDN node. Live URLs are signed per host and cannot be
+  // rewritten, so dropping the entry is the only way to steer the player.
+  const payload = { data: { durl: [{ url: LIVE_PCDN_URL }, { url: LIVE_CDN_URL }] } };
+  const result = core.filterLiveUrlInfo(payload, {});
+  assert.equal(result.changed, true);
+  assert.equal(result.rewrites[0].reason, "live-pcdn-filter");
+  assert.deepEqual(payload.data.durl.map((d) => d.url), [LIVE_CDN_URL]);
+});
+
+test("filterLiveUrlInfo never empties a live durl list", () => {
+  const payload = { data: { durl: [{ url: LIVE_PCDN_URL }] } };
+  const result = core.filterLiveUrlInfo(payload, {});
+  assert.equal(result.changed, false);
+  assert.equal(payload.data.durl.length, 1, "a slow stream still plays; no stream does not");
+});
+
+test("filterLiveUrlInfo leaves a VOD durl list alone", () => {
+  // VOD durl entries are host-swapped by rewriteUrlDetail and fanned out into
+  // backup_url; dropping them would take away the player's own fallbacks.
+  const vod = [
+    { url: "https://xy1x2x3x4xy.mcdn.bilivideo.cn:486/upgcxcode/12/34/567-1-100026.mp4?os=mcdn" },
+    { url: "https://upos-sz-mirrorcos.bilivideo.com/upgcxcode/12/34/567-1-100026.mp4?x=1" }
+  ];
+  const payload = { data: { durl: vod.slice() } };
+  const result = core.filterLiveUrlInfo(payload, {});
+  assert.equal(result.changed, false);
+  assert.equal(result.live, false);
+  assert.equal(payload.data.durl.length, 2);
+});
+
+test("filterLiveUrlInfo reports a live payload even when nothing needed filtering", () => {
+  // `live` is what tells the panel it is on a live page: live acceleration
+  // produces no VOD rewrite to notice, and a live page has no sample to probe.
+  const clean = core.filterLiveUrlInfo({ data: { durl: [{ url: LIVE_CDN_URL }] } }, {});
+  assert.equal(clean.live, true);
+  assert.equal(clean.changed, false);
+
+  const hosts = core.filterLiveUrlInfo(
+    { url_info: [{ host: "https://d1--cn-gotcha208.bilivideo.com", extra: "?sig=1" }] }, {});
+  assert.equal(hosts.live, true);
+
+  const vod = core.filterLiveUrlInfo({ data: { dash: { video: [{ baseUrl: "x" }] } } }, {});
+  assert.equal(vod.live, false);
+});

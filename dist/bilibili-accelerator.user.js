@@ -2,7 +2,7 @@
 // @name         Bilibili Accelerator
 // @name:zh-CN   Bilibili Accelerator - B站海外播放加速
 // @namespace    https://github.com/realzza/bilibili-accelerator
-// @version      0.4.0
+// @version      0.4.1
 // @description  Smoother Bilibili playback for overseas viewers.
 // @description:zh-CN 缓解海外用户看 B 站冷门视频时的卡顿。
 // @author       realzza
@@ -231,6 +231,23 @@
   // filtering the getRoomPlayInfo host list instead (see filterLiveUrlInfo).
   function isLiveMediaUrl(url) {
     return url.pathname.indexOf("/live-bvc/") !== -1;
+  }
+
+  // String-level version of the check above, for callers that hold a raw value
+  // rather than a parsed URL. Deliberately independent of parseUrl: the marker
+  // alone is decisive, so a live path that arrives without a host (live payloads
+  // carry base_url as a bare path) still answers true instead of falling through
+  // as "not live".
+  function isLiveUrl(value) {
+    const raw = String(value || "");
+    if (raw.indexOf("/live-bvc/") === -1) {
+      return false;
+    }
+    try {
+      return isLiveMediaUrl(new URL(raw.slice(0, 2) === "//" ? "https:" + raw : raw));
+    } catch (_) {
+      return true;
+    }
   }
 
   function isMcdnHost(hostname) {
@@ -617,15 +634,53 @@
     return typeof extra === "string" && /(?:^|[?&])os=mcdn(?:&|$)/i.test(extra);
   }
 
-  // Drop PCDN/MCDN entries from live url_info host lists, keeping the official
-  // CDN entries the player can fail over to. Never removes the last usable host:
-  // if every entry looks slow, the list is left untouched. Returns rewrite-shaped
-  // entries ({original, url, reason}) so callers can log them like URL rewrites.
+  // Same verdict for a live entry that carries a whole signed URL instead of a
+  // bare host — the legacy playUrl `durl` shape. host includes the port, which
+  // the port heuristic needs, and the URL's own query is where os=mcdn lands.
+  function isSlowLiveDurlEntry(value, config) {
+    try {
+      const url = new URL(String(value));
+      return isSlowLiveHost(url.host, url.search, config);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // Drop the entries `isSlow` marks, in place, unless that would empty the list:
+  // a live payload whose every candidate looks slow is left alone, because a
+  // slow stream still plays and no stream at all does not. Returns the dropped
+  // entries ([] when nothing was), so callers can log them.
+  function dropSlowLiveEntries(list, isSlow) {
+    const kept = list.filter(function (item) { return !isSlow(item); });
+    if (kept.length === 0 || kept.length === list.length) {
+      return [];
+    }
+    const dropped = list.filter(function (item) { return kept.indexOf(item) === -1; });
+    list.length = 0;
+    kept.forEach(function (item) { list.push(item); });
+    return dropped;
+  }
+
+  // Drop PCDN/MCDN entries from a live payload's candidate list, keeping the
+  // official CDN entries the player can fail over to. Never removes the last
+  // usable host: if every entry looks slow, the list is left untouched. Returns
+  // rewrite-shaped entries ({original, url, reason}) so callers can log them
+  // like URL rewrites, plus `live`: whether a live candidate list was seen at
+  // all. Filtering is the only lever live playback has — live URLs are signed
+  // per host, so rewriteUrlDetail cannot move a live stream anywhere (see
+  // isLiveMediaUrl) — and `live` is what lets the UI say so instead of waiting
+  // on a VOD rewrite that will never come.
+  //
+  // Two payload shapes carry that list. getRoomPlayInfo splits it into
+  // url_info: [{host, extra}] beside a path-only base_url; the legacy
+  // /room/v1/Room/playUrl returns durl: [{url}] with complete signed URLs. Only
+  // the first was handled here, so a viewer on the legacy shape kept whatever
+  // residential PCDN node Bilibili picked.
   function filterLiveUrlInfo(payload, rawConfig, depth, seen) {
     const config = normalizeConfig(rawConfig);
     const level = depth || 0;
     const visited = seen || new WeakSet();
-    const result = { changed: false, rewrites: [] };
+    const result = { changed: false, live: false, rewrites: [] };
 
     if (!config.enabled || config.mode === "off" ||
         payload == null || typeof payload !== "object" ||
@@ -635,26 +690,44 @@
     visited.add(payload);
 
     const list = payload.url_info;
-    if (Array.isArray(list) && list.length > 1 &&
+    if (Array.isArray(list) && list.length > 0 &&
         list.every(function (item) { return item && typeof item.host === "string"; })) {
-      const kept = list.filter(function (item) {
-        return !isSlowLiveHost(item.host, item.extra, config);
+      result.live = true;
+      const dropped = dropSlowLiveEntries(list, function (item) {
+        return isSlowLiveHost(item.host, item.extra, config);
       });
-      if (kept.length > 0 && kept.length < list.length) {
-        list.forEach(function (item) {
-          if (kept.indexOf(item) === -1) {
-            result.rewrites.push({
-              changed: true,
-              original: item.host,
-              url: kept[0].host,
-              reason: "live-pcdn-filter"
-            });
-          }
+      dropped.forEach(function (item) {
+        result.rewrites.push({
+          changed: true,
+          original: item.host,
+          url: list[0].host,
+          reason: "live-pcdn-filter"
         });
-        list.length = 0;
-        kept.forEach(function (item) { list.push(item); });
-        result.changed = true;
-      }
+      });
+      result.changed = result.changed || dropped.length > 0;
+    }
+
+    // Only a list whose every entry is a live URL: a VOD durl carries
+    // /upgcxcode/ URLs that rewriteUrlDetail already handles by host swap, and
+    // dropping entries from it would take away the player's own fallbacks.
+    const durl = payload.durl;
+    if (Array.isArray(durl) && durl.length > 0 &&
+        durl.every(function (item) {
+          return item && typeof item.url === "string" && isLiveUrl(item.url);
+        })) {
+      result.live = true;
+      const dropped = dropSlowLiveEntries(durl, function (item) {
+        return isSlowLiveDurlEntry(item.url, config);
+      });
+      dropped.forEach(function (item) {
+        result.rewrites.push({
+          changed: true,
+          original: item.url,
+          url: durl[0].url,
+          reason: "live-pcdn-filter"
+        });
+      });
+      result.changed = result.changed || dropped.length > 0;
     }
 
     const keys = Array.isArray(payload)
@@ -662,6 +735,7 @@
       : Object.keys(payload);
     for (let i = 0; i < keys.length; i += 1) {
       const child = filterLiveUrlInfo(payload[keys[i]], config, level + 1, visited);
+      result.live = result.live || child.live;
       if (child.changed) {
         result.changed = true;
         result.rewrites = result.rewrites.concat(child.rewrites);
@@ -694,6 +768,7 @@
     hasMediaSignal: hasBiliMediaSignal,
     classify,
     isSlowLiveHost,
+    isLiveUrl,
     filterLiveUrlInfo,
     selectTarget,
     alternativesFor,
@@ -718,7 +793,7 @@
   }
   root.__BILI_ACCELERATOR_INSTALLED__ = true;
 
-  const VERSION = "0.4.0";
+  const VERSION = "0.4.1";
   const STORAGE_KEY = "biliAccelerator.config.v2";
   const LEGACY_KEY = "biliAccelerator.config.v1";
   // Bumped when the pool or the scoring changes: a cached ranking only names
@@ -744,6 +819,11 @@
   // past TCP slow-start and see a real rate, small enough that probing the whole
   // pool moves well under a second of video per host.
   const PROBE_BYTES = 768 * 1024;
+  // Rounds allowed per page, not a single latched attempt: a failed round has to
+  // be retryable (the sample that failed may just have been the wrong one), but
+  // a page that cannot probe at all must not re-run the pool on every payload
+  // it parses.
+  const PROBE_MAX_ATTEMPTS = 3;
 
   const nativeJsonParse = JSON.parse;
   const nativeFetch = root.fetch;
@@ -754,6 +834,7 @@
   let playerObserver = null;
   let observedContainer = null;
   let probed = false;
+  let probeAttempts = 0;
   let watchedVideo = null;
   let stallTimer = null;
   let rotateCursor = 0;
@@ -993,6 +1074,14 @@
 
   // ---- rewrite plumbing ---------------------------------------------------
 
+  // The status to show when playback is healthy. Live rooms get their own key:
+  // nothing on a live page is host-swapped — live URLs are signed per host, so
+  // core refuses to rewrite them — and "connected to the fastest server near
+  // you" would claim a route this script never picked.
+  function healthyStatus() {
+    return isLivePage() ? "live" : "smooth";
+  }
+
   function record(rewrites, source) {
     if (!rewrites || rewrites.length === 0) {
       return;
@@ -1013,7 +1102,7 @@
       };
     })).slice(-50);
     if (state.status === "idle") {
-      state.status = "smooth";
+      state.status = healthyStatus();
     }
     renderStatus();
   }
@@ -1033,7 +1122,13 @@
       return null;
     }
     if (typeof value === "string") {
-      return /\.(m4s|mp4|flv|m3u8)(?:$|[?#])/i.test(value) && core.hasMediaSignal(value)
+      // Live URLs are rejected rather than returned: they look exactly like a
+      // media URL, but a probe re-requests the sample on each candidate mirror,
+      // and no VOD upos host serves a /live-bvc/ path. Returning one here ended
+      // the search at a sample that could only ever fail everywhere — see
+      // scheduleProbe. Keep walking; a live page simply has no VOD sample.
+      return /\.(m4s|mp4|flv|m3u8)(?:$|[?#])/i.test(value) &&
+        core.hasMediaSignal(value) && !core.isLiveUrl(value)
         ? value
         : null;
     }
@@ -1149,6 +1244,15 @@
       const filtered = core.filterLiveUrlInfo(payload, config);
       if (filtered.changed) {
         record(filtered.rewrites, source);
+      }
+      // A live play-info payload is proof the page is a live room, whether or
+      // not it held anything worth filtering. Without this the panel sat on
+      // "Ready — open a video and it'll kick in" through an entire stream,
+      // because live acceleration produces no VOD rewrite for record() to
+      // notice and a live page has no sample to probe.
+      if (filtered.live && (state.status === "idle" || state.status === "optimizing")) {
+        state.status = healthyStatus();
+        renderStatus();
       }
     } catch (_) {
       // never let live filtering break payload delivery.
@@ -1569,11 +1673,30 @@
     })]);
   }
 
+  // A round that measured nothing leaves this behind so a later payload can try
+  // again; PROBE_MAX_ATTEMPTS bounds it for a page that simply cannot probe.
+  function probeFailed() {
+    probed = false;
+    if (state.status === "optimizing") {
+      // Not "smooth": nothing was measured. tickSpeed lifts it off idle once
+      // playback is actually advancing.
+      state.status = "idle";
+    }
+    renderStatus();
+  }
+
   function scheduleProbe(sampleUrl) {
-    if (probed || config.selection !== "auto" || !nativeFetch) {
+    if (probed || config.selection !== "auto" || !nativeFetch ||
+        probeAttempts >= PROBE_MAX_ATTEMPTS) {
+      return;
+    }
+    // findMediaUrl already filters these out; this is the choke point every
+    // probe goes through, and probing a live URL is guaranteed-useless work.
+    if (!sampleUrl || core.isLiveUrl(sampleUrl)) {
       return;
     }
     probed = true;
+    probeAttempts += 1;
     const cached = loadRanking();
     if (cached) {
       applyRanking(cached.ranking);
@@ -1601,15 +1724,25 @@
     Promise.all(hosts.map(function (h) { return probeHost(h, sampleUrl); }))
       .then(function (samples) {
         const ranking = core.rankHosts(samples.filter(function (s) { return s.ok; }));
-        if (ranking.length) {
-          applyRanking(ranking);
-          saveRanking(ranking);
-          state.probedAt = new Date().toISOString();
-          state.status = "smooth";
-          renderStatus();
+        if (!ranking.length) {
+          // Every candidate failed — offline, an origin the mirrors will not
+          // answer with CORS headers, or a sample they cannot serve. This used
+          // to fall through silently with `probed` already latched, which left
+          // the panel on "Finding the fastest server…" for the life of the page
+          // and auto-selection with no ranking it could ever learn.
+          probeFailed();
+          return;
         }
+        applyRanking(ranking);
+        saveRanking(ranking);
+        state.probedAt = new Date().toISOString();
+        // Do not clobber a stall the probe happened to finish during.
+        if (state.status === "optimizing" || state.status === "idle") {
+          state.status = healthyStatus();
+        }
+        renderStatus();
       })
-      .catch(function () {});
+      .catch(probeFailed);
   }
 
   // Walk the ranked pool one step per stall, wrapping at the end. Taking the
@@ -1670,8 +1803,19 @@
     }
     // Count distinct stall episodes once; re-checks of the same episode below
     // only add recovery rotations.
-    if (state.status !== "buffering") {
+    if (state.status !== "buffering" && state.status !== "liveStall") {
       state.stalls += 1;
+    }
+    // A live stall is still a stall worth counting, but rotation cannot answer
+    // it: live URLs are signed per host, so no rewrite can move a live stream
+    // to another CDN. Rotating here changed only the VOD target — nothing the
+    // live player could see — while counting a recovery and telling the viewer
+    // servers were being switched. Live's lever is filterLiveUrlInfo, and it
+    // has already been pulled by the time the player dials out.
+    if (isLivePage()) {
+      state.status = "liveStall";
+      renderStatus();
+      return;
     }
     state.status = "buffering";
     if (config.stallRecovery && config.selection === "auto") {
@@ -1700,8 +1844,8 @@
       clearTimeout(stallTimer);
       stallTimer = null;
     }
-    if (state.status === "buffering") {
-      state.status = "smooth";
+    if (state.status === "buffering" || state.status === "liveStall") {
+      state.status = healthyStatus();
       renderStatus();
     }
   }
@@ -1728,8 +1872,65 @@
     }
   }
 
+  // The element the page is actually playing. querySelector("video") returns the
+  // first in DOM order, which on a live page can be a muted hover-preview in the
+  // recommendation rail instead of the stream itself — and watching one that
+  // never advances leaves stall detection and the speed meter permanently idle
+  // (a live panel reading 0.0 Mbps with the stream visibly playing). Prefer a
+  // video that is playing, then the largest; with a single <video> on the page
+  // this picks exactly what querySelector did.
+  // Collect every video element this document can reach, frames included. Some
+  // live rooms — event and esports skins especially — embed the player in a
+  // same-origin iframe, which leaves the top document with no <video> at all:
+  // no speed reading, no buffer fallback, no stall detection, and a panel that
+  // says "Ready" beside a stream that is plainly playing. A cross-origin frame
+  // throws on contentDocument and is skipped.
+  function collectVideos(doc, depth, out) {
+    if (!doc || typeof doc.querySelectorAll !== "function" || depth > 3) {
+      return out;
+    }
+    try {
+      const videos = doc.querySelectorAll("video");
+      for (let i = 0; i < videos.length; i += 1) {
+        out.push(videos[i]);
+      }
+      const frames = doc.querySelectorAll("iframe");
+      for (let i = 0; i < frames.length; i += 1) {
+        let inner = null;
+        try {
+          inner = frames[i].contentDocument;
+        } catch (_) {
+          inner = null;
+        }
+        collectVideos(inner, depth + 1, out);
+      }
+    } catch (_) {
+      // a frame that turns cross-origin mid-walk; take what we have.
+    }
+    return out;
+  }
+
+  function findPlayerVideo() {
+    if (typeof document.querySelectorAll !== "function") {
+      return document.querySelector("video");
+    }
+    const videos = collectVideos(document, 0, []);
+    let best = null;
+    let bestScore = -1;
+    for (let i = 0; i < videos.length; i += 1) {
+      const video = videos[i];
+      const area = (video.clientWidth || 0) * (video.clientHeight || 0);
+      const score = (video.paused || video.ended ? 0 : 1e9) + area;
+      if (score > bestScore) {
+        bestScore = score;
+        best = video;
+      }
+    }
+    return best;
+  }
+
   function watchVideo() {
-    const video = document.querySelector("video");
+    const video = findPlayerVideo();
     if (!video || video === watchedVideo) {
       return;
     }
@@ -1757,6 +1958,14 @@
       },
       ranking: state.ranking,
       probedAt: state.probedAt,
+      // What the speed card is showing and where the number came from. "0.0 Mbps
+      // on a live page" is a report this project has had to guess at twice.
+      speed: {
+        mode: speed.mode,
+        mbps: Math.round(speed.currentMbps * 10) / 10,
+        bufferSec: Math.round(speed.bufferSec * 10) / 10,
+        sawBytes: speed.sawBytes
+      },
       recentRewrites: state.rewrites.slice(-15)
     };
   }
@@ -1780,7 +1989,10 @@
     dispMax: 0,                   // eased y-axis maximum (smooth rescaling)
     sawBytes: false,
     activeTicks: 0,               // ticks where playback advanced
-    lastTime: 0
+    lastTime: 0,
+    decodedFor: null,             // element the decoded counters below belong to
+    lastDecoded: null,
+    lastDecodedAt: 0
   };
   let speedTimer = null;
 
@@ -1805,6 +2017,51 @@
     }
   }
 
+  // Bytes the media element has handed its decoder. Live playback never reaches
+  // recordTransfer — live segments arrive over fetch, and the interceptor must
+  // never read a media body (teeing one can stall MSE on Safari, which is what
+  // broke background playback in v0.4.0) — so the panel had no number to show on
+  // a live page at all. These counters are read-only, cost nothing to sample,
+  // and their delta over a tick is the rate the stream is actually arriving at.
+  // Non-standard, but present in Chrome and Safari; where they are missing this
+  // returns null and the buffer-ahead fallback stands as before.
+  function decodedByteCount(video) {
+    if (!video) {
+      return null;
+    }
+    const videoBytes = typeof video.webkitVideoDecodedByteCount === "number"
+      ? video.webkitVideoDecodedByteCount : 0;
+    const audioBytes = typeof video.webkitAudioDecodedByteCount === "number"
+      ? video.webkitAudioDecodedByteCount : 0;
+    if (!videoBytes && !audioBytes) {
+      return null;
+    }
+    return videoBytes + audioBytes;
+  }
+
+  // Rate implied by the decoder's byte counters since the last tick. 0 when
+  // there is no usable delta: a fresh element, a counter that reset on a source
+  // switch (quality change, live reconnect), or an engine without them.
+  function decodedRateMbps(now) {
+    if (watchedVideo !== speed.decodedFor) {
+      speed.decodedFor = watchedVideo;
+      speed.lastDecoded = null;
+      speed.lastDecodedAt = 0;
+    }
+    const total = decodedByteCount(watchedVideo);
+    if (total === null) {
+      return 0;
+    }
+    const previous = speed.lastDecoded;
+    const previousAt = speed.lastDecodedAt;
+    speed.lastDecoded = total;
+    speed.lastDecodedAt = now;
+    if (previous === null || !(total > previous) || !(now > previousAt)) {
+      return 0;
+    }
+    return core.throughputMbps(total - previous, now - previousAt);
+  }
+
   function installSpeedMeter() {
     if (!speedTimer && typeof setInterval === "function") {
       speedTimer = setInterval(tickSpeed, SPEED_TICK_MS);
@@ -1816,7 +2073,7 @@
     // Active throughput: bytes per second of time actually spent transferring in
     // the trailing window, so the player's idle gaps between burst downloads
     // don't drag a fast link to zero.
-    const sample = core.aggregateThroughput(speed.transfers, now, SPEED_WINDOW_MS);
+    let sample = core.aggregateThroughput(speed.transfers, now, SPEED_WINDOW_MS);
     speed.transfers = speed.transfers.filter(function keep(tr) {
       return tr.end > now - SPEED_WINDOW_MS;
     });
@@ -1839,6 +2096,29 @@
         speed.lastTime = watchedVideo.currentTime;
       }
     } catch (_) {}
+
+    // Advancing playback is the ground truth for "this is working". Status used
+    // to move only when a rewrite was recorded or a probe finished, so a video
+    // served by an already-healthy host reported "Ready" for its whole run
+    // (#32) — and on a live page, where by design nothing is rewritten and
+    // nothing is probed, it never left "Ready" at all.
+    if (playing && (state.status === "idle" || state.status === "optimizing")) {
+      state.status = healthyStatus();
+      renderStatus();
+    }
+
+    // Nothing measured at the transfer layer? Fall back to what the decoder has
+    // taken in. This is what puts a real number on a live page, where every byte
+    // arrives over a fetch body the interceptor is not allowed to touch.
+    if (!(sample > 0)) {
+      const decoded = decodedRateMbps(now);
+      if (decoded > 0) {
+        sample = decoded;
+        // Bytes are bytes: this also keeps the buffer-ahead fallback from
+        // taking over a graph that now has a rate to draw.
+        speed.sawBytes = true;
+      }
+    }
 
     if (sample > 0) {
       // Downloading: ease up toward the measured rate and keep a slow average
@@ -2120,13 +2400,11 @@
 
   // Live rooms run a different player: no .bpx-player-container, no data-screen,
   // nothing detectScreenMode() can read (checked against a real room — a live
-  // page has zero bpx-* elements). Without this the badge sits permanently over
-  // the chat column.
+  // page has zero bpx-* elements). Without this the badge sits at bottom:18px,
+  // right on top of the danmaku input bar.
   //
-  // Kept separate from detectScreenMode() on purpose. That function answers
-  // "what screen mode is the player in", and answering "web" for a live page
-  // would also satisfy the setLifted() test below, nudging the badge to
-  // bottom:84px on every live page as a side effect.
+  // Kept separate from detectScreenMode() on purpose: that function answers
+  // "what screen mode is the player in", and a live page is not in one.
   function isLivePage() {
     const host = root.location && typeof root.location.hostname === "string"
       ? root.location.hostname.toLowerCase()
@@ -2155,10 +2433,42 @@
     }
   }
 
+  // Web fullscreen on a live page cannot be read off the DOM the way
+  // detectScreenMode() does it — a live room has no .bpx-player-container and no
+  // data-screen attribute — so measure it instead: in web fullscreen (and in
+  // native fullscreen) the player fills the window, and no other live layout
+  // comes close. Geometry also survives Bilibili renaming its classes.
+  function isLivePlayerFullscreen() {
+    if (document.fullscreenElement || document.webkitFullscreenElement) {
+      return true;
+    }
+    const video = findPlayerVideo();
+    if (!video || typeof video.getBoundingClientRect !== "function") {
+      return false;
+    }
+    const rect = video.getBoundingClientRect();
+    const width = root.innerWidth || 0;
+    const height = root.innerHeight || 0;
+    if (!(width > 0 && height > 0) || !(rect.width > 0 && rect.height > 0)) {
+      return false;
+    }
+    return rect.width >= width * 0.9 && rect.height >= height * 0.9;
+  }
+
   function refreshImmersive() {
     const mode = detectScreenMode();
+    // An ordinary live page leaves the badge exactly where it sits everywhere
+    // else. Only a live player filling the window fades it, matching what a
+    // video page does in web fullscreen — that is the one state where the badge
+    // would sit on top of the stream.
+    //
+    // Hiding it on every live page was tried, and is what this replaces:
+    // immersive means opacity:0 with pointer-events off until the pointer finds
+    // an undocumented 150px corner hotzone, which reads as the script having
+    // failed to load.
     setLifted(mode === "web" || mode === "full" || mode === "wide");
-    setImmersive(mode === "web" || mode === "full" || isLivePage());
+    setImmersive(mode === "web" || mode === "full" ||
+      (isLivePage() && isLivePlayerFullscreen()));
   }
 
   function ensurePlayerObserver() {
@@ -2176,6 +2486,7 @@
     }
     refreshImmersive();
     watchVideo();
+    watchFramesForReveal(document, 0);
   }
 
   function handlePointerMove(event) {
@@ -2189,10 +2500,46 @@
     }
   }
 
+  // The reveal hotzone only works if this document sees the pointer. When the
+  // player sits in a frame that covers the window — live web fullscreen with an
+  // embedded player — every mousemove lands in the frame instead, and a faded
+  // badge could never be summoned back. Give same-origin frames the same
+  // listener; addEventListener dedupes an identical registration, so re-running
+  // this on each sweep costs nothing. Frame-relative coordinates only have to
+  // line up in the one state this matters for, where the frame fills the window.
+  function watchFramesForReveal(doc, depth) {
+    if (!doc || typeof doc.querySelectorAll !== "function" || depth > 3) {
+      return;
+    }
+    let frames;
+    try {
+      frames = doc.querySelectorAll("iframe");
+    } catch (_) {
+      return;
+    }
+    for (let i = 0; i < frames.length; i += 1) {
+      let inner = null;
+      try {
+        inner = frames[i].contentDocument;
+      } catch (_) {
+        inner = null;   // cross-origin; nothing to attach to.
+      }
+      if (inner && typeof inner.addEventListener === "function") {
+        try {
+          inner.addEventListener("mousemove", handlePointerMove, { passive: true });
+        } catch (_) {}
+        watchFramesForReveal(inner, depth + 1);
+      }
+    }
+  }
+
   function installImmersiveWatch() {
     document.addEventListener("mousemove", handlePointerMove, { passive: true });
     document.addEventListener("fullscreenchange", refreshImmersive);
     document.addEventListener("webkitfullscreenchange", refreshImmersive);
+    // Live web fullscreen changes no class this script can watch — it just
+    // resizes the player, so the resize is the event.
+    root.addEventListener("resize", refreshImmersive, { passive: true });
     document.addEventListener("visibilitychange", onVisibilityChange);
     ensurePlayerObserver();
     setInterval(ensurePlayerObserver, 1500);
@@ -2208,7 +2555,9 @@
         idle: ["Ready", "Open a video and it'll kick in"],
         optimizing: ["Finding the fastest server…", "Picking the best route for you"],
         buffering: ["Finding a faster server…", "Recovering from a slow connection"],
-        smooth: ["Playing smoothly", "Connected to the fastest server near you"]
+        smooth: ["Playing smoothly", "Connected to the fastest server near you"],
+        live: ["Live stream playing", "Keeping the player off slow P2P nodes"],
+        liveStall: ["Live stream buffering", "Live routes are fixed — waiting it out"]
       },
       count: function (n) { return n + " slow connection" + (n === 1 ? "" : "s") + " fixed"; },
       spdTitle: "Download speed",
@@ -2247,7 +2596,9 @@
         idle: ["就绪", "打开视频后自动生效"],
         optimizing: ["正在寻找最快的服务器…", "正在为你挑选最佳线路"],
         buffering: ["正在切换更快的服务器…", "正在从卡顿中恢复"],
-        smooth: ["播放流畅", "已连接到离你最近的最快服务器"]
+        smooth: ["播放流畅", "已连接到离你最近的最快服务器"],
+        live: ["直播播放中", "已让播放器避开慢速 P2P 节点"],
+        liveStall: ["直播卡顿中", "直播线路无法切换，正在等待恢复"]
       },
       count: function (n) { return "已修复 " + n + " 个慢连接"; },
       spdTitle: "下载速度",
@@ -2500,8 +2851,10 @@
     }
     if (boost) {
       // Surface "boost harder" only when relevant: still on bad-only and the
-      // user is hitting buffering.
-      const relevant = config.enabled && config.mode !== "force" &&
+      // user is hitting buffering. Never on a live page — force mode only
+      // widens which VOD hosts get rewritten, and it reloads the page to do it,
+      // so on a live stall it costs the viewer the stream and changes nothing.
+      const relevant = config.enabled && config.mode !== "force" && !isLivePage() &&
         (key === "buffering" || state.stalls > 0);
       boost.style.display = relevant ? "block" : "none";
     }
@@ -2545,8 +2898,8 @@
       ".ba-hero{display:flex;flex-direction:column;align-items:center;text-align:center;padding:4px 0 14px}",
       ".ba-dot{width:46px;height:46px;border-radius:50%;display:grid;place-items:center;margin-bottom:8px;background:var(--ba-dot-bg)}",
       ".ba-dot:after{content:'';width:14px;height:14px;border-radius:50%;background:var(--ba-dot)}",
-      ".ba-dot.ba-smooth{background:var(--ba-good-bg)}.ba-dot.ba-smooth:after{background:var(--ba-good)}",
-      ".ba-dot.ba-optimizing,.ba-dot.ba-buffering{background:var(--ba-warn-bg)}.ba-dot.ba-optimizing:after,.ba-dot.ba-buffering:after{background:var(--ba-warn)}",
+      ".ba-dot.ba-smooth,.ba-dot.ba-live{background:var(--ba-good-bg)}.ba-dot.ba-smooth:after,.ba-dot.ba-live:after{background:var(--ba-good)}",
+      ".ba-dot.ba-optimizing,.ba-dot.ba-buffering,.ba-dot.ba-liveStall{background:var(--ba-warn-bg)}.ba-dot.ba-optimizing:after,.ba-dot.ba-buffering:after,.ba-dot.ba-liveStall:after{background:var(--ba-warn)}",
       ".ba-dot.ba-off:after{background:var(--ba-dot)}",
       ".ba-word{font-size:15px;font-weight:800;color:var(--ba-ink)}",
       ".ba-subnote{font-size:11px;color:var(--ba-ink-soft);margin-top:2px;line-height:1.4}",

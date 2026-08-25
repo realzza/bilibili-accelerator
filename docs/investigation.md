@@ -29,3 +29,29 @@ Default behavior:
 - leave healthy CDN URLs alone unless the user enables force mode;
 - expose a small `BA` panel on Bilibili pages to change target host, MCDN strategy, Akamai rewriting, and force mode.
 
+
+## Live rooms
+
+Live playback runs on a separate CDN tier (`/live-bvc/` FLV and HLS) with URLs signed per host, so the VOD levers do not apply: swapping the host of a live URL, or wrapping it in the MCDN proxy, produces a 403 rather than a faster stream. `rewriteUrlDetail` refuses live URLs for that reason, and `alternativesFor` refuses to fan them out.
+
+That left the accelerator with nothing to do on a live page — but the machinery around it did not know that, and each piece failed in its own way:
+
+- **The probe measured nothing, permanently.** Live play info reaches the page in two shapes. `getRoomPlayInfo` splits it into `url_info: [{host, extra}]` beside a path-only `base_url`; the legacy `/room/v1/Room/playUrl` returns `durl: [{url}]` with complete signed live URLs. A URL from the second shape looks exactly like a media URL to `findMediaUrl`, so it became the probe's sample — and `probeHost` re-requested that `/live-bvc/` path on all eight UPOS mirrors, which serve VOD only. Every candidate failed, the ranking came back empty, and nothing reset `probed`: the panel sat on "Finding the fastest server…" with zero fixed connections for the life of the page. This is the reported symptom, and it reproduces from that payload alone.
+- **A failed round latched on VOD pages too.** Any round where every candidate fails — offline, an origin the mirrors will not answer with CORS headers — left the same dead state, with no ranking auto-selection could ever learn.
+- **The legacy `durl` shape got no filtering at all.** `filterLiveUrlInfo` only walked `url_info`, so a viewer served that shape kept whatever residential PCDN node Bilibili picked. Dropping the slow entries from the list the player chooses from is the only lever live has.
+- **Stall recovery pretended.** A live stall rotated the VOD target, counted a recovery, and told the viewer servers were being switched, while the live player saw nothing change.
+- **The status never moved.** Live acceleration produces no VOD rewrite for `record()` to notice and no probe to finish, so the panel reported "Ready" through an entire stream.
+
+The fix keeps live on its own rails: live URLs are never used as probe samples, live payloads are filtered in both shapes, live stalls are reported rather than "recovered", and probe rounds that measure nothing are retried instead of latched.
+
+### Why the panel had no numbers on a live page
+
+Three separate reasons, all of which had to go:
+
+1. **No bytes are ever counted on live.** Live segments arrive over `fetch` with a streaming body, and the interceptor must never read a media body — teeing one can stall MSE on Safari, which is what broke background playback in v0.4.0. `recordTransfer` only ever sees XHR transfers, so a live page produced no rate at all. The fix reads the media element's own `webkitVideoDecodedByteCount` / `webkitAudioDecodedByteCount`: read-only, free to sample, and their delta over a tick is the rate the stream is actually arriving at. Where those counters are missing the buffer-ahead fallback still stands.
+2. **The player is not always in this document.** Event and esports rooms embed the live player in a same-origin iframe, which leaves the top document with no `<video>` at all — no rate, no buffer fallback, no stall detection, and a panel reporting "Ready" beside a stream that is plainly playing. The player lookup now walks same-origin frames (a cross-origin one throws on `contentDocument` and is skipped) and prefers the element that is playing over the first in DOM order.
+3. **A paused preview could win the lookup.** `querySelector("video")` returns the first in DOM order, which on a page carrying hover-previews is not the player.
+
+### The badge
+
+The ⚡ auto-hide added for live pages made the badge `opacity:0` with `pointer-events:none` until the pointer found an undocumented 150px corner hotzone — it reads as the script having failed to load. An ordinary live page now leaves the badge exactly where it sits everywhere else. Only a live player filling the window fades it, matching what a video page does in web fullscreen; a live room carries no `.bpx-player-container` and no `data-screen`, so that state is measured geometrically rather than read off a class name. When the player is framed, the frame gets the reveal listener too — otherwise every mousemove lands in the frame and a faded badge can never be summoned back.
