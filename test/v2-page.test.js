@@ -42,7 +42,7 @@ function loadPage(extra) {
   return sandbox;
 }
 
-function loadPageWithVideo() {
+function loadPageWithVideo(extra) {
   const core = fs.readFileSync(path.join(__dirname, "../src/core/rewrite.js"), "utf8");
   const page = fs.readFileSync(path.join(__dirname, "../src/page/bili-accelerator.page.js"), "utf8");
   const documentListeners = new Map();
@@ -111,6 +111,7 @@ function loadPageWithVideo() {
     },
     clearInterval(id) { timers.delete(id); }
   };
+  Object.assign(sandbox, extra || {});
   sandbox.globalThis = sandbox;
   sandbox.window = sandbox;
   sandbox.addEventListener = () => {};
@@ -634,4 +635,273 @@ test("a ranking cache with a corrupt timestamp is discarded, not trusted", () =>
     assert.notEqual(sandbox.BiliAccelerator.getConfig().pcdnHost, stale,
       "and its ranking must never be applied");
   });
+});
+
+// ---- live rooms ---------------------------------------------------------------
+
+// The legacy live playUrl shape (/room/v1/Room/playUrl) hands back complete
+// signed live URLs in durl, unlike getRoomPlayInfo's host/base_url split. That
+// is what put a live URL in front of rememberSample().
+function liveDurlPayload(urls) {
+  return {
+    code: 0,
+    data: {
+      current_quality: 4,
+      durl: urls.map((url, i) => ({ url, length: 0, order: i + 1, stream_type: 0 }))
+    }
+  };
+}
+
+const LIVE_OFFICIAL =
+  "https://d1--cn-gotcha04.bilivideo.com/live-bvc/771385/live_1234_5678.flv?qn=10000&sign=b";
+const LIVE_PCDN =
+  "https://xy36x110x213x230xy.mcdn.bilivideo.cn:486/live-bvc/771385/live_1234_5678.flv?os=mcdn&sign=a";
+
+test("a live room never probes: no VOD mirror can serve a /live-bvc/ sample", () => {
+  // The reported symptom, exactly: the panel stuck on "Finding the fastest
+  // server…" with zero fixed connections on live.bilibili.com. rememberSample
+  // took the live FLV URL out of the playUrl payload, and probeHost re-requested
+  // that same signed path on all eight upos mirrors — which serve VOD only, so
+  // every candidate 403'd, the ranking came back empty, and `probed` stayed
+  // latched with nothing left to move the status.
+  const probeUrls = [];
+  const sandbox = loadPage({
+    location: { href: "https://live.bilibili.com/123", hostname: "live.bilibili.com", reload() {} },
+    fetch: (url) => {
+      probeUrls.push(url);
+      return Promise.resolve({
+        ok: false, status: 403,
+        headers: { get: () => "text/html" },
+        body: { cancel() {} }
+      });
+    }
+  });
+
+  sandbox.JSON.parse(JSON.stringify(liveDurlPayload([LIVE_OFFICIAL])));
+
+  return new Promise((resolve) => setTimeout(resolve, 50)).then(() => {
+    assert.deepEqual(probeUrls, [],
+      "a live URL must not be probed on VOD mirrors: " + JSON.stringify(probeUrls));
+    assert.notEqual(sandbox.BiliAccelerator.getStats().status, "optimizing",
+      "and the panel must not be left claiming a probe is running");
+  });
+});
+
+test("a live payload puts the panel in the live state, not 'Ready'", () => {
+  const sandbox = loadPage({
+    location: { href: "https://live.bilibili.com/123", hostname: "live.bilibili.com", reload() {} }
+  });
+
+  sandbox.JSON.parse(JSON.stringify(liveDurlPayload([LIVE_OFFICIAL])));
+
+  // Nothing was filtered (the only host is official) and nothing was rewritten,
+  // so the old status bookkeeping had no event to react to at all.
+  assert.equal(sandbox.BiliAccelerator.getStats().status, "live");
+});
+
+test("live durl drops the PCDN entry the player would otherwise dial", () => {
+  const sandbox = loadPage({
+    location: { href: "https://live.bilibili.com/123", hostname: "live.bilibili.com", reload() {} }
+  });
+
+  const parsed = sandbox.JSON.parse(JSON.stringify(liveDurlPayload([LIVE_PCDN, LIVE_OFFICIAL])));
+
+  assert.deepEqual(parsed.data.durl.map((d) => new URL(d.url).host),
+    ["d1--cn-gotcha04.bilivideo.com"],
+    "the residential PCDN node must be dropped, the official CDN kept");
+  assert.equal(sandbox.BiliAccelerator.getStats().rewriteCount, 1);
+});
+
+test("a live stall neither rotates the VOD target nor claims a server switch", () => {
+  // Live URLs are signed per host, so rewriting cannot move a live stream. The
+  // rotation still ran: it counted a recovery, drifted config.pcdnHost, and told
+  // the viewer servers were being switched while the live player saw nothing.
+  const { sandbox, video } = loadPageWithVideo({
+    location: { href: "https://live.bilibili.com/123", hostname: "live.bilibili.com", reload() {} }
+  });
+  const before = sandbox.BiliAccelerator.getConfig().pcdnHost;
+
+  video.dispatch("waiting");
+  sandbox.runTimeouts(2500);
+
+  const stats = sandbox.BiliAccelerator.getStats();
+  assert.equal(stats.recoveries, 0, "nothing was recovered, so nothing may be counted");
+  assert.equal(stats.stalls, 1, "the stall itself is still worth counting");
+  assert.equal(stats.status, "liveStall");
+  assert.equal(sandbox.BiliAccelerator.getConfig().pcdnHost, before,
+    "the VOD target must not drift on a live page");
+
+  video.dispatch("playing");
+  assert.equal(sandbox.BiliAccelerator.getStats().status, "live");
+});
+
+test("a probe round where every host fails is retried, not latched forever", () => {
+  // Independent of live: any all-fail round (offline, an origin the mirrors
+  // won't send CORS headers to) used to leave `probed` true and the panel on
+  // "Finding the fastest server…" with no ranking, for the life of the page.
+  let rounds = 0;
+  let fail = true;
+  const sandbox = loadPage({
+    Uint8Array,
+    fetch: () => {
+      rounds += 1;
+      if (fail) {
+        return Promise.reject(new TypeError("Failed to fetch"));
+      }
+      let served = 0;
+      return Promise.resolve({
+        ok: true,
+        headers: { get: () => "video/mp4" },
+        body: { getReader: () => ({
+          read() {
+            served += 256 * 1024;
+            return Promise.resolve({ done: served > 768 * 1024, value: new Uint8Array(256 * 1024) });
+          },
+          cancel() {}
+        }) }
+      });
+    }
+  });
+
+  const vod = () => sandbox.JSON.parse(JSON.stringify({
+    data: { dash: { video: [
+      { baseUrl: "https://upos-sz-mirrorcos.bilivideo.com/upgcxcode/v.m4s?x=1" }
+    ] } }
+  }));
+
+  vod();
+  return new Promise((resolve) => setTimeout(resolve, 50)).then(() => {
+    const failed = rounds;
+    assert.ok(failed > 0, "the first round must actually run");
+    assert.notEqual(sandbox.BiliAccelerator.getStats().status, "optimizing",
+      "a round that measured nothing must not leave the panel mid-probe");
+
+    fail = false;
+    vod();
+    return new Promise((resolve2) => setTimeout(resolve2, 50)).then(() => {
+      assert.ok(rounds > failed, "a later payload must be able to probe again");
+      assert.ok(sandbox.BiliAccelerator.getStats().ranking.length > 0,
+        "and the retry's ranking must be applied");
+    });
+  });
+});
+
+test("probing still finds a VOD sample in a payload that also carries live URLs", () => {
+  // Rejecting live samples must not mean giving up on the walk: the live entry
+  // is skipped and the search continues to the VOD URL behind it.
+  const probeUrls = [];
+  const sandbox = loadPage({
+    fetch: (url) => {
+      probeUrls.push(url);
+      return Promise.resolve({ ok: true, headers: { get: () => "video/mp4" }, body: null });
+    }
+  });
+
+  sandbox.JSON.parse(JSON.stringify({
+    data: {
+      durl: [{ url: LIVE_OFFICIAL }],
+      dash: { video: [{ baseUrl: "https://upos-sz-mirrorcos.bilivideo.com/upgcxcode/v.m4s?x=1" }] }
+    }
+  }));
+
+  return new Promise((resolve) => setTimeout(resolve, 50)).then(() => {
+    assert.ok(probeUrls.length > 0, "the VOD sample behind the live entry must still be probed");
+    probeUrls.forEach((url) => {
+      assert.ok(url.includes("/upgcxcode/"),
+        "probes must use the VOD sample, not the live one: " + url);
+    });
+  });
+});
+
+// A page can hold more than one <video>: live rooms and the homepage render
+// muted hover-previews beside the real player.
+function makeVideo(props) {
+  const listeners = new Map();
+  return Object.assign({
+    paused: false,
+    ended: false,
+    readyState: 1,
+    currentTime: 10,
+    clientWidth: 0,
+    clientHeight: 0,
+    currentSrc: "blob:https://live.bilibili.com/media-source",
+    addEventListener(type, listener) { listeners.set(type, listener); },
+    dispatch(type) {
+      const listener = listeners.get(type);
+      if (listener) listener();
+    },
+    get listenerCount() { return listeners.size; }
+  }, props || {});
+}
+
+function loadPageWithVideoList(videos) {
+  const core = fs.readFileSync(path.join(__dirname, "../src/core/rewrite.js"), "utf8");
+  const page = fs.readFileSync(path.join(__dirname, "../src/page/bili-accelerator.page.js"), "utf8");
+  const timers = new Map();
+  let nextTimer = 1;
+
+  const document = {
+    readyState: "complete",
+    documentElement: null,
+    head: null,
+    hidden: false,
+    addEventListener() {},
+    getElementById: () => null,
+    querySelector: (selector) => (selector === "video" ? videos[0] || null : null),
+    querySelectorAll: (selector) => (selector === "video" ? videos : []),
+    createElement: () => ({})
+  };
+
+  const sandbox = {
+    JSON: { parse: JSON.parse, stringify: JSON.stringify },
+    URL, Date, WeakSet, Headers, Response, Request, Promise, Math, Intl,
+    performance: { now: () => 1 },
+    XMLHttpRequest: class { open() {} send() {} addEventListener() {} },
+    navigator: { language: "en-US", clipboard: { writeText() {} } },
+    console: { info() {}, warn() {}, error() {} },
+    localStorage: { getItem: () => null, setItem() {} },
+    location: { href: "https://live.bilibili.com/123", hostname: "live.bilibili.com", reload() {} },
+    document,
+    setTimeout(callback, delay) {
+      const id = nextTimer++;
+      timers.set(id, { callback, delay });
+      return id;
+    },
+    clearTimeout(id) { timers.delete(id); },
+    setInterval() { return 0; },
+    clearInterval() {}
+  };
+  sandbox.globalThis = sandbox;
+  sandbox.window = sandbox;
+  sandbox.addEventListener = () => {};
+  sandbox.runTimeouts = function runTimeouts(delay) {
+    Array.from(timers.entries())
+      .filter(([, timer]) => delay == null || timer.delay === delay)
+      .forEach(([id, timer]) => {
+        timers.delete(id);
+        timer.callback();
+      });
+  };
+
+  vm.runInNewContext(`${core}\n${page}`, sandbox);
+  return { sandbox, document };
+}
+
+test("the watched <video> is the one playing, not just the first in the DOM", () => {
+  // A paused hover-preview ahead of the player in DOM order used to win
+  // querySelector("video"), and everything downstream — stall detection, the
+  // speed meter's playing check, the buffer fallback — then watched an element
+  // that never advances. On a live page that reads as a panel stuck at 0.0 Mbps
+  // beside a stream that is visibly playing.
+  const preview = makeVideo({ paused: true, currentSrc: "blob:preview" });
+  const player = makeVideo({ paused: false, clientWidth: 1280, clientHeight: 720 });
+  const { sandbox } = loadPageWithVideoList([preview, player]);
+
+  assert.equal(preview.listenerCount, 0, "the preview must not be the watched element");
+  assert.ok(player.listenerCount > 0, "the playing element must be watched");
+
+  player.dispatch("waiting");
+  sandbox.runTimeouts(2500);
+  assert.equal(sandbox.BiliAccelerator.getStats().stalls, 1,
+    "a stall on the real player must be seen");
 });

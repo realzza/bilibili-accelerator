@@ -1,6 +1,6 @@
 # Bilibili Accelerator
 
-[English](./README.en.md) · [Greasy Fork](https://greasyfork.org/en/scripts/582026-bilibili-accelerator) · 当前版本 v0.4.0
+[English](./README.en.md) · [Greasy Fork](https://greasyfork.org/en/scripts/582026-bilibili-accelerator) · 当前版本 v0.4.1
 
 海外看 B 站，热门视频一般没什么问题，冷门视频经常一会儿流畅、一会儿卡死。
 
@@ -55,6 +55,7 @@ npm run build
 
 | 版本 | 主要变化 |
 | --- | --- |
+| v0.4.1 | 直播页修复：面板不再卡在「正在寻找最快的服务器…」。起因是加速器拿直播地址去测速，而直播和点播不是同一套 CDN，八个候选必然全部失败。直播现在走自己的一套：不参与测速、卡顿时不再谎报切换服务器、面板会显示直播状态；旧版 `durl` 直播地址也开始过滤 PCDN 节点了 |
 | v0.4.0 | 后台播放修复：切换至其他标签页后不再于数秒内卡住（Safari 最明显）。起因是加速器将 B 站自家的海外镜像改写至境内 CDN。候选服务器现覆盖境内外两档并全部参与实测，排序改为按实测吞吐而非应答时间，卡顿切换改为遍历完整列表。直播页的 ⚡ 图标也改为自动隐藏，不再遮挡弹幕栏 |
 | [v0.3.0](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.3.0) | 面板深浅色 + 7 套主题色；顶部主题 / 语言改成同一套滑动控件。核心逻辑没动 |
 | [v0.2.3](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.2.3) | 直播场景的稳定性修复；探测逻辑更准确；卡顿恢复会持续重试 |

@@ -7,7 +7,7 @@
   }
   root.__BILI_ACCELERATOR_INSTALLED__ = true;
 
-  const VERSION = "0.4.0";
+  const VERSION = "0.4.1";
   const STORAGE_KEY = "biliAccelerator.config.v2";
   const LEGACY_KEY = "biliAccelerator.config.v1";
   // Bumped when the pool or the scoring changes: a cached ranking only names
@@ -33,6 +33,11 @@
   // past TCP slow-start and see a real rate, small enough that probing the whole
   // pool moves well under a second of video per host.
   const PROBE_BYTES = 768 * 1024;
+  // Rounds allowed per page, not a single latched attempt: a failed round has to
+  // be retryable (the sample that failed may just have been the wrong one), but
+  // a page that cannot probe at all must not re-run the pool on every payload
+  // it parses.
+  const PROBE_MAX_ATTEMPTS = 3;
 
   const nativeJsonParse = JSON.parse;
   const nativeFetch = root.fetch;
@@ -43,6 +48,7 @@
   let playerObserver = null;
   let observedContainer = null;
   let probed = false;
+  let probeAttempts = 0;
   let watchedVideo = null;
   let stallTimer = null;
   let rotateCursor = 0;
@@ -282,6 +288,14 @@
 
   // ---- rewrite plumbing ---------------------------------------------------
 
+  // The status to show when playback is healthy. Live rooms get their own key:
+  // nothing on a live page is host-swapped — live URLs are signed per host, so
+  // core refuses to rewrite them — and "connected to the fastest server near
+  // you" would claim a route this script never picked.
+  function healthyStatus() {
+    return isLivePage() ? "live" : "smooth";
+  }
+
   function record(rewrites, source) {
     if (!rewrites || rewrites.length === 0) {
       return;
@@ -302,7 +316,7 @@
       };
     })).slice(-50);
     if (state.status === "idle") {
-      state.status = "smooth";
+      state.status = healthyStatus();
     }
     renderStatus();
   }
@@ -322,7 +336,13 @@
       return null;
     }
     if (typeof value === "string") {
-      return /\.(m4s|mp4|flv|m3u8)(?:$|[?#])/i.test(value) && core.hasMediaSignal(value)
+      // Live URLs are rejected rather than returned: they look exactly like a
+      // media URL, but a probe re-requests the sample on each candidate mirror,
+      // and no VOD upos host serves a /live-bvc/ path. Returning one here ended
+      // the search at a sample that could only ever fail everywhere — see
+      // scheduleProbe. Keep walking; a live page simply has no VOD sample.
+      return /\.(m4s|mp4|flv|m3u8)(?:$|[?#])/i.test(value) &&
+        core.hasMediaSignal(value) && !core.isLiveUrl(value)
         ? value
         : null;
     }
@@ -438,6 +458,15 @@
       const filtered = core.filterLiveUrlInfo(payload, config);
       if (filtered.changed) {
         record(filtered.rewrites, source);
+      }
+      // A live play-info payload is proof the page is a live room, whether or
+      // not it held anything worth filtering. Without this the panel sat on
+      // "Ready — open a video and it'll kick in" through an entire stream,
+      // because live acceleration produces no VOD rewrite for record() to
+      // notice and a live page has no sample to probe.
+      if (filtered.live && (state.status === "idle" || state.status === "optimizing")) {
+        state.status = healthyStatus();
+        renderStatus();
       }
     } catch (_) {
       // never let live filtering break payload delivery.
@@ -858,11 +887,30 @@
     })]);
   }
 
+  // A round that measured nothing leaves this behind so a later payload can try
+  // again; PROBE_MAX_ATTEMPTS bounds it for a page that simply cannot probe.
+  function probeFailed() {
+    probed = false;
+    if (state.status === "optimizing") {
+      // Not "smooth": nothing was measured. tickSpeed lifts it off idle once
+      // playback is actually advancing.
+      state.status = "idle";
+    }
+    renderStatus();
+  }
+
   function scheduleProbe(sampleUrl) {
-    if (probed || config.selection !== "auto" || !nativeFetch) {
+    if (probed || config.selection !== "auto" || !nativeFetch ||
+        probeAttempts >= PROBE_MAX_ATTEMPTS) {
+      return;
+    }
+    // findMediaUrl already filters these out; this is the choke point every
+    // probe goes through, and probing a live URL is guaranteed-useless work.
+    if (!sampleUrl || core.isLiveUrl(sampleUrl)) {
       return;
     }
     probed = true;
+    probeAttempts += 1;
     const cached = loadRanking();
     if (cached) {
       applyRanking(cached.ranking);
@@ -890,15 +938,25 @@
     Promise.all(hosts.map(function (h) { return probeHost(h, sampleUrl); }))
       .then(function (samples) {
         const ranking = core.rankHosts(samples.filter(function (s) { return s.ok; }));
-        if (ranking.length) {
-          applyRanking(ranking);
-          saveRanking(ranking);
-          state.probedAt = new Date().toISOString();
-          state.status = "smooth";
-          renderStatus();
+        if (!ranking.length) {
+          // Every candidate failed — offline, an origin the mirrors will not
+          // answer with CORS headers, or a sample they cannot serve. This used
+          // to fall through silently with `probed` already latched, which left
+          // the panel on "Finding the fastest server…" for the life of the page
+          // and auto-selection with no ranking it could ever learn.
+          probeFailed();
+          return;
         }
+        applyRanking(ranking);
+        saveRanking(ranking);
+        state.probedAt = new Date().toISOString();
+        // Do not clobber a stall the probe happened to finish during.
+        if (state.status === "optimizing" || state.status === "idle") {
+          state.status = healthyStatus();
+        }
+        renderStatus();
       })
-      .catch(function () {});
+      .catch(probeFailed);
   }
 
   // Walk the ranked pool one step per stall, wrapping at the end. Taking the
@@ -959,8 +1017,19 @@
     }
     // Count distinct stall episodes once; re-checks of the same episode below
     // only add recovery rotations.
-    if (state.status !== "buffering") {
+    if (state.status !== "buffering" && state.status !== "liveStall") {
       state.stalls += 1;
+    }
+    // A live stall is still a stall worth counting, but rotation cannot answer
+    // it: live URLs are signed per host, so no rewrite can move a live stream
+    // to another CDN. Rotating here changed only the VOD target — nothing the
+    // live player could see — while counting a recovery and telling the viewer
+    // servers were being switched. Live's lever is filterLiveUrlInfo, and it
+    // has already been pulled by the time the player dials out.
+    if (isLivePage()) {
+      state.status = "liveStall";
+      renderStatus();
+      return;
     }
     state.status = "buffering";
     if (config.stallRecovery && config.selection === "auto") {
@@ -989,8 +1058,8 @@
       clearTimeout(stallTimer);
       stallTimer = null;
     }
-    if (state.status === "buffering") {
-      state.status = "smooth";
+    if (state.status === "buffering" || state.status === "liveStall") {
+      state.status = healthyStatus();
       renderStatus();
     }
   }
@@ -1017,8 +1086,34 @@
     }
   }
 
+  // The element the page is actually playing. querySelector("video") returns the
+  // first in DOM order, which on a live page can be a muted hover-preview in the
+  // recommendation rail instead of the stream itself — and watching one that
+  // never advances leaves stall detection and the speed meter permanently idle
+  // (a live panel reading 0.0 Mbps with the stream visibly playing). Prefer a
+  // video that is playing, then the largest; with a single <video> on the page
+  // this picks exactly what querySelector did.
+  function findPlayerVideo() {
+    if (typeof document.querySelectorAll !== "function") {
+      return document.querySelector("video");
+    }
+    const videos = document.querySelectorAll("video");
+    let best = null;
+    let bestScore = -1;
+    for (let i = 0; i < videos.length; i += 1) {
+      const video = videos[i];
+      const area = (video.clientWidth || 0) * (video.clientHeight || 0);
+      const score = (video.paused || video.ended ? 0 : 1e9) + area;
+      if (score > bestScore) {
+        bestScore = score;
+        best = video;
+      }
+    }
+    return best;
+  }
+
   function watchVideo() {
-    const video = document.querySelector("video");
+    const video = findPlayerVideo();
     if (!video || video === watchedVideo) {
       return;
     }
@@ -1128,6 +1223,16 @@
         speed.lastTime = watchedVideo.currentTime;
       }
     } catch (_) {}
+
+    // Advancing playback is the ground truth for "this is working". Status used
+    // to move only when a rewrite was recorded or a probe finished, so a video
+    // served by an already-healthy host reported "Ready" for its whole run
+    // (#32) — and on a live page, where by design nothing is rewritten and
+    // nothing is probed, it never left "Ready" at all.
+    if (playing && (state.status === "idle" || state.status === "optimizing")) {
+      state.status = healthyStatus();
+      renderStatus();
+    }
 
     if (sample > 0) {
       // Downloading: ease up toward the measured rate and keep a slow average
@@ -1497,7 +1602,9 @@
         idle: ["Ready", "Open a video and it'll kick in"],
         optimizing: ["Finding the fastest server…", "Picking the best route for you"],
         buffering: ["Finding a faster server…", "Recovering from a slow connection"],
-        smooth: ["Playing smoothly", "Connected to the fastest server near you"]
+        smooth: ["Playing smoothly", "Connected to the fastest server near you"],
+        live: ["Live stream playing", "Keeping the player off slow P2P nodes"],
+        liveStall: ["Live stream buffering", "Live routes are fixed — waiting it out"]
       },
       count: function (n) { return n + " slow connection" + (n === 1 ? "" : "s") + " fixed"; },
       spdTitle: "Download speed",
@@ -1536,7 +1643,9 @@
         idle: ["就绪", "打开视频后自动生效"],
         optimizing: ["正在寻找最快的服务器…", "正在为你挑选最佳线路"],
         buffering: ["正在切换更快的服务器…", "正在从卡顿中恢复"],
-        smooth: ["播放流畅", "已连接到离你最近的最快服务器"]
+        smooth: ["播放流畅", "已连接到离你最近的最快服务器"],
+        live: ["直播播放中", "已让播放器避开慢速 P2P 节点"],
+        liveStall: ["直播卡顿中", "直播线路无法切换，正在等待恢复"]
       },
       count: function (n) { return "已修复 " + n + " 个慢连接"; },
       spdTitle: "下载速度",
@@ -1789,8 +1898,10 @@
     }
     if (boost) {
       // Surface "boost harder" only when relevant: still on bad-only and the
-      // user is hitting buffering.
-      const relevant = config.enabled && config.mode !== "force" &&
+      // user is hitting buffering. Never on a live page — force mode only
+      // widens which VOD hosts get rewritten, and it reloads the page to do it,
+      // so on a live stall it costs the viewer the stream and changes nothing.
+      const relevant = config.enabled && config.mode !== "force" && !isLivePage() &&
         (key === "buffering" || state.stalls > 0);
       boost.style.display = relevant ? "block" : "none";
     }
@@ -1834,8 +1945,8 @@
       ".ba-hero{display:flex;flex-direction:column;align-items:center;text-align:center;padding:4px 0 14px}",
       ".ba-dot{width:46px;height:46px;border-radius:50%;display:grid;place-items:center;margin-bottom:8px;background:var(--ba-dot-bg)}",
       ".ba-dot:after{content:'';width:14px;height:14px;border-radius:50%;background:var(--ba-dot)}",
-      ".ba-dot.ba-smooth{background:var(--ba-good-bg)}.ba-dot.ba-smooth:after{background:var(--ba-good)}",
-      ".ba-dot.ba-optimizing,.ba-dot.ba-buffering{background:var(--ba-warn-bg)}.ba-dot.ba-optimizing:after,.ba-dot.ba-buffering:after{background:var(--ba-warn)}",
+      ".ba-dot.ba-smooth,.ba-dot.ba-live{background:var(--ba-good-bg)}.ba-dot.ba-smooth:after,.ba-dot.ba-live:after{background:var(--ba-good)}",
+      ".ba-dot.ba-optimizing,.ba-dot.ba-buffering,.ba-dot.ba-liveStall{background:var(--ba-warn-bg)}.ba-dot.ba-optimizing:after,.ba-dot.ba-buffering:after,.ba-dot.ba-liveStall:after{background:var(--ba-warn)}",
       ".ba-dot.ba-off:after{background:var(--ba-dot)}",
       ".ba-word{font-size:15px;font-weight:800;color:var(--ba-ink)}",
       ".ba-subnote{font-size:11px;color:var(--ba-ink-soft);margin-top:2px;line-height:1.4}",
