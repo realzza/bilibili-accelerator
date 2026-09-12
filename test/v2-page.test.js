@@ -127,14 +127,21 @@ function loadPageWithVideo() {
   return { sandbox, document, video };
 }
 
-function loadPageWithLiveHost() {
+function loadPageWithLiveHost(initialConfig) {
   const core = fs.readFileSync(path.join(__dirname, "../src/core/rewrite.js"), "utf8");
   const page = fs.readFileSync(path.join(__dirname, "../src/page/bili-accelerator.page.js"), "utf8");
   const nodes = new Map();
+  const elements = [];
+  const storage = new Map();
+  if (initialConfig) {
+    storage.set("biliAccelerator.config.v2", JSON.stringify(initialConfig));
+  }
 
   function makeElement(tagName) {
     const classes = new Set();
     const children = [];
+    const listeners = new Map();
+    const attributes = new Map();
     const element = {
       tagName: tagName.toUpperCase(),
       id: "",
@@ -165,18 +172,23 @@ function loadPageWithLiveHost() {
         }
         return child;
       },
-      addEventListener() {},
+      addEventListener(type, callback) { listeners.set(type, callback); },
+      dispatch(type) { if (listeners.has(type)) listeners.get(type)(); },
+      focus() { element.focused = true; },
       attachShadow() {
         const shadow = {
           appendChild() {},
           querySelector() { return null; },
           getElementById() { return null; },
-          querySelectorAll() { return []; }
+          querySelectorAll(selector) {
+            return selector === "[data-i18n]" ? elements.filter(el => el.dataset.i18n) : [];
+          }
         };
         element.shadowRoot = shadow;
         return shadow;
       },
-      setAttribute() {},
+      setAttribute(name, value) { attributes.set(name, value); },
+      getAttribute(name) { return attributes.get(name) ?? null; },
       remove() {},
       querySelector(selector) {
         if (selector === "input") {
@@ -197,6 +209,7 @@ function loadPageWithLiveHost() {
       querySelectorAll() { return []; }
     };
     element.__children = children;
+    elements.push(element);
     return element;
   }
 
@@ -229,7 +242,10 @@ function loadPageWithLiveHost() {
     },
     navigator: { language: "en-US", clipboard: { writeText() {} } },
     console: { info() {}, warn() {}, error() {} },
-    localStorage: { getItem: () => null, setItem() {} },
+    localStorage: {
+      getItem(key) { return storage.get(key) || null; },
+      setItem(key, value) { storage.set(key, value); }
+    },
     location: { href: "https://live.bilibili.com/123", hostname: "live.bilibili.com", reload() {} },
     document,
     setTimeout(callback) { callback(); return 1; },
@@ -242,8 +258,76 @@ function loadPageWithLiveHost() {
   sandbox.addEventListener = () => {};
 
   vm.runInNewContext(`${core}\n${page}`, sandbox);
-  return { sandbox, document };
+  return { sandbox, document, elements, storage };
 }
+
+test("fixed server picker lists every host and restores built-in and custom settings", () => {
+  const defaults = loadPageWithLiveHost();
+  const core = defaults.sandbox.BiliAcceleratorCore;
+  for (const host of [core.DEFAULT_CONFIG.pcdnHost, core.CDN_HOSTS[1], "custom.example.com"]) {
+    const { sandbox, document, elements } = loadPageWithLiveHost({
+      schemaVersion: core.DEFAULT_CONFIG.schemaVersion, pcdnHost: host, selection: "fixed"
+    });
+    const select = document.getElementById("ba-fixed-host");
+    const input = document.getElementById("ba-custom-host");
+    const field = elements.find(el => el.__children.includes(input));
+    assert.equal(select.tagName, "SELECT");
+    assert.deepEqual(select.__children.map(option => option.value), [...core.CDN_HOSTS, "custom"]);
+    assert.equal(select.value, core.CDN_HOSTS.includes(host) ? host : "custom");
+    assert.equal(field.hidden, core.CDN_HOSTS.includes(host));
+    assert.equal(input.value, host);
+    assert.equal(input.getAttribute("list"), null);
+    assert.equal(sandbox.BiliAccelerator.getConfig().pcdnHost, host);
+  }
+});
+
+test("fixed server edits persist without changing selection mode or saving empty values", () => {
+  for (const selection of ["auto", "fixed"]) {
+    const { sandbox, document, elements, storage } = loadPageWithLiveHost({ selection });
+    const select = document.getElementById("ba-fixed-host");
+    const input = document.getElementById("ba-custom-host");
+    const error = document.getElementById("ba-host-error");
+    const field = elements.find(el => el.__children.includes(input));
+    const original = sandbox.BiliAccelerator.getConfig().pcdnHost;
+    select.value = "custom";
+    select.dispatch("change");
+    assert.equal(field.hidden, false);
+    assert.equal(input.focused, true);
+    assert.equal(input.value, original);
+    assert.equal(sandbox.BiliAccelerator.getConfig().pcdnHost, original);
+    input.value = "   ";
+    input.dispatch("change");
+    assert.equal(error.hidden, false);
+    assert.equal(input.getAttribute("aria-invalid"), "true");
+    assert.equal(sandbox.BiliAccelerator.getConfig().pcdnHost, original);
+    const languageButtons = document.getElementById("ba-lang-seg").__children;
+    languageButtons[2].dispatch("click");
+    assert.equal(error.textContent, "请输入服务器地址");
+    assert.equal(select.__children.at(-1).textContent, "自定义…");
+    languageButtons[1].dispatch("click");
+    assert.equal(error.textContent, "Enter a server address");
+    input.value = "  custom.example.com  ";
+    input.dispatch("input");
+    input.dispatch("change");
+    assert.equal(error.hidden, true);
+    assert.equal(input.value, "custom.example.com");
+    assert.equal(sandbox.BiliAccelerator.getConfig().pcdnHost, "custom.example.com");
+    const saved = JSON.parse(storage.get("biliAccelerator.config.v2"));
+    const restored = loadPageWithLiveHost(saved);
+    assert.equal(restored.document.getElementById("ba-fixed-host").value, "custom");
+    assert.equal(restored.document.getElementById("ba-custom-host").value, "custom.example.com");
+    select.value = sandbox.BiliAcceleratorCore.CDN_HOSTS[1];
+    select.dispatch("change");
+    assert.equal(field.hidden, true);
+    assert.equal(sandbox.BiliAccelerator.getConfig().pcdnHost, select.value);
+    assert.equal(sandbox.BiliAccelerator.getConfig().selection, selection);
+    const restoredBuiltin = loadPageWithLiveHost(JSON.parse(storage.get("biliAccelerator.config.v2")));
+    assert.equal(restoredBuiltin.document.getElementById("ba-fixed-host").value, select.value);
+    select.value = "custom";
+    select.dispatch("change");
+    assert.equal(input.value, sandbox.BiliAcceleratorCore.CDN_HOSTS[1]);
+  }
+});
 
 test("XHR open() rewrites a renamed PCDN segment URL (mountaintoys)", () => {
   const sandbox = loadPage();

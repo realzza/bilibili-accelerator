@@ -1520,6 +1520,7 @@
       },
       fServer: "Server", fWhen: "When", fFixed: "Fixed server", fMcdn: "MCDN",
       selAuto: "Auto (pick fastest)", selFixed: "Use a fixed server",
+      hostCustom: "Custom…", fCustomHost: "Server address", hostRequired: "Enter a server address",
       modeBad: "Only fix slow servers", modeForce: "Always switch server",
       mcdnAll: "Proxy all MCDN", mcdnV1: "Proxy /v1 only", mcdnReplace: "Replace host",
       portTitle: "Catch hidden PCDN", portNote: "Treat odd-port servers as slow (recommended)",
@@ -1559,6 +1560,7 @@
       },
       fServer: "服务器", fWhen: "何时", fFixed: "固定服务器", fMcdn: "MCDN",
       selAuto: "自动（选最快）", selFixed: "使用固定服务器",
+      hostCustom: "自定义…", fCustomHost: "服务器地址", hostRequired: "请输入服务器地址",
       modeBad: "仅修复慢服务器", modeForce: "总是切换服务器",
       mcdnAll: "代理所有 MCDN", mcdnV1: "仅代理 /v1", mcdnReplace: "替换域名",
       portTitle: "抓取隐藏 PCDN", portNote: "把奇怪端口的服务器当作慢节点（推荐）",
@@ -1867,6 +1869,7 @@
       ".ba-adv{display:none;margin-top:8px}",
       ".ba-adv.open{display:block}",
       ".ba-field{display:grid;grid-template-columns:96px 1fr;align-items:center;gap:9px;margin:9px 0;font-size:12px}",
+      ".ba-field[hidden]{display:none}",
       ".ba-field span{color:var(--ba-ink-mid);font-weight:650}",
       ".ba-control,.ba-field input[type=text],.ba-field select{width:100%;min-width:0;height:32px;border:1px solid var(--ba-border-in);border-radius:8px;padding:0 9px;background:var(--ba-card);color:var(--ba-ink);outline:none;font-size:11px}",
       ".ba-swatches{display:flex;align-items:center;gap:7px;min-height:32px;flex-wrap:wrap}",
@@ -2038,18 +2041,57 @@
 
     const hostInput = document.createElement("input");
     hostInput.type = "text";
+    hostInput.id = "ba-custom-host";
     hostInput.className = "ba-control";
     hostInput.value = config.pcdnHost;
-    hostInput.setAttribute("list", "ba-hosts");
+    hostInput.setAttribute("aria-describedby", "ba-host-error");
+    const customHostField = createField("fCustomHost", hostInput);
+    const hostError = document.createElement("div");
+    hostError.id = "ba-host-error";
+    hostError.className = "ba-mini";
+    hostError.dataset.i18n = "hostRequired";
+    hostError.textContent = t("hostRequired");
+    hostError.setAttribute("role", "alert");
+    hostError.hidden = true;
+    function clearHostError() {
+      hostError.hidden = true;
+      hostInput.setAttribute("aria-invalid", "false");
+    }
+    hostInput.addEventListener("input", clearHostError);
     hostInput.addEventListener("change", function () {
-      saveConfig(Object.assign({}, config, { pcdnHost: hostInput.value }));
+      const value = hostInput.value.trim();
+      if (!value) {
+        hostError.hidden = false;
+        hostInput.setAttribute("aria-invalid", "true");
+        return;
+      }
+      clearHostError();
+      hostInput.value = value;
+      saveConfig(Object.assign({}, config, { pcdnHost: value }));
     });
-    const hostList = document.createElement("datalist");
-    hostList.id = "ba-hosts";
+    const hostSelect = document.createElement("select");
+    hostSelect.id = "ba-fixed-host";
+    hostSelect.className = "ba-control";
     core.CDN_HOSTS.forEach(function (h) {
       const option = document.createElement("option");
       option.value = h;
-      hostList.appendChild(option);
+      option.textContent = h;
+      hostSelect.appendChild(option);
+    });
+    // This sentinel belongs only to the UI; never persist it as a host.
+    hostSelect.appendChild(makeOption("custom", "hostCustom", ""));
+    hostSelect.value = core.CDN_HOSTS.includes(config.pcdnHost) ? config.pcdnHost : "custom";
+    customHostField.hidden = hostSelect.value !== "custom";
+    hostSelect.addEventListener("change", function () {
+      const custom = hostSelect.value === "custom";
+      customHostField.hidden = !custom;
+      clearHostError();
+      if (custom) {
+        hostInput.focus();
+      } else {
+        saveConfig(Object.assign({}, config, { pcdnHost: hostSelect.value }));
+        hostInput.value = config.pcdnHost;
+      }
     });
 
     const mcdn = createSelect([
@@ -2111,8 +2153,9 @@
     adv.appendChild(createSwatchField("fAccent", createAccentPicker()));
     adv.appendChild(createField("fServer", selection));
     adv.appendChild(createField("fWhen", mode));
-    adv.appendChild(createField("fFixed", hostInput));
-    adv.appendChild(hostList);
+    adv.appendChild(createField("fFixed", hostSelect));
+    adv.appendChild(customHostField);
+    adv.appendChild(hostError);
     adv.appendChild(createField("fMcdn", mcdn));
     adv.appendChild(portRow);
     adv.appendChild(stallRow);
