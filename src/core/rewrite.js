@@ -216,6 +216,23 @@
     return url.pathname.indexOf("/live-bvc/") !== -1;
   }
 
+  // String-level version of the check above, for callers that hold a raw value
+  // rather than a parsed URL. Deliberately independent of parseUrl: the marker
+  // alone is decisive, so a live path that arrives without a host (live payloads
+  // carry base_url as a bare path) still answers true instead of falling through
+  // as "not live".
+  function isLiveUrl(value) {
+    const raw = String(value || "");
+    if (raw.indexOf("/live-bvc/") === -1) {
+      return false;
+    }
+    try {
+      return isLiveMediaUrl(new URL(raw.slice(0, 2) === "//" ? "https:" + raw : raw));
+    } catch (_) {
+      return true;
+    }
+  }
+
   function isMcdnHost(hostname) {
     return /\.mcdn\.bilivideo\.(?:cn|com|net)$/i.test(hostname);
   }
@@ -600,15 +617,53 @@
     return typeof extra === "string" && /(?:^|[?&])os=mcdn(?:&|$)/i.test(extra);
   }
 
-  // Drop PCDN/MCDN entries from live url_info host lists, keeping the official
-  // CDN entries the player can fail over to. Never removes the last usable host:
-  // if every entry looks slow, the list is left untouched. Returns rewrite-shaped
-  // entries ({original, url, reason}) so callers can log them like URL rewrites.
+  // Same verdict for a live entry that carries a whole signed URL instead of a
+  // bare host — the legacy playUrl `durl` shape. host includes the port, which
+  // the port heuristic needs, and the URL's own query is where os=mcdn lands.
+  function isSlowLiveDurlEntry(value, config) {
+    try {
+      const url = new URL(String(value));
+      return isSlowLiveHost(url.host, url.search, config);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // Drop the entries `isSlow` marks, in place, unless that would empty the list:
+  // a live payload whose every candidate looks slow is left alone, because a
+  // slow stream still plays and no stream at all does not. Returns the dropped
+  // entries ([] when nothing was), so callers can log them.
+  function dropSlowLiveEntries(list, isSlow) {
+    const kept = list.filter(function (item) { return !isSlow(item); });
+    if (kept.length === 0 || kept.length === list.length) {
+      return [];
+    }
+    const dropped = list.filter(function (item) { return kept.indexOf(item) === -1; });
+    list.length = 0;
+    kept.forEach(function (item) { list.push(item); });
+    return dropped;
+  }
+
+  // Drop PCDN/MCDN entries from a live payload's candidate list, keeping the
+  // official CDN entries the player can fail over to. Never removes the last
+  // usable host: if every entry looks slow, the list is left untouched. Returns
+  // rewrite-shaped entries ({original, url, reason}) so callers can log them
+  // like URL rewrites, plus `live`: whether a live candidate list was seen at
+  // all. Filtering is the only lever live playback has — live URLs are signed
+  // per host, so rewriteUrlDetail cannot move a live stream anywhere (see
+  // isLiveMediaUrl) — and `live` is what lets the UI say so instead of waiting
+  // on a VOD rewrite that will never come.
+  //
+  // Two payload shapes carry that list. getRoomPlayInfo splits it into
+  // url_info: [{host, extra}] beside a path-only base_url; the legacy
+  // /room/v1/Room/playUrl returns durl: [{url}] with complete signed URLs. Only
+  // the first was handled here, so a viewer on the legacy shape kept whatever
+  // residential PCDN node Bilibili picked.
   function filterLiveUrlInfo(payload, rawConfig, depth, seen) {
     const config = normalizeConfig(rawConfig);
     const level = depth || 0;
     const visited = seen || new WeakSet();
-    const result = { changed: false, rewrites: [] };
+    const result = { changed: false, live: false, rewrites: [] };
 
     if (!config.enabled || config.mode === "off" ||
         payload == null || typeof payload !== "object" ||
@@ -618,26 +673,44 @@
     visited.add(payload);
 
     const list = payload.url_info;
-    if (Array.isArray(list) && list.length > 1 &&
+    if (Array.isArray(list) && list.length > 0 &&
         list.every(function (item) { return item && typeof item.host === "string"; })) {
-      const kept = list.filter(function (item) {
-        return !isSlowLiveHost(item.host, item.extra, config);
+      result.live = true;
+      const dropped = dropSlowLiveEntries(list, function (item) {
+        return isSlowLiveHost(item.host, item.extra, config);
       });
-      if (kept.length > 0 && kept.length < list.length) {
-        list.forEach(function (item) {
-          if (kept.indexOf(item) === -1) {
-            result.rewrites.push({
-              changed: true,
-              original: item.host,
-              url: kept[0].host,
-              reason: "live-pcdn-filter"
-            });
-          }
+      dropped.forEach(function (item) {
+        result.rewrites.push({
+          changed: true,
+          original: item.host,
+          url: list[0].host,
+          reason: "live-pcdn-filter"
         });
-        list.length = 0;
-        kept.forEach(function (item) { list.push(item); });
-        result.changed = true;
-      }
+      });
+      result.changed = result.changed || dropped.length > 0;
+    }
+
+    // Only a list whose every entry is a live URL: a VOD durl carries
+    // /upgcxcode/ URLs that rewriteUrlDetail already handles by host swap, and
+    // dropping entries from it would take away the player's own fallbacks.
+    const durl = payload.durl;
+    if (Array.isArray(durl) && durl.length > 0 &&
+        durl.every(function (item) {
+          return item && typeof item.url === "string" && isLiveUrl(item.url);
+        })) {
+      result.live = true;
+      const dropped = dropSlowLiveEntries(durl, function (item) {
+        return isSlowLiveDurlEntry(item.url, config);
+      });
+      dropped.forEach(function (item) {
+        result.rewrites.push({
+          changed: true,
+          original: item.url,
+          url: durl[0].url,
+          reason: "live-pcdn-filter"
+        });
+      });
+      result.changed = result.changed || dropped.length > 0;
     }
 
     const keys = Array.isArray(payload)
@@ -645,6 +718,7 @@
       : Object.keys(payload);
     for (let i = 0; i < keys.length; i += 1) {
       const child = filterLiveUrlInfo(payload[keys[i]], config, level + 1, visited);
+      result.live = result.live || child.live;
       if (child.changed) {
         result.changed = true;
         result.rewrites = result.rewrites.concat(child.rewrites);
@@ -677,6 +751,7 @@
     hasMediaSignal: hasBiliMediaSignal,
     classify,
     isSlowLiveHost,
+    isLiveUrl,
     filterLiveUrlInfo,
     selectTarget,
     alternativesFor,
