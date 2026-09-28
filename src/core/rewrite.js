@@ -9,7 +9,7 @@
 })(typeof globalThis !== "undefined" ? globalThis : window, function createCore() {
   "use strict";
 
-  const SCHEMA_VERSION = 3;
+  const SCHEMA_VERSION = 4;
 
   // Healthy UPOS mirrors we are willing to rewrite toward. The default target
   // is DEFAULT_CONFIG.pcdnHost and the auto-selection pool is CANDIDATE_POOL;
@@ -42,23 +42,17 @@
   ]);
   const THEME_MODES = Object.freeze(["system", "light", "dark"]);
 
-  // Candidates that are safe to auto-probe and rank as rewrite targets. Akamai
-  // is excluded: it rejects a upos-signed path with 403, so it can never win a
-  // probe and only wastes a slot.
+  // UPOS mirrors a host swap can reach: every one accepts another UPOS host's
+  // signed path. The routing engine races them, alongside the hosts Bilibili
+  // issued, when the assigned host can't keep up; fixed selection offers them
+  // as choices. Akamai is excluded because it rejects a swapped path with 403;
+  // it is reachable only through the URL Bilibili issues for it.
   //
-  // Both tiers belong here and the probe decides between them; the order below
-  // only sets the pre-probe preference. Overseas leads because that is this
-  // tool's audience — measured from Seattle, re-requesting the same signed
-  // segment on each host gave 33-70 Mbps for the *ov mirrors against 3-20 for
-  // mainland, so a mainland-only pool made every rotation a large downgrade off
-  // the host Bilibili had already picked correctly.
-  //
-  // Do not read that as "overseas is always right". The reporter in #26 watches
-  // from Tokyo and measured mirrorcosov as no slower than mainland mirrorcos —
-  // their v0.3.0 ranking put mirrorcos first, but that was a mainland-only pool
-  // scored on TTFB, so it never measured an *ov host and is not evidence either
-  // way. Probing the whole pool is what settles it per viewer. Baking either
-  // geography into this list is the bug, not the fix.
+  // Both tiers belong here and measurements decide between them. Which host is
+  // fast depends on the video: an overseas edge is fastest for a file other
+  // overseas viewers have pulled and slowest while it relays one they haven't
+  // (docs/vod-routing.md). Baking either geography into this list is the bug,
+  // not the fix.
   const CANDIDATE_POOL = Object.freeze([
     "upos-sz-mirrorcosov.bilivideo.com",
     "upos-sz-mirroraliov.bilivideo.com",
@@ -77,8 +71,8 @@
     theme: "system",                               // system | light | dark surface
     mode: "bad-only",                              // bad-only | force | off
     selection: "auto",                             // auto | fixed
-    // Pre-probe rewrite target. Overseas by default to match the audience; auto
-    // selection replaces it with the best-ranked host once probing finishes.
+    // The fixed server, and in auto mode the host PCDN URLs are rewritten to
+    // when Bilibili issued no proper CDN URL beside them.
     pcdnHost: "upos-sz-mirrorcosov.bilivideo.com",
     candidatePool: CANDIDATE_POOL.slice(),
     mcdnStrategy: "proxy-all",                      // proxy-all | proxy-v1 | replace
@@ -147,6 +141,14 @@
           cleanHost(merged.pcdnHost) === "upos-sz-mirrorcos.bilivideo.com") {
         merged.pcdnHost = DEFAULT_CONFIG.pcdnHost;
       }
+    }
+
+    // v4 stopped writing routing decisions into the config. Under auto, 0.4.x
+    // pointed pcdnHost at whatever the rotation had reached and saved it with
+    // the next unrelated setting, so a saved auto config can carry a host
+    // nobody chose. Fixed selection is the viewer's own choice and stays.
+    if (typeof storedVersion === "number" && storedVersion < 4 && merged.selection !== "fixed") {
+      merged.pcdnHost = DEFAULT_CONFIG.pcdnHost;
     }
 
     if (!Array.isArray(merged.candidatePool) || merged.candidatePool.length === 0) {
@@ -323,8 +325,8 @@
     return config.mcdnStrategy === "proxy-v1" && url.pathname.startsWith("/v1/resource/");
   }
 
-  // The host to rewrite slow UPOS/PCDN URLs toward. In auto mode the runtime
-  // keeps config.pcdnHost pointed at the current best-ranked candidate.
+  // The host to rewrite slow UPOS/PCDN URLs toward: the fixed server, or in
+  // auto mode the default target (the page script passes it in).
   function selectTarget(config) {
     return cleanHost(config.pcdnHost) || CDN_HOSTS[0];
   }
@@ -367,18 +369,10 @@
       };
     }
 
-    // Force mode rewrites every bili CDN host onto the selected target, overseas
-    // mirrors included. An earlier revision carved the *ov mirrors out, because
-    // force mode was seen rewriting mirrorcosov onto a mainland mirror the probe
-    // had mis-ranked first. The mis-ranking was the bug — TTFB scoring over a
-    // mainland-only pool — and it is fixed. Ranking on measured throughput over
-    // both tiers means the target here is the host that actually tested fastest
-    // for this viewer, which is exactly what force mode is asked to do.
-    //
-    // The carve-out also had to go because stall recovery reaches force mode
-    // through recovery.avoidHost. While it stood, a stalling *ov host could not
-    // be routed away from at all: recovery counted a rotation, rewrote nothing,
-    // and the panel reported a switch that never happened.
+    // Force mode rewrites every bili CDN host onto the fixed server, overseas
+    // mirrors included: that is what a viewer who picks one server and "all
+    // video requests" asks for. Auto selection never runs in force mode; the
+    // page script hands this function a bad-only config there.
     const force = config.mode === "force";
     if (verdict.isSlow || verdict.isMcdn || (force && isBiliCdnHost(url.hostname))) {
       const target = selectTarget(config);

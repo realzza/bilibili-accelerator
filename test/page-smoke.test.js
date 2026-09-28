@@ -27,6 +27,7 @@ function createElement() {
 
 test("page script rewrites playurl JSON parsed by the page", () => {
   const core = fs.readFileSync(path.join(__dirname, "../src/core/rewrite.js"), "utf8");
+  const routingSrc = fs.readFileSync(path.join(__dirname, "../src/core/routing.js"), "utf8");
   const page = fs.readFileSync(path.join(__dirname, "../src/page/bili-accelerator.page.js"), "utf8");
   const storage = new Map();
   const sandbox = {
@@ -67,7 +68,7 @@ test("page script rewrites playurl JSON parsed by the page", () => {
   sandbox.globalThis = sandbox;
   sandbox.window = sandbox;
 
-  vm.runInNewContext(`${core}\n${page}`, sandbox);
+  vm.runInNewContext(`${core}\n${routingSrc}\n${page}`, sandbox);
 
   const parsed = sandbox.JSON.parse(JSON.stringify({
     data: {

@@ -2,21 +2,20 @@
   "use strict";
 
   const core = root.BiliAcceleratorCore;
-  if (!core || root.__BILI_ACCELERATOR_INSTALLED__) {
+  const routing = root.BiliAcceleratorRouting;
+  if (!core || !routing || root.__BILI_ACCELERATOR_INSTALLED__) {
     return;
   }
   root.__BILI_ACCELERATOR_INSTALLED__ = true;
 
-  const VERSION = "0.4.1";
+  const VERSION = "0.5.0";
   const STORAGE_KEY = "biliAccelerator.config.v2";
   const LEGACY_KEY = "biliAccelerator.config.v1";
-  // Bumped when the pool or the scoring changes: a cached ranking only names
-  // hosts from the pool that produced it, and is only comparable to others
-  // scored the same way. v3 switched scoring from TTFB to measured throughput,
-  // so entries written by v2 would otherwise pin viewers to a latency-ranked
-  // order — mainland-first for some — for up to RANK_TTL_MS after an update.
-  const RANK_PREFIX = "biliAccelerator.rank.v3.";
-  const RANK_TTL_MS = 6 * 60 * 60 * 1000;
+  // Per-host history of measured delivery, per region. It only orders the
+  // hosts a race tries; nothing is ever picked from it without a race.
+  const HISTORY_PREFIX = "biliAccelerator.hosts.v1.";
+  // Rankings cached by 0.4.x. Nothing reads them any more.
+  const LEGACY_RANK_PREFIX = "biliAccelerator.rank.";
   const BUTTON_ID = "bili-accelerator-button";
   const PANEL_ID = "bili-accelerator-panel";
   const IMMERSED_CLASS = "ba-immersed";
@@ -24,15 +23,17 @@
   const REVEAL_HOTZONE = 150;
   const REVEAL_TIMEOUT = 2600;
   const STALL_GRACE_MS = 2500;
-  const STALL_RETRY_MS = 5000;
-  const PROBE_TIMEOUT_MS = 4000;
-  // Upper bound on parallel probes. Kept at or above CANDIDATE_POOL's length so
-  // the pool is measured in full — a unit test holds the two together.
-  const PROBE_MAX_HOSTS = 12;
-  // How much of each candidate's body to read before scoring it. Enough to get
-  // past TCP slow-start and see a real rate, small enough that probing the whole
-  // pool moves well under a second of video per host.
-  const PROBE_BYTES = 768 * 1024;
+  const ENGINE_TICK_MS = 500;
+  // After a synthetic timeout the player retries the same range at once. If
+  // no retry shows up this soon, the technique isn't working in this browser
+  // and the page stops using it.
+  const RETRY_WINDOW_MS = 3000;
+  // A request that fails on the active host sends its retry elsewhere for this
+  // long, so taking over routing never disables the player's own failover.
+  const AVOID_MS = 3000;
+  const MANUAL_SPACING_MS = 10000;
+  const VERDICT_NOTE_MS = 12000;
+  const MAX_SESSIONS = 4;
 
   const nativeJsonParse = JSON.parse;
   const nativeFetch = root.fetch;
@@ -42,24 +43,20 @@
   let revealTimer = null;
   let playerObserver = null;
   let observedContainer = null;
-  let probed = false;
   let watchedVideo = null;
   let stallTimer = null;
-  let rotateCursor = 0;
-
-  const recovery = { avoidHost: null, clearTimer: null };
 
   const state = {
     rewrites: [],
     rewriteCount: 0,
     lastSource: "",
-    lastMediaHost: null,
     status: "idle",
     stalls: 0,
-    recoveries: 0,
+    switches: 0,
+    races: 0,
     p2pBlocked: 0,
-    ranking: [],
-    probedAt: null,
+    // Distinct P2P/PCDN hosts kept out of playback, for the panel's count.
+    p2pAvoided: {},
     installedAt: new Date().toISOString()
   };
 
@@ -242,47 +239,43 @@
     }
   }
 
-  function loadRanking() {
+  function loadHistory() {
     try {
-      const raw = root.localStorage.getItem(RANK_PREFIX + regionKey());
-      if (!raw) {
-        return null;
-      }
-      const parsed = JSON.parse(raw);
-      // `at` has to be a real timestamp, not just truthy: scheduleProbe formats
-      // it for diagnostics, and a corrupted string would sail past the TTL check
-      // below (NaN compares false) only to throw on an Invalid Date there.
-      if (!parsed || !Array.isArray(parsed.ranking) || typeof parsed.at !== "number") {
-        return null;
-      }
-      if (Date.now() - parsed.at > RANK_TTL_MS) {
-        return null;
-      }
-      return parsed;
+      const raw = root.localStorage.getItem(HISTORY_PREFIX + regionKey());
+      const parsed = raw ? JSON.parse(raw) : null;
+      return parsed && typeof parsed === "object" && parsed.hosts && typeof parsed.hosts === "object"
+        ? parsed
+        : { hosts: {} };
     } catch (_) {
-      return null;
+      return { hosts: {} };
     }
   }
 
-  function saveRanking(ranking) {
+  function saveHistory() {
     try {
-      root.localStorage.setItem(RANK_PREFIX + regionKey(),
-        JSON.stringify({ ranking, at: Date.now() }));
+      root.localStorage.setItem(HISTORY_PREFIX + regionKey(), JSON.stringify(engine.history));
     } catch (_) {
-      // best-effort cache only.
+      // best effort; history only orders race contenders.
     }
   }
 
-  // Apply a learned ranking by pointing the active target at the best host.
-  function applyRanking(ranking) {
-    if (!ranking || !ranking.length || config.selection !== "auto") {
-      return;
-    }
-    state.ranking = ranking;
-    config.pcdnHost = ranking[0];
+  function dropLegacyRankings() {
+    try {
+      const store = root.localStorage;
+      const doomed = [];
+      for (let i = 0; i < store.length; i += 1) {
+        const key = store.key(i);
+        if (key && key.indexOf(LEGACY_RANK_PREFIX) === 0) {
+          doomed.push(key);
+        }
+      }
+      doomed.forEach(function (key) { store.removeItem(key); });
+    } catch (_) {}
   }
 
   // ---- rewrite plumbing ---------------------------------------------------
+
+  const P2P_REASONS = ["pcdn-host", "mcdn-host", "mcdn-proxy", "szbdyd-source", "live-pcdn-filter", "pcdn-promote"];
 
   function record(rewrites, source) {
     if (!rewrites || rewrites.length === 0) {
@@ -295,12 +288,16 @@
       // carry the viewer's mid, buvid, IP-derived oi and signed tokens, and the
       // diagnostics report is built to be pasted into public issues. Redacting
       // here (not just at display) means those tokens never persist in memory.
+      const fromHost = core.hostOf(item.original) || String(item.original || "").replace(/^https?:\/\//, "").split("/")[0];
+      if (P2P_REASONS.indexOf(item.reason) !== -1 && fromHost) {
+        state.p2pAvoided[fromHost] = true;
+      }
       return {
         at: new Date().toISOString(),
         source,
         reason: item.reason,
-        fromHost: core.hostOf(item.original),
-        toHost: core.hostOf(item.url)
+        fromHost,
+        toHost: core.hostOf(item.url) || String(item.url || "").replace(/^https?:\/\//, "").split("/")[0]
       };
     })).slice(-50);
     if (state.status === "idle") {
@@ -309,123 +306,80 @@
     renderStatus();
   }
 
-  function rememberSample(payload) {
-    if (probed || config.selection !== "auto") {
-      return;
+  // The config the per-URL rules run with. Fixed selection uses the settings as
+  // saved. Auto selection only keeps P2P, PCDN and MCDN off playback: which
+  // healthy host serves the video is the routing engine's call, made from
+  // measurements, so force mode, the Akamai rewrite and a saved target host
+  // don't apply there.
+  function rewriteConfig() {
+    if (config.selection !== "auto") {
+      return config;
     }
-    const sample = findMediaUrl(payload, 0, new WeakSet());
-    if (sample) {
-      scheduleProbe(sample);
-    }
-  }
-
-  function findMediaUrl(value, depth, seen) {
-    if (value == null || depth > config.maxDepth) {
-      return null;
-    }
-    if (typeof value === "string") {
-      return /\.(m4s|mp4|flv|m3u8)(?:$|[?#])/i.test(value) && core.hasMediaSignal(value)
-        ? value
-        : null;
-    }
-    if (typeof value !== "object" || seen.has(value)) {
-      return null;
-    }
-    seen.add(value);
-    const keys = Array.isArray(value) ? value.map(function (_, i) { return i; }) : Object.keys(value);
-    for (let i = 0; i < keys.length; i += 1) {
-      const found = findMediaUrl(value[keys[i]], depth + 1, seen);
-      if (found) {
-        return found;
-      }
-    }
-    return null;
-  }
-
-  function backupPool() {
-    return state.ranking.length ? state.ranking : config.candidatePool;
-  }
-
-  // Merge host-swapped alternatives of `base` into entry[key], deduped, max 8.
-  function mergeBackups(entry, key, base) {
-    const alts = core.alternativesFor(base, config, backupPool());
-    if (!alts.length) {
-      return;
-    }
-    const existing = Array.isArray(entry[key]) ? entry[key] : [];
-    const merged = alts.concat(existing).filter(function uniq(u, i, arr) {
-      return arr.indexOf(u) === i;
-    });
-    entry[key] = merged.slice(0, 8);
-  }
-
-  // Add host-swapped alternatives to DASH/durl entries so Bilibili's own
-  // backup-URL failover can recover for free if the primary host stalls.
-  // Payload shapes: data.dash (web player), result.video_info.dash (bangumi),
-  // result.dash, bare dash; durl carries the legacy FLV/MP4 lists. Web-API DASH
-  // uses camelCase (baseUrl/backupUrl); app-style payloads and durl use
-  // snake_case (base_url/backup_url).
-  function enrichBackups(payload) {
-    if (config.selection !== "auto" || !payload || typeof payload !== "object") {
-      return;
-    }
-    const containers = [
-      payload.data,
-      payload.result,
-      payload.result && payload.result.video_info,
-      payload
-    ];
-    containers.forEach(function eachContainer(container) {
-      if (!container || typeof container !== "object") {
-        return;
-      }
-      enrichDash(container.dash);
-      enrichDurl(container.durl);
+    return Object.assign({}, config, {
+      mode: config.mode === "off" ? "off" : "bad-only",
+      rewriteAkamai: false,
+      pcdnHost: core.DEFAULT_CONFIG.pcdnHost
     });
   }
 
-  function enrichDash(dash) {
-    if (!dash || typeof dash !== "object") {
+  function isUsableUrl(value) {
+    try {
+      const url = new URL(value);
+      const verdict = core.classify(url, config);
+      return !verdict.isPcdn && !verdict.isMcdn && verdict.kind !== "scheduler";
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // When Bilibili hands out a PCDN node as a representation's base URL and a
+  // proper CDN URL as its backup, use the backup: it is issued, signed for its
+  // own host, and needs no host swap. The player's own filterPdn does the same
+  // under some conditions.
+  function promoteIssued(payload, tracker) {
+    if (config.selection !== "auto" || !config.enabled || config.mode === "off") {
       return;
     }
-    ["video", "audio"].forEach(function eachKind(kind) {
-      const list = dash[kind];
-      if (!Array.isArray(list)) {
+    [payload && payload.data, payload && payload.result,
+      payload && payload.result && payload.result.video_info, payload].forEach(function (container) {
+      const dash = container && typeof container === "object" && container.dash;
+      if (!dash || typeof dash !== "object") {
         return;
       }
-      list.forEach(function eachEntry(entry) {
-        if (!entry) {
-          return;
-        }
-        if (typeof entry.baseUrl === "string") {
-          mergeBackups(entry, "backupUrl", entry.baseUrl);
-        }
-        if (typeof entry.base_url === "string") {
-          mergeBackups(entry, "backup_url", entry.base_url);
-        }
+      ["video", "audio"].forEach(function (kind) {
+        (Array.isArray(dash[kind]) ? dash[kind] : []).forEach(function (entry) {
+          if (!entry || typeof entry !== "object") {
+            return;
+          }
+          const baseKey = typeof entry.baseUrl === "string" ? "baseUrl" : "base_url";
+          const backupKey = baseKey === "baseUrl" ? "backupUrl" : "backup_url";
+          const base = entry[baseKey];
+          const backups = Array.isArray(entry[backupKey]) ? entry[backupKey] : [];
+          if (typeof base !== "string" || isUsableUrl(base)) {
+            return;
+          }
+          const index = backups.findIndex(function (u) { return typeof u === "string" && isUsableUrl(u); });
+          if (index === -1) {
+            return;
+          }
+          const promoted = backups[index];
+          entry[baseKey] = promoted;
+          entry[backupKey] = backups.slice(0, index).concat(backups.slice(index + 1));
+          tracker.changed = true;
+          tracker.rewrites.push({ changed: true, original: base, url: promoted, reason: "pcdn-promote" });
+        });
       });
-    });
-  }
-
-  function enrichDurl(durl) {
-    if (!Array.isArray(durl)) {
-      return;
-    }
-    durl.forEach(function eachEntry(entry) {
-      if (entry && typeof entry.url === "string") {
-        mergeBackups(entry, "backup_url", entry.url);
-      }
     });
   }
 
   function rewritePayload(payload, source) {
     const tracker = { changed: false, rewrites: [] };
     try {
-      const rewritten = core.rewriteObject(payload, config, tracker);
-      enrichBackups(rewritten);
+      ingestPlayurl(payload);
+      promoteIssued(payload, tracker);
+      const rewritten = core.rewriteObject(payload, rewriteConfig(), tracker);
       record(tracker.rewrites, source);
       filterLivePcdn(rewritten, source);
-      rememberSample(rewritten);
       return rewritten;
     } catch (error) {
       console.warn("[BiliAccelerator] rewrite failed", error);
@@ -457,40 +411,27 @@
         text.indexOf("akamaized") !== -1);
   }
 
-  // Rewrite a single outgoing request URL (segment fetches, live failover).
-  function rewriteRequestUrl(rawUrl) {
+  // Where one outgoing media request goes: the per-URL rules first (P2P,
+  // PCDN, MCDN; in fixed mode also the fixed host), then, in auto mode, the
+  // routing engine once it has taken over this video.
+  function routeRequestUrl(rawUrl) {
     if (!core.hasMediaSignal(rawUrl)) {
       return rawUrl;
     }
+    let url = rawUrl;
     try {
-      let host = "";
-      try {
-        host = new URL(rawUrl, root.location.href).hostname;
-      } catch (_) {
-        host = "";
-      }
-      // During recovery, force-redirect away from the stalling host even if it
-      // would normally be considered healthy — with one exception it does not
-      // control: force mode now exempts the overseas mirrors, so a stalling
-      // *ov host is left in place and this override is a no-op for it.
-      const cfg = (recovery.avoidHost && host === recovery.avoidHost)
-        ? Object.assign({}, config, { mode: "force" })
-        : config;
-      const detail = core.rewriteUrlDetail(rawUrl, cfg);
-      // Track which host actually serves the media: the <video> element only
-      // exposes a blob: URL under MSE, so this is what stall recovery must avoid.
-      try {
-        state.lastMediaHost = detail.changed
-          ? new URL(detail.url).hostname
-          : (host || state.lastMediaHost);
-      } catch (_) {}
+      const detail = core.rewriteUrlDetail(rawUrl, rewriteConfig());
       if (detail.changed) {
         record([detail], "segment");
-        return detail.url;
+        url = detail.url;
       }
-      return rawUrl;
     } catch (_) {
       return rawUrl;
+    }
+    try {
+      return engineRoute(url);
+    } catch (_) {
+      return url;
     }
   }
 
@@ -538,7 +479,7 @@
       const reqUrl = requestUrlOf(input);
       const isMedia = !!reqUrl && core.hasMediaSignal(reqUrl);
       if (config.enabled && isMedia) {
-        const swapped = rewriteRequestUrl(reqUrl);
+        const swapped = routeRequestUrl(reqUrl);
         if (swapped !== reqUrl) {
           // string and URL inputs can be replaced by the string directly; only a
           // Request needs to be rebuilt to preserve its init options.
@@ -578,19 +519,18 @@
           let live = { changed: false, rewrites: [] };
           try {
             parsed = nativeJsonParse(text);
-            core.rewriteObject(parsed, config, tracker);
-            enrichBackups(parsed);
+            ingestPlayurl(parsed);
+            promoteIssued(parsed, tracker);
+            core.rewriteObject(parsed, rewriteConfig(), tracker);
             live = core.filterLiveUrlInfo(parsed, config);
           } catch (_) {
             return response;
           }
           if (!tracker.changed && !live.changed) {
-            rememberSample(parsed);
             return response;
           }
           record(tracker.rewrites, "fetch");
           record(live.rewrites, "fetch");
-          rememberSample(parsed);
           const headers = new Headers(response.headers);
           headers.delete("content-length");
           return new Response(JSON.stringify(parsed), {
@@ -614,18 +554,30 @@
     }
     const open = NativeXHR.prototype.open;
     const send = NativeXHR.prototype.send;
+    const setRequestHeader = NativeXHR.prototype.setRequestHeader;
 
     NativeXHR.prototype.open = function patchedOpen(method, url) {
       const urlStr = typeof url === "string"
         ? url
         : (url && typeof url.href === "string" ? url.href : "");
-      this.__baAccel = { url: urlStr };
       let finalUrl = url;
       if (config.enabled && urlStr && core.hasMediaSignal(urlStr)) {
-        finalUrl = rewriteRequestUrl(urlStr);
+        finalUrl = routeRequestUrl(urlStr);
       }
+      this.__baAccel = { url: urlStr, finalUrl: typeof finalUrl === "string" ? finalUrl : urlStr, range: null };
       return open.apply(this, [method, finalUrl].concat([].slice.call(arguments, 2)));
     };
+
+    // The player sends its byte range as a header; the engine needs it to know
+    // which fragment a request carries and how big it is.
+    if (typeof setRequestHeader === "function") {
+      NativeXHR.prototype.setRequestHeader = function patchedSetRequestHeader(name, value) {
+        if (this.__baAccel && /^range$/i.test(String(name))) {
+          this.__baAccel.range = String(value);
+        }
+        return setRequestHeader.apply(this, arguments);
+      };
+    }
 
     NativeXHR.prototype.send = function patchedSend() {
       const xhr = this;
@@ -645,6 +597,26 @@
             recordTransfer(startTs, nowMs(), event.loaded);
           }
         });
+        // The same request, as the routing engine sees it. Listeners only:
+        // the player's own handlers are properties and stay untouched.
+        let req = null;
+        try {
+          req = beginRequest(xhr, meta);
+        } catch (_) {
+          req = null;
+        }
+        if (req) {
+          xhr.addEventListener("progress", function onProgress(event) {
+            if (event && typeof event.loaded === "number") {
+              noteProgress(req, event.loaded);
+            }
+          });
+          xhr.addEventListener("abort", function onAbort() { req.aborted = true; });
+          xhr.addEventListener("timeout", function onTimeout() { req.timedOut = true; });
+          xhr.addEventListener("loadend", function onEnd(event) {
+            endRequest(req, xhr.status, event && typeof event.loaded === "number" ? event.loaded : 0);
+          });
+        }
       }
 
       if (config.enabled && interesting) {
@@ -660,10 +632,10 @@
             }
             const parsed = nativeJsonParse(text);
             const tracker = { changed: false, rewrites: [] };
-            core.rewriteObject(parsed, config, tracker);
-            enrichBackups(parsed);
+            ingestPlayurl(parsed);
+            promoteIssued(parsed, tracker);
+            core.rewriteObject(parsed, rewriteConfig(), tracker);
             const live = core.filterLiveUrlInfo(parsed, config);
-            rememberSample(parsed);
             if (!tracker.changed && !live.changed) {
               return;
             }
@@ -755,203 +727,633 @@
     });
   }
 
-  // ---- health: probing + stall recovery ----------------------------------
+  // ---- VOD routing --------------------------------------------------------
+  //
+  // docs/vod-routing.md has the measurements behind this. The player is a
+  // dash.js fork that already fails over between the URLs it was issued, but
+  // only on errors and timeouts. It can't see a host that answers at once and
+  // then delivers below the stream's bitrate, which is what an overseas edge
+  // does while it relays a file it hasn't cached. So the engine watches the
+  // player's own fragment downloads; when the host can't keep up it races two
+  // alternatives on the bytes the player needs next, routes the rest of the
+  // video to the winner, and stays there.
 
-  function swapHost(sampleUrl, host) {
+  const engine = {
+    sessions: new Map(),        // cid -> session, one per video on the page
+    current: null,              // the session whose video fragments came last
+    history: loadHistory(),
+    synthetic: { used: 0, disabled: false, pending: null, noRetry: 0 },
+    hiddenSince: null,
+    hiddenSpans: [],
+    stalling: false,
+    timer: null,
+    rendered: ""
+  };
+
+  function autoRouting() {
+    return config.enabled && config.mode !== "off" && config.selection === "auto";
+  }
+
+  // Races need Auto-switch on and a real player page. Hover previews on the
+  // home page load playurls too, and racing for a muted thumbnail would only
+  // cost bandwidth.
+  function switchingAllowed() {
+    return autoRouting() && config.stallRecovery && isPlayerPage();
+  }
+
+  function isPlayerPage() {
+    let path = "";
     try {
-      const u = new URL(sampleUrl);
-      u.protocol = "https:";
-      u.host = host;
-      if (host.indexOf(":") === -1) {
-        u.port = "";
-      }
-      return u.toString();
+      path = root.location.pathname || new URL(root.location.href).pathname;
     } catch (_) {
-      return null;
+      path = "";
+    }
+    return /^\/(?:video|bangumi\/play|list|medialist\/play|festival|cheese\/play)\//.test(path || "");
+  }
+
+  function newSession(cid) {
+    return {
+      cid,
+      table: { cid, reps: {} },
+      requiredBps: 0,
+      assigned: null,        // the host the player used first
+      lastHost: null,        // the host of the latest video request
+      active: null,          // where the engine routes; null leaves the player's URLs alone
+      fallback: null,
+      avoid: null,
+      lastVideoKey: null,
+      ends: {},              // file -> end of the last completed video range
+      hosts: {},
+      requested: {},         // "file|start" -> seen, to tell a retry from a first attempt
+      inflight: [],
+      racing: null,
+      nextRaceAt: 0,
+      cooldownMs: 0,
+      manualAt: -Infinity,
+      failed: {},
+      lost: {},
+      measured: {},
+      races: [],
+      switches: [],
+      stalls: 0,
+      verdict: null
+    };
+  }
+
+  function sessionFor(cid) {
+    let session = engine.sessions.get(cid);
+    if (!session) {
+      session = newSession(cid);
+      engine.sessions.set(cid, session);
+      if (engine.sessions.size > MAX_SESSIONS) {
+        const oldest = engine.sessions.keys().next().value;
+        if (engine.sessions.get(oldest) !== engine.current) {
+          engine.sessions.delete(oldest);
+        }
+      }
+    }
+    return session;
+  }
+
+  // Every DASH playurl the page receives, before anything is rewritten: the
+  // issued URLs are what reaches Akamai at all, and what a host swap borrows
+  // its signature from.
+  function ingestPlayurl(payload) {
+    if (!config.enabled || !payload || typeof payload !== "object") {
+      return;
+    }
+    let table = null;
+    try {
+      table = routing.buildTable(payload, isUsableUrl);
+    } catch (_) {
+      table = null;
+    }
+    if (!table || !table.cid) {
+      return;
+    }
+    const session = sessionFor(table.cid);
+    // A refresh of the same video brings fresh signatures; take them.
+    Object.keys(table.reps).forEach(function (key) {
+      session.table.reps[key] = table.reps[key];
+    });
+  }
+
+  function hostStats(session, host) {
+    if (!session.hosts[host]) {
+      session.hosts[host] = {
+        est: routing.createEstimator(), requests: 0, bytes: 0, errors: [], ttfbs: []
+      };
+    }
+    return session.hosts[host];
+  }
+
+  function hostOfUrl(value) {
+    try {
+      return new URL(value, root.location.href).host.toLowerCase();
+    } catch (_) {
+      return "";
     }
   }
 
-  // Probe one candidate host by re-requesting the signed sample URL on it and
-  // reading the first PROBE_BYTES of the body to measure transfer rate.
-  //
-  // Uses cors mode (the CDN sends ACAO for the player's own segment fetches) so
-  // the real status is visible — under no-cors a host that fast-fails with 403
-  // would look "healthy" and win the ranking. Still no Range header: it isn't
-  // preflight-safe everywhere, and reading a bounded prefix off the stream then
-  // cancelling gets the same measurement without one.
-  function probeHost(host, sampleUrl) {
-    const url = swapHost(sampleUrl, host);
-    if (!url) {
-      return Promise.resolve({ host, ttfb: null, mbps: 0, ok: false });
+  function beginRequest(xhr, meta) {
+    const url = meta.finalUrl || meta.url;
+    const key = routing.fileKey(url);
+    const cid = routing.cidOf(key);
+    if (!key || !cid || String(url).indexOf("/live-bvc/") !== -1) {
+      return null;
     }
-    const started = nowMs();
-    const init = { method: "GET", mode: "cors", cache: "no-store", credentials: "omit" };
-    const controller = typeof AbortController === "function" ? new AbortController() : null;
-    let timer = null;
-    let settled = false;
-    // Kept out here so the catch below can still score a transfer the timeout
-    // interrupted, rather than throwing the measurement away.
-    let ttfbMs = null;
-    let firstByteAt = 0;
-    let bytes = 0;
-    if (controller) {
-      init.signal = controller.signal;
-      timer = setTimeout(function () { controller.abort(); }, PROBE_TIMEOUT_MS);
+    const session = sessionFor(cid);
+    const rep = session.table.reps[key];
+    const kind = rep ? rep.kind : (routing.AUDIO_ID_RE.test(routing.repIdOf(key) || "") ? "audio" : "video");
+    const range = routing.parseRange(meta.range);
+    const start = range ? range.start : 0;
+    const slot = key + "|" + start;
+    const req = {
+      xhr,
+      session,
+      key,
+      kind,
+      host: hostOfUrl(url),
+      start,
+      end: range && !isNaN(range.end) ? range.end : NaN,
+      total: range && range.length > 0 ? range.length : NaN,
+      startedAt: nowMs(),
+      firstByteAt: null,
+      loaded: 0,
+      samples: [],
+      retry: !!session.requested[slot],
+      handed: false,
+      aborted: false,
+      timedOut: false
+    };
+    session.requested[slot] = true;
+    const pending = engine.synthetic.pending;
+    if (pending && pending.slot === slot) {
+      engine.synthetic.pending = null;
     }
-    const probe = nativeFetch(url, init).then(function (response) {
-      ttfbMs = nowMs() - started;
-      const body = response.body;
-      if (!response.ok) {
-        try { if (body && body.cancel) { body.cancel(); } } catch (_) {}
-        return { host, ttfb: null, mbps: 0, ok: false };
+    if (kind === "video") {
+      // Nothing to watch until a video fragment is actually requested.
+      startEngine();
+      engine.current = session;
+      session.lastVideoKey = key;
+      session.lastHost = req.host;
+      if (!session.assigned) {
+        session.assigned = req.host;
       }
-      // Engines without a readable stream still get ranked, on TTFB alone.
+      if (rep && rep.bandwidth > session.requiredBps) {
+        session.requiredBps = rep.bandwidth;
+      }
+      session.inflight.push(req);
+    }
+    return req;
+  }
+
+  function noteProgress(req, loaded) {
+    const now = nowMs();
+    if (!req.firstByteAt && loaded > 0) {
+      req.firstByteAt = now;
+    }
+    req.loaded = loaded;
+    req.samples.push([now, loaded]);
+    if (req.samples.length > 60) {
+      req.samples.splice(0, req.samples.length - 60);
+    }
+  }
+
+  function endRequest(req, status, loaded) {
+    const session = req.session;
+    const index = session.inflight.indexOf(req);
+    if (index !== -1) {
+      session.inflight.splice(index, 1);
+    }
+    if (req.handed) {
+      return;
+    }
+    const now = nowMs();
+    // The player cancels fragments it no longer needs (a seek, a quality
+    // change), which says nothing about the host. It also aborts a request
+    // that got no first byte within its ~2 s deadline, and that one does.
+    const missedDeadline = req.aborted && !req.firstByteAt && now - req.startedAt >= 1800;
+    if (req.aborted && !missedDeadline) {
+      return;
+    }
+    const stats = hostStats(session, req.host);
+    stats.requests += 1;
+    if (missedDeadline || !((status === 200 || status === 206) && loaded > 0)) {
+      stats.errors.push(now);
+      session.failed[req.host] = (session.failed[req.host] || 0) + 1;
+      engine.history = routing.recordFailure(engine.history, req.host, Date.now());
+      if (session.active && req.host === session.active) {
+        session.avoid = { host: req.host, until: now + AVOID_MS };
+      }
+      return;
+    }
+    stats.bytes += loaded;
+    session.measured[req.host] = true;
+    if (req.firstByteAt) {
+      stats.ttfbs.push(req.firstByteAt - req.startedAt);
+      if (stats.ttfbs.length > 30) {
+        stats.ttfbs.shift();
+      }
+    }
+    if (req.kind === "video") {
+      if (!overlapsHidden(req.startedAt, now)) {
+        stats.est.sample(now - req.startedAt, loaded);
+      }
+      if (!isNaN(req.end)) {
+        session.ends[req.key] = Math.max(session.ends[req.key] == null ? -1 : session.ends[req.key], req.end);
+      }
+    }
+  }
+
+  // A transfer that overlapped a hidden period measured the browser's
+  // background throttling, not the host.
+  function overlapsHidden(from, to) {
+    if (engine.hiddenSince !== null && to > engine.hiddenSince) {
+      return true;
+    }
+    return engine.hiddenSpans.some(function (span) { return from < span[1] && to > span[0]; });
+  }
+
+  function engineRoute(url) {
+    if (!autoRouting()) {
+      return url;
+    }
+    const key = routing.fileKey(url);
+    const session = key ? engine.sessions.get(routing.cidOf(key)) : null;
+    if (!session || !session.active) {
+      return url;
+    }
+    const rep = session.table.reps[key];
+    if (!rep) {
+      return url;
+    }
+    let target = session.active;
+    // The active host just failed a request: its retry goes to the runner-up,
+    // or where the player sends it, as the player's own failover would.
+    if (session.avoid && session.avoid.host === target && nowMs() < session.avoid.until) {
+      target = session.fallback;
+    }
+    return (target && routing.urlFor(rep, target)) || url;
+  }
+
+  function bufferAhead() {
+    try {
+      const video = watchedVideo;
+      if (!video || !video.buffered) {
+        return 0;
+      }
+      const t = video.currentTime;
+      for (let i = 0; i < video.buffered.length; i += 1) {
+        if (video.buffered.start(i) <= t + 0.3 && video.buffered.end(i) > t) {
+          return video.buffered.end(i) - t;
+        }
+      }
+    } catch (_) {}
+    return 0;
+  }
+
+  function startEngine() {
+    if (!engine.timer && typeof setInterval === "function") {
+      engine.timer = setInterval(engineTick, ENGINE_TICK_MS);
+    }
+  }
+
+  function engineTick() {
+    const now = nowMs();
+    const pending = engine.synthetic.pending;
+    if (pending && now > pending.deadline) {
+      // The player didn't retry the range it was handed a timeout for. Stop
+      // doing that on this page; switches still apply to later requests.
+      engine.synthetic.pending = null;
+      engine.synthetic.disabled = true;
+      engine.synthetic.noRetry += 1;
+    }
+    const session = engine.current;
+    if (session && !document.hidden && switchingAllowed() && !session.racing &&
+        now >= session.nextRaceAt && session.switches.length < routing.MAX_SWITCHES) {
+      const host = session.active || session.lastHost;
+      if (host) {
+        const stats = hostStats(session, host);
+        const verdict = routing.evaluate({
+          now,
+          requiredBps: session.requiredBps,
+          bufferAheadS: bufferAhead(),
+          inflight: session.inflight.filter(function (r) { return r.kind === "video" && !r.handed; })
+            .map(function (r) {
+              return {
+                total: r.total, loaded: r.loaded, startedAt: r.startedAt, firstByteAt: r.firstByteAt,
+                rateBps: routing.recentRate(r.samples, now, 1000), ref: r
+              };
+            }),
+          estimateBps: stats.est.estimate(),
+          measuredBytes: stats.est.bytes(),
+          measuredMs: stats.est.ms(),
+          recentErrors: stats.errors.filter(function (t) { return now - t < routing.ERROR_WINDOW_MS; }).length
+        });
+        if (verdict) {
+          startRace(session, verdict.trigger, verdict.req ? verdict.req.ref : null);
+        }
+      }
+    }
+    refreshStatus();
+  }
+
+  function startRace(session, trigger, stuckReq) {
+    if (typeof nativeFetch !== "function") {
+      return false;
+    }
+    const key = stuckReq ? stuckReq.key : session.lastVideoKey;
+    const rep = key ? session.table.reps[key] : null;
+    const current = session.active || session.lastHost;
+    if (!rep || !current) {
+      return false;
+    }
+    const start = stuckReq ? stuckReq.start : (session.ends[key] != null ? session.ends[key] + 1 : NaN);
+    if (!(start >= 0)) {
+      return false;
+    }
+    let end = start + routing.RACE_BYTES - 1;
+    if (stuckReq && stuckReq.end >= start) {
+      end = Math.min(end, stuckReq.end);
+    }
+    const wall = Date.now();
+    const now = nowMs();
+    const challengers = routing.pickChallengers({
+      candidates: routing.candidatesFor(rep, config.candidatePool),
+      current,
+      issued: rep.issued,
+      measured: session.measured,
+      failed: session.failed,
+      lost: session.lost,
+      history: engine.history,
+      now: wall
+    });
+    let currentRate = 0;
+    if (trigger !== "errors") {
+      currentRate = stuckReq
+        ? (stuckReq.loaded > 0 ? 8000 * stuckReq.loaded / Math.max(1, now - stuckReq.startedAt) : 0)
+        : (hostStats(session, current).est.estimate() || 0);
+    }
+    const contenders = challengers.map(function (host) { return { host, url: routing.urlFor(rep, host) }; })
+      .filter(function (c) { return c.url; });
+    // A manual test with no measurement of the current host yet races it as
+    // well, so every host is compared on the same bytes.
+    const currentUrl = routing.urlFor(rep, current);
+    if (trigger === "manual" && !(currentRate > 0) && currentUrl && contenders.length) {
+      contenders.push({ host: current, url: currentUrl, incumbent: true });
+    }
+    if (!contenders.length) {
+      concludeRace(session, trigger, [], currentRate, end - start + 1, current, null);
+      return false;
+    }
+    session.racing = {
+      trigger,
+      at: wall,
+      hosts: contenders.map(function (c) { return c.host; }),
+      compared: contenders.length + (contenders.some(function (c) { return c.incumbent; }) ? 0 : 1)
+    };
+    state.races += 1;
+    renderStatus();
+    runRace(contenders, start, end).then(function (results) {
+      concludeRace(session, trigger, results, currentRate, end - start + 1, current, stuckReq);
+    }, function () {
+      session.racing = null;
+    });
+    return true;
+  }
+
+  // Fetch the same bytes from every contender at once. The first to finish
+  // wins; the others get 300 ms more, then whatever they moved is recorded
+  // and they are cancelled.
+  function runRace(contenders, start, end) {
+    const expected = end - start + 1;
+    return new Promise(function (resolve) {
+      const results = contenders.map(function (c) {
+        return { host: c.host, incumbent: !!c.incumbent, ok: false, status: 0, bytes: 0, ms: 0, cut: false, settled: false };
+      });
+      const controllers = [];
+      let left = contenders.length;
+      let grace = null;
+      let done = false;
+      function finish() {
+        if (done) {
+          return;
+        }
+        done = true;
+        if (grace) {
+          clearTimeout(grace);
+        }
+        results.forEach(function (r, i) {
+          if (!r.settled) {
+            r.cut = true;
+            try { if (controllers[i]) { controllers[i].abort(); } } catch (_) {}
+          }
+        });
+        resolve(results.map(function (r) { return Object.assign({}, r); }));
+      }
+      contenders.forEach(function (c, i) {
+        const ctl = typeof AbortController === "function" ? new AbortController() : null;
+        controllers.push(ctl);
+        const t0 = nowMs();
+        const timer = setTimeout(function () {
+          try { if (ctl) { ctl.abort(); } } catch (_) {}
+        }, routing.RACE_TIMEOUT_MS);
+        fetchRange(c.url, start, end, ctl, function (bytes) {
+          results[i].bytes = bytes;
+          results[i].ms = nowMs() - t0;
+        }).then(function (r) {
+          results[i].status = r.status;
+          results[i].bytes = r.bytes;
+          results[i].ms = nowMs() - t0;
+          results[i].ok = (r.status === 206 || r.status === 200) && r.bytes >= Math.min(expected, 64 * 1024);
+        }, function () {
+          results[i].ms = nowMs() - t0;
+        }).then(function () {
+          clearTimeout(timer);
+          results[i].settled = true;
+          left -= 1;
+          if (!left) {
+            finish();
+          } else if (results[i].ok && !grace) {
+            grace = setTimeout(finish, 300);
+          }
+        });
+      });
+    });
+  }
+
+  function fetchRange(url, start, end, ctl, onBytes) {
+    const init = {
+      method: "GET",
+      mode: "cors",
+      credentials: "omit",
+      cache: "no-store",
+      headers: { Range: "bytes=" + start + "-" + end }
+    };
+    if (ctl) {
+      init.signal = ctl.signal;
+    }
+    return nativeFetch.call(root, url, init).then(function (response) {
+      const status = response.status;
+      const body = response.body;
       if (!body || typeof body.getReader !== "function") {
-        return { host, ttfb: ttfbMs, mbps: 0, ok: true };
+        return response.arrayBuffer().then(function (buf) { return { status, bytes: buf.byteLength }; });
       }
       const reader = body.getReader();
-      firstByteAt = nowMs();
+      let bytes = 0;
       function pump() {
         return reader.read().then(function (chunk) {
-          if (chunk.value) {
-            bytes += chunk.value.length;
+          if (chunk.done) {
+            return { status, bytes };
           }
-          if (chunk.done || bytes >= PROBE_BYTES) {
-            const elapsed = nowMs() - firstByteAt;
-            try { reader.cancel(); } catch (_) {}
-            return { host, ttfb: ttfbMs, mbps: core.throughputMbps(bytes, elapsed), ok: true };
-          }
+          bytes += chunk.value ? chunk.value.length : 0;
+          onBytes(bytes);
           return pump();
         });
       }
       return pump();
-    }).catch(function () {
-      // A host too slow to deliver PROBE_BYTES inside PROBE_TIMEOUT_MS gets
-      // aborted mid-read. It is slow, not broken, and dropping it entirely left
-      // rotation with nothing to fall back to once the faster hosts were
-      // exhausted — one report came back with only four of eight hosts ranked.
-      // Score the bytes it did move so it sorts to the bottom and stays usable.
-      if (ttfbMs !== null && bytes > 0) {
-        return {
-          host,
-          ttfb: ttfbMs,
-          mbps: core.throughputMbps(bytes, nowMs() - firstByteAt),
-          ok: true
-        };
-      }
-      return { host, ttfb: null, mbps: 0, ok: false };
-    }).then(function (result) {
-      settled = true;
-      if (timer) {
-        clearTimeout(timer);
-      }
-      return result;
     });
-    if (controller) {
-      return probe;
-    }
-    // No AbortController (very old engines): fall back to racing a timeout.
-    return Promise.race([probe, new Promise(function (resolve) {
-      setTimeout(function () {
-        if (!settled) {
-          resolve({ host, ttfb: null, mbps: 0, ok: false });
-        }
-      }, PROBE_TIMEOUT_MS);
-    })]);
   }
 
-  function scheduleProbe(sampleUrl) {
-    if (probed || config.selection !== "auto" || !nativeFetch) {
-      return;
+  function concludeRace(session, trigger, results, currentRate, raceBytes, current, stuckReq) {
+    session.racing = null;
+    const wall = Date.now();
+    const now = nowMs();
+    results.forEach(function (r) {
+      if (r.ok || (r.cut && r.bytes >= 64 * 1024)) {
+        engine.history = routing.recordSample(engine.history, r.host, r.bytes * 8 / 1000 / Math.max(1, r.ms), wall);
+        session.measured[r.host] = true;
+      } else if (!r.cut) {
+        engine.history = routing.recordFailure(engine.history, r.host, wall);
+        session.failed[r.host] = (session.failed[r.host] || 0) + 1;
+      }
+    });
+    const incumbent = results.filter(function (r) { return r.incumbent && r.ok; })[0];
+    const baseRate = incumbent ? incumbent.bytes * 8000 / Math.max(1, incumbent.ms) : currentRate;
+    const verdict = routing.raceVerdict(results.filter(function (r) { return !r.incumbent; }), baseRate, raceBytes);
+    results.forEach(function (r) {
+      if (!r.incumbent && r.host !== verdict.switchTo) {
+        session.lost[r.host] = wall;
+      }
+    });
+    session.races.push({
+      at: new Date(wall).toISOString(),
+      trigger,
+      from: current,
+      currentMbps: round1(baseRate / 1e6),
+      contenders: results.map(function (r) {
+        return {
+          host: r.host, ok: r.ok, ms: Math.round(r.ms), kb: Math.round(r.bytes / 1024),
+          status: r.status, incumbent: r.incumbent || undefined, cut: r.cut || undefined
+        };
+      }),
+      switchTo: verdict.switchTo
+    });
+    if (session.races.length > 10) {
+      session.races.shift();
     }
-    probed = true;
-    const cached = loadRanking();
-    if (cached) {
-      applyRanking(cached.ranking);
-      // Report when the cached ranking was actually measured. Leaving this null
-      // made a cache hit indistinguishable from "never probed" in diagnostics,
-      // which is how a stale mainland-first ranking went unnoticed.
-      state.probedAt = new Date(cached.at).toISOString();
-      renderStatus();
-      return;
+    if (verdict.switchTo) {
+      // The host being left was measured too, by the request that started the
+      // race or by its traffic: it lost, so it rests like any other loser, and
+      // what it delivered goes into history.
+      if (current && current !== verdict.switchTo) {
+        session.measured[current] = true;
+        session.lost[current] = wall;
+        if (baseRate > 0) {
+          engine.history = routing.recordSample(engine.history, current, baseRate / 1e6, wall);
+        }
+      }
+      session.active = verdict.switchTo;
+      session.fallback = verdict.runnerUp && verdict.runnerUp !== verdict.switchTo ? verdict.runnerUp : null;
+      session.avoid = null;
+      session.verdict = null;
+      session.switches.push({
+        at: new Date(wall).toISOString(), from: current, to: verdict.switchTo, trigger,
+        beforeMbps: round1(baseRate / 1e6)
+      });
+      state.switches += 1;
+      session.cooldownMs = 0;
+      session.nextRaceAt = now + routing.nextCooldown("switch", session.switches.length);
+      if (trigger === "stuck" && stuckReq) {
+        handTimeout(stuckReq);
+      }
+    } else {
+      session.cooldownMs = routing.nextCooldown("none", 0, session.cooldownMs);
+      session.nextRaceAt = now + session.cooldownMs;
+      session.verdict = {
+        at: now, tested: results.length + (incumbent ? 0 : 1), rateBps: baseRate, manual: trigger === "manual"
+      };
     }
-    // Probe every candidate. This used to stop at the first six, which silently
-    // made pool *order* decide what auto-selection could pick: a viewer whose
-    // fastest host sat in position seven could never be ranked onto it.
-    //
-    // Probes run in parallel and each reads up to PROBE_BYTES, so a full round
-    // costs on the order of PROBE_BYTES x pool size — a few MB, once per
-    // RANK_TTL_MS. That buys a throughput number; scoring on headers alone was
-    // cheaper but ranked the wrong host (see probeHost).
-    const hosts = (config.candidatePool || []).slice(0, PROBE_MAX_HOSTS);
-    if (!hosts.length) {
-      return;
+    if (trigger === "manual") {
+      session.manualAt = now;
     }
-    state.status = state.status === "idle" ? "optimizing" : state.status;
+    saveHistory();
     renderStatus();
-    Promise.all(hosts.map(function (h) { return probeHost(h, sampleUrl); }))
-      .then(function (samples) {
-        const ranking = core.rankHosts(samples.filter(function (s) { return s.ok; }));
-        if (ranking.length) {
-          applyRanking(ranking);
-          saveRanking(ranking);
-          state.probedAt = new Date().toISOString();
-          state.status = "smooth";
-          renderStatus();
-        }
-      })
-      .catch(function () {});
   }
 
-  // Walk the ranked pool one step per stall, wrapping at the end. Taking the
-  // first entry that isn't the current host instead — as this did originally —
-  // ping-pongs between the top two entries forever: rank[0] rotates to rank[1],
-  // whose own stall rotates straight back to rank[0]. The rest of the pool was
-  // unreachable, and a viewer whose best two hosts were both congested saw
-  // "switching servers" every five seconds with nothing to show for it.
-  function rotateTarget(stallingHost) {
-    const pool = (state.ranking.length ? state.ranking : config.candidatePool).slice();
-    if (!pool.length) {
-      return;
+  // End a stuck fragment request the way the player's own total timeout
+  // would. Its handlers are properties set before send(): detach them, abort
+  // the request natively so none of them hears it, then call its ontimeout
+  // and onloadend. The player retries the range at once, and the retry is
+  // routed to the host that just won. A native abort() alone won't do: the
+  // loader takes an abort as deliberate and would run both its abort path and,
+  // through onloadend, its retry path.
+  function handTimeout(req) {
+    const xhr = req.xhr;
+    if (engine.synthetic.disabled || req.retry || req.handed || !xhr || xhr.readyState === 4) {
+      return false;
     }
-    const current = config.pcdnHost;
-    for (let i = 0; i < pool.length; i += 1) {
-      rotateCursor = (rotateCursor + 1) % pool.length;
-      const candidate = pool[rotateCursor];
-      if (candidate !== current && candidate !== stallingHost) {
-        config.pcdnHost = candidate;
-        break;
-      }
+    const onTimeout = xhr.ontimeout;
+    const onEnd = xhr.onloadend;
+    if (typeof onTimeout !== "function" || typeof onEnd !== "function") {
+      return false;
     }
-    recovery.avoidHost = stallingHost || current;
-    if (recovery.clearTimer) {
-      clearTimeout(recovery.clearTimer);
-    }
-    // Stop forcing the old host away once the player has moved on.
-    recovery.clearTimer = setTimeout(function () { recovery.avoidHost = null; }, 15000);
+    req.handed = true;
+    xhr.onload = null;
+    xhr.onloadend = null;
+    xhr.onerror = null;
+    xhr.onprogress = null;
+    xhr.onabort = null;
+    xhr.ontimeout = null;
+    xhr.onreadystatechange = null;
+    try { xhr.abort(); } catch (_) {}
+    engine.synthetic.used += 1;
+    engine.synthetic.pending = { slot: req.key + "|" + req.start, deadline: nowMs() + RETRY_WINDOW_MS };
+    try { onTimeout.call(xhr, progressEvent("timeout")); } catch (_) {}
+    try { onEnd.call(xhr, progressEvent("loadend")); } catch (_) {}
+    return true;
   }
 
-  function currentVideoHost() {
+  function progressEvent(type) {
     try {
-      if (watchedVideo && watchedVideo.currentSrc) {
-        return new URL(watchedVideo.currentSrc).hostname;
-      }
-    } catch (_) {}
-    return null;
+      return new ProgressEvent(type);
+    } catch (_) {
+      return { type };
+    }
   }
+
+  // "测试其他线路": a race now, for the fragment in flight or the bytes after
+  // the last one. It follows the same rule as an automatic race and never
+  // saves anything.
+  function retest() {
+    const session = engine.current;
+    if (!session || session.racing || !autoRouting() || nowMs() - session.manualAt < MANUAL_SPACING_MS) {
+      return false;
+    }
+    const inflight = session.inflight.filter(function (r) {
+      return r.kind === "video" && !r.handed && r.total >= 128 * 1024;
+    })[0];
+    return startRace(session, "manual", inflight || null);
+  }
+
+  // ---- playback state -----------------------------------------------------
 
   function handleStall() {
     // Browsers throttle media/MSE work in background tabs, which can make the
-    // player emit a transient waiting/stalled event. Rotating CDN hosts in that
-    // state turns a harmless suspension into a real interruption, so defer the
-    // decision until the page is visible again (see onVisibilityChange).
-    //
-    // Do not "simplify" this to ignoring hidden stalls outright. That was tried
-    // while the background stalls were still blamed on tab visibility, and it
-    // drops the one case nothing else covers: a stall that begins hidden and is
-    // still unresolved on return. 'waiting' does not re-fire for an element that
-    // is already waiting, so without the re-check there is no second event to
-    // recover from. The real cause was CDN rerouting, fixed in classify().
+    // player emit a transient waiting/stalled event. A stall is counted only
+    // once the page is visible (see onVisibilityChange). Stalls are recorded
+    // for the panel; the routing engine acts on what the downloads show.
     stallTimer = null;
     if (document.hidden || !watchedVideo || watchedVideo.paused || watchedVideo.ended) {
       return;
@@ -959,18 +1361,12 @@
     if (watchedVideo.readyState >= 3) {
       return;
     }
-    // Count distinct stall episodes once; re-checks of the same episode below
-    // only add recovery rotations.
-    if (state.status !== "buffering") {
+    if (!engine.stalling) {
+      engine.stalling = true;
       state.stalls += 1;
-    }
-    state.status = "buffering";
-    if (config.stallRecovery && config.selection === "auto") {
-      rotateTarget(state.lastMediaHost || currentVideoHost());
-      state.recoveries += 1;
-      // Keep rotating while the stall persists — 'waiting' fires only once per
-      // episode, so without a re-check a single bad pick would strand playback.
-      stallTimer = setTimeout(handleStall, STALL_RETRY_MS);
+      if (engine.current) {
+        engine.current.stalls += 1;
+      }
     }
     renderStatus();
   }
@@ -991,26 +1387,37 @@
       clearTimeout(stallTimer);
       stallTimer = null;
     }
-    if (state.status === "buffering") {
-      state.status = "smooth";
+    if (engine.stalling) {
+      engine.stalling = false;
       renderStatus();
     }
   }
 
   function onVisibilityChange() {
+    const now = nowMs();
     if (document.hidden) {
+      if (engine.hiddenSince === null) {
+        engine.hiddenSince = now;
+      }
       if (stallTimer) {
         clearTimeout(stallTimer);
         stallTimer = null;
       }
       return;
     }
+    if (engine.hiddenSince !== null) {
+      engine.hiddenSpans.push([engine.hiddenSince, now]);
+      if (engine.hiddenSpans.length > 20) {
+        engine.hiddenSpans.shift();
+      }
+      engine.hiddenSince = null;
+    }
 
-    // A waiting event fired while hidden is deliberately ignored. Re-evaluate
-    // once foregrounded so a genuine, still-active stall keeps the normal grace
-    // period and recovery behavior. The grace period is what keeps this from
-    // firing on the brief readyState dip a tab-switch itself produces:
-    // handleStall re-tests readyState >= 3 before it rotates anything.
+    // A waiting event fired while hidden is deliberately ignored, and 'waiting'
+    // does not re-fire for an element that is already waiting. Re-check once
+    // foregrounded, so a stall that began hidden and is still unresolved gets
+    // counted. The grace period keeps the brief readyState dip a tab switch
+    // itself produces from counting: handleStall re-tests readyState first.
     if (watchedVideo && !watchedVideo.paused && !watchedVideo.ended &&
         watchedVideo.readyState < 3) {
       onWaiting();
@@ -1033,21 +1440,71 @@
 
   // ---- diagnostics --------------------------------------------------------
 
+  function round1(value) {
+    return Math.round((Number(value) || 0) * 10) / 10;
+  }
+
+  function median(list) {
+    if (!list || !list.length) {
+      return null;
+    }
+    const sorted = list.slice().sort(function (a, b) { return a - b; });
+    return Math.round(sorted[Math.floor(sorted.length / 2)]);
+  }
+
+  // No URL, query string or video id: hosts, sizes and timings only.
+  function sessionReport(session) {
+    const hosts = {};
+    Object.keys(session.hosts).forEach(function (host) {
+      const s = session.hosts[host];
+      const est = s.est.estimate();
+      hosts[host] = {
+        requests: s.requests,
+        mb: round1(s.bytes / 1e6),
+        mbps: est === null ? null : round1(est / 1e6),
+        firstByteMs: median(s.ttfbs),
+        errors: s.errors.length
+      };
+    });
+    const issued = {};
+    Object.keys(session.table.reps).forEach(function (key) {
+      const rep = session.table.reps[key];
+      issued[rep.kind + " " + rep.id + " " + String(rep.codecs || "").split(".")[0]] = rep.issued.slice();
+    });
+    return {
+      requiredMbps: round1(session.requiredBps / 1e6),
+      assignedHost: session.assigned,
+      activeHost: session.active,
+      bufferS: round1(bufferAhead()),
+      stalls: session.stalls,
+      hosts,
+      issued,
+      races: session.races.slice(),
+      switches: session.switches.slice()
+    };
+  }
+
   function buildDiagnostics() {
     return {
       version: VERSION,
       installedAt: state.installedAt,
       region: regionKey().split("|")[0],   // timezone only — drop locale
       config,
-      status: state.status,
+      status: computeStatus().key,
       counters: {
         rewrites: state.rewriteCount,
         stalls: state.stalls,
-        recoveries: state.recoveries,
+        switches: state.switches,
+        races: state.races,
+        p2pAvoided: Object.keys(state.p2pAvoided).length,
         p2pBlocked: state.p2pBlocked
       },
-      ranking: state.ranking,
-      probedAt: state.probedAt,
+      synthetic: {
+        used: engine.synthetic.used,
+        disabled: engine.synthetic.disabled,
+        noRetry: engine.synthetic.noRetry
+      },
+      session: engine.current ? sessionReport(engine.current) : null,
       recentRewrites: state.rewrites.slice(-15)
     };
   }
@@ -1495,13 +1952,28 @@
     en: {
       title: "Bilibili Accelerator",
       status: {
-        off: ["Acceleration off", "Turn it on to speed up slow videos"],
+        off: ["Acceleration off", "Turn it on to move slow videos to faster servers"],
         idle: ["Ready", "Open a video and it'll kick in"],
-        optimizing: ["Finding the fastest server…", "Picking the best route for you"],
-        buffering: ["Finding a faster server…", "Recovering from a slow connection"],
-        smooth: ["Playing smoothly", "Connected to the fastest server near you"]
+        smooth: ["Playing smoothly", "Open a video and it'll kick in"],
+        testing: ["Testing other servers…", ""],
+        buffering: ["Buffering", ""],
+        slow: ["Slow network", ""]
       },
-      count: function (n) { return n + " slow connection" + (n === 1 ? "" : "s") + " fixed"; },
+      notes: {
+        assigned: function (server, rate) { return "Bilibili's assigned server · " + server + (rate ? " · " + rate : ""); },
+        switched: function (server, rate) { return "Switched to " + server + (rate ? " · " + rate : ""); },
+        fixed: function (server, rate) { return "Fixed server · " + server + (rate ? " · " + rate : ""); },
+        short: function (rate, need) { return "Current server " + rate + ", needs " + need; },
+        stuck: "This part of the video is downloading too slowly",
+        comparing: function (n) { return "Comparing " + n + " servers"; },
+        keepingUp: "The server is keeping up; waiting for the player",
+        measuring: "Measuring the current server",
+        fastest: function (n, rate) { return "Compared " + n + " servers; this one is fastest" + (rate ? " · " + rate : ""); }
+      },
+      regions: { overseas: "Overseas", mainland: "Mainland" },
+      vendors: { tencent: "Tencent Cloud", alibaba: "Alibaba Cloud", huawei: "Huawei Cloud", akamai: "Akamai" },
+      switchCount: function (n) { return "Switched servers " + n + (n === 1 ? " time" : " times") + " on this video"; },
+      p2pCount: function (n) { return "Kept " + n + " P2P node" + (n === 1 ? "" : "s") + " out of playback"; },
       spdTitle: "Download speed",
       spdUnit: "Mbps",
       spdPeak: "peak",
@@ -1511,7 +1983,7 @@
       spdWaiting: "Waiting for playback…",
       masterTitle: "Acceleration",
       masterNote: "Speed up slow videos automatically",
-      boost: "Still buffering? Boost harder",
+      retest: "Test other servers",
       advShow: "Advanced settings",
       advHide: "Hide advanced",
       fAccent: "Accent",
@@ -1520,13 +1992,13 @@
         bili: "Bilibili Blue", teal: "Teal", emerald: "Emerald", violet: "Violet",
         pink: "Pink", sunset: "Sunset", graphite: "Graphite"
       },
-      fServer: "Server", fWhen: "When", fFixed: "Fixed server", fMcdn: "MCDN",
-      selAuto: "Auto (pick fastest)", selFixed: "Use a fixed server",
+      fServer: "Server", fWhen: "Apply to", fFixed: "Fixed server", fMcdn: "MCDN",
+      selAuto: "Auto (by measurement)", selFixed: "Use a fixed server",
       hostCustom: "Custom…", fCustomHost: "Server address", hostPlaceholder: "Enter a server address",
-      modeBad: "Only fix slow servers", modeForce: "Always switch server",
+      modeBad: "P2P/PCDN nodes only", modeForce: "All video requests",
       mcdnAll: "Proxy all MCDN", mcdnV1: "Proxy /v1 only", mcdnReplace: "Replace host",
       portTitle: "Catch hidden PCDN", portNote: "Treat odd-port servers as slow (recommended)",
-      stallTitle: "Auto-recover", stallNote: "Switch servers live if it stalls — no reload",
+      stallTitle: "Auto-switch servers", stallNote: "When a server can't keep up, test others and switch to a faster one",
       akamaiTitle: "Rewrite Akamai", akamaiNote: "Only if Akamai is slow on your network",
       p2pTitle: "Stop bandwidth sharing", p2pNote: "Block Bilibili's P2P upload (reload to apply)",
       diag: "Copy report", diagCopied: "Copied ✓", diagConsole: "See console",
@@ -1535,13 +2007,28 @@
     zh: {
       title: "Bilibili Accelerator",
       status: {
-        off: ["已关闭加速", "打开后自动为慢视频提速"],
+        off: ["已关闭加速", "打开后自动为慢视频选择更快的线路"],
         idle: ["就绪", "打开视频后自动生效"],
-        optimizing: ["正在寻找最快的服务器…", "正在为你挑选最佳线路"],
-        buffering: ["正在切换更快的服务器…", "正在从卡顿中恢复"],
-        smooth: ["播放流畅", "已连接到离你最近的最快服务器"]
+        smooth: ["播放流畅", "打开视频后自动生效"],
+        testing: ["正在测试其他线路…", ""],
+        buffering: ["缓冲中", ""],
+        slow: ["网络较慢", ""]
       },
-      count: function (n) { return "已修复 " + n + " 个慢连接"; },
+      notes: {
+        assigned: function (server, rate) { return "B 站分配的线路 · " + server + (rate ? " · " + rate : ""); },
+        switched: function (server, rate) { return "已切换到 " + server + (rate ? " · " + rate : ""); },
+        fixed: function (server, rate) { return "固定线路 · " + server + (rate ? " · " + rate : ""); },
+        short: function (rate, need) { return "当前线路 " + rate + "，需要 " + need; },
+        stuck: "当前片段下载过慢",
+        comparing: function (n) { return "正在比较 " + n + " 条线路"; },
+        keepingUp: "线路速度正常，等待播放器缓冲",
+        measuring: "正在测量当前线路",
+        fastest: function (n, rate) { return "已比较 " + n + " 条线路，当前线路最快" + (rate ? " · " + rate : ""); }
+      },
+      regions: { overseas: "海外", mainland: "大陆" },
+      vendors: { tencent: "腾讯云", alibaba: "阿里云", huawei: "华为云", akamai: "Akamai" },
+      switchCount: function (n) { return "本视频切换了 " + n + " 次线路"; },
+      p2pCount: function (n) { return "已避开 " + n + " 个 P2P 节点"; },
       spdTitle: "下载速度",
       spdUnit: "Mbps",
       spdPeak: "峰值",
@@ -1551,7 +2038,7 @@
       spdWaiting: "等待播放…",
       masterTitle: "加速",
       masterNote: "自动为慢视频提速",
-      boost: "还在卡？再加把劲",
+      retest: "测试其他线路",
       advShow: "高级设置",
       advHide: "收起高级设置",
       fAccent: "主题色",
@@ -1560,13 +2047,13 @@
         bili: "哔哩蓝", teal: "青碧", emerald: "翠绿", violet: "星紫",
         pink: "少女粉", sunset: "落日橙", graphite: "石墨灰"
       },
-      fServer: "服务器", fWhen: "何时", fFixed: "固定服务器", fMcdn: "MCDN",
-      selAuto: "自动（选最快）", selFixed: "使用固定服务器",
+      fServer: "服务器", fWhen: "适用范围", fFixed: "固定服务器", fMcdn: "MCDN",
+      selAuto: "自动（按实测选择）", selFixed: "使用固定服务器",
       hostCustom: "自定义…", fCustomHost: "服务器地址", hostPlaceholder: "请输入服务器地址",
-      modeBad: "仅修复慢服务器", modeForce: "总是切换服务器",
+      modeBad: "仅 P2P/PCDN 节点", modeForce: "所有视频请求",
       mcdnAll: "代理所有 MCDN", mcdnV1: "仅代理 /v1", mcdnReplace: "替换域名",
       portTitle: "抓取隐藏 PCDN", portNote: "把奇怪端口的服务器当作慢节点（推荐）",
-      stallTitle: "自动恢复", stallNote: "卡顿时实时切换服务器，无需刷新",
+      stallTitle: "自动切换线路", stallNote: "当前线路速度不足时，自动测试并切换到更快的线路",
       akamaiTitle: "改写 Akamai", akamaiNote: "仅当 Akamai 在你的网络上很慢时使用",
       p2pTitle: "停止带宽共享", p2pNote: "阻止 B 站的 P2P 上传（刷新后生效）",
       diag: "复制诊断报告", diagCopied: "已复制 ✓", diagConsole: "见控制台",
@@ -1587,11 +2074,109 @@
     return host && host.shadowRoot;
   }
 
-  function currentStatusKey() {
+  // What the panel reports, from what the engine measured and did. Live pages
+  // and pages without a video keep the simple states.
+  function computeStatus() {
     if (!config.enabled) {
-      return "off";
+      return { key: "off", legacy: true };
     }
-    return state.status || "idle";
+    const session = engine.current;
+    if (!session || isLivePage()) {
+      return { key: state.status === "smooth" ? "smooth" : "idle", legacy: true };
+    }
+    const host = session.active || session.lastHost;
+    const stats = host ? session.hosts[host] : null;
+    const rateBps = stats ? stats.est.estimate() : null;
+    const info = {
+      key: "smooth",
+      session,
+      host,
+      rateBps,
+      needBps: session.requiredBps,
+      switched: !!session.active && session.active !== session.assigned
+    };
+    const short = rateBps !== null && session.requiredBps > 0 && rateBps < 1.2 * session.requiredBps;
+    if (session.racing) {
+      info.key = "testing";
+    } else if (engine.stalling) {
+      info.key = "buffering";
+    } else if (session.verdict && short) {
+      info.key = "slow";
+    }
+    if (session.verdict && (info.key === "slow" ||
+        (session.verdict.manual && nowMs() - session.verdict.at < VERDICT_NOTE_MS))) {
+      info.verdict = session.verdict;
+    }
+    return info;
+  }
+
+  function formatRate(bps) {
+    const mbps = bps / 1e6;
+    return (mbps >= 100 ? String(Math.round(mbps)) : mbps.toFixed(1)) + " Mbps";
+  }
+
+  // "海外 · 腾讯云" rather than upos-sz-mirrorcosov.bilivideo.com.
+  function hostLabel(host) {
+    const d = routing.describeHost(host);
+    const s = STRINGS[lang()];
+    const vendor = d.vendor ? s.vendors[d.vendor] : d.id;
+    return d.region ? s.regions[d.region] + " · " + vendor : vendor;
+  }
+
+  function statusNote(info) {
+    const s = STRINGS[lang()];
+    if (info.legacy || !info.session) {
+      return s.status[info.key] ? s.status[info.key][1] : s.status.idle[1];
+    }
+    const n = s.notes;
+    const server = info.host ? hostLabel(info.host) : "";
+    const rate = info.rateBps !== null ? formatRate(info.rateBps) : "";
+    const need = info.needBps > 0 ? formatRate(info.needBps) : "";
+    if (info.key === "testing") {
+      const racing = info.session.racing;
+      if (racing.trigger === "manual") {
+        return n.comparing(racing.compared);
+      }
+      return racing.trigger === "shortfall" && rate && need ? n.short(rate, need) : n.stuck;
+    }
+    if (info.key === "buffering") {
+      if (!rate) {
+        return n.measuring;
+      }
+      return need && info.rateBps < 1.2 * info.needBps ? n.short(rate, need) : n.keepingUp;
+    }
+    if (info.verdict) {
+      return n.fastest(info.verdict.tested, rate);
+    }
+    if (!server) {
+      return n.measuring;
+    }
+    if (config.selection !== "auto") {
+      return n.fixed(server, rate);
+    }
+    return info.switched ? n.switched(server, rate) : n.assigned(server, rate);
+  }
+
+  function countText(info) {
+    const s = STRINGS[lang()];
+    const switches = info && info.session ? info.session.switches.length : 0;
+    if (switches > 0) {
+      return s.switchCount(switches);
+    }
+    const p2p = Object.keys(state.p2pAvoided).length;
+    return p2p > 0 ? s.p2pCount(p2p) : "";
+  }
+
+  // Redraw when what the panel would say has changed, or while it is open so
+  // the rate stays current.
+  function refreshStatus() {
+    const info = computeStatus();
+    const signature = [info.key, info.host || "", info.session ? info.session.switches.length : 0,
+      info.rateBps ? Math.round(info.rateBps / 5e5) : 0, info.verdict ? info.verdict.at : 0].join("|");
+    if (signature !== engine.rendered || panelIsOpen()) {
+      engine.rendered = signature;
+      renderStatus();
+    }
   }
 
   // Re-translate every tagged node + the dynamic bits, no reload needed.
@@ -1768,38 +2353,40 @@
     if (!shadow) {
       return;
     }
-    const key = currentStatusKey();
+    const info = computeStatus();
     const strings = STRINGS[lang()];
-    const info = strings.status[key] || strings.status.idle;
+    const words = strings.status[info.key] || strings.status.idle;
 
     const dot = shadow.getElementById("ba-dot");
     const word = shadow.getElementById("ba-word");
     const note = shadow.getElementById("ba-note");
     const count = shadow.getElementById("ba-count");
-    const boost = shadow.getElementById("ba-boost");
+    const retestButton = shadow.getElementById("ba-retest");
     const master = shadow.getElementById("ba-master");
 
     if (dot) {
-      dot.className = "ba-dot ba-" + key;
+      dot.className = "ba-dot ba-" + info.key;
     }
     if (word) {
-      word.textContent = info[0];
+      word.textContent = words[0];
     }
     if (note) {
-      note.textContent = info[1];
+      note.textContent = statusNote(info);
     }
     if (count) {
-      count.textContent = strings.count(state.rewriteCount);
+      count.textContent = countText(info);
     }
     if (master) {
       master.checked = config.enabled;
     }
-    if (boost) {
-      // Surface "boost harder" only when relevant: still on bad-only and the
-      // user is hitting buffering.
-      const relevant = config.enabled && config.mode !== "force" &&
-        (key === "buffering" || state.stalls > 0);
-      boost.style.display = relevant ? "block" : "none";
+    if (retestButton) {
+      // Offered only when there is something to fix: this video stalled, or
+      // the server measured below what the stream needs.
+      const session = info.session;
+      const relevant = !info.legacy && !!session && !session.racing && autoRouting() && isPlayerPage() &&
+        (session.stalls > 0 || info.key === "slow" || info.key === "buffering" ||
+          (info.rateBps !== null && session.requiredBps > 0 && info.rateBps < 1.2 * session.requiredBps));
+      retestButton.style.display = relevant ? "block" : "none";
     }
   }
 
@@ -1842,7 +2429,7 @@
       ".ba-dot{width:46px;height:46px;border-radius:50%;display:grid;place-items:center;margin-bottom:8px;background:var(--ba-dot-bg)}",
       ".ba-dot:after{content:'';width:14px;height:14px;border-radius:50%;background:var(--ba-dot)}",
       ".ba-dot.ba-smooth{background:var(--ba-good-bg)}.ba-dot.ba-smooth:after{background:var(--ba-good)}",
-      ".ba-dot.ba-optimizing,.ba-dot.ba-buffering{background:var(--ba-warn-bg)}.ba-dot.ba-optimizing:after,.ba-dot.ba-buffering:after{background:var(--ba-warn)}",
+      ".ba-dot.ba-testing,.ba-dot.ba-buffering,.ba-dot.ba-slow{background:var(--ba-warn-bg)}.ba-dot.ba-testing:after,.ba-dot.ba-buffering:after,.ba-dot.ba-slow:after{background:var(--ba-warn)}",
       ".ba-dot.ba-off:after{background:var(--ba-dot)}",
       ".ba-word{font-size:15px;font-weight:800;color:var(--ba-ink)}",
       ".ba-subnote{font-size:11px;color:var(--ba-ink-soft);margin-top:2px;line-height:1.4}",
@@ -1858,6 +2445,7 @@
       ".ba-speed.empty .ba-spd-canvas,.ba-speed.empty .ba-spd-foot,.ba-speed.empty .ba-speed-val{display:none}",
       ".ba-speed.empty .ba-spd-empty{display:block}",
       ".ba-switch-row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:8px 0;padding:10px 12px;border:1px solid var(--ba-border);border-radius:10px;background:var(--ba-card)}",
+      ".ba-switch-row[hidden]{display:none}",
       ".ba-switch-text{display:grid;gap:2px}",
       ".ba-switch-title{font-size:13px;font-weight:750;color:var(--ba-ink)}",
       ".ba-switch-note{font-size:11px;color:var(--ba-ink-soft);line-height:1.3}",
@@ -1867,8 +2455,8 @@
       ".ba-slider:before{content:'';position:absolute;width:20px;height:20px;left:2px;top:2px;border-radius:50%;background:#fff;box-shadow:0 2px 6px rgba(0,0,0,.22);transition:transform .16s ease}",
       ".ba-switch input:checked+.ba-slider{background:var(--ba-accent)}",
       ".ba-switch input:checked+.ba-slider:before{transform:translateX(18px)}",
-      ".ba-boost{display:none;width:100%;height:38px;margin-top:4px;border:1px solid var(--ba-accent);border-radius:10px;background:var(--ba-accent);color:#fff;font-size:13px;font-weight:700;cursor:pointer}",
-      ".ba-boost:hover{background:var(--ba-accent-strong);border-color:var(--ba-accent-strong)}",
+      ".ba-retest{display:none;width:100%;height:38px;margin-top:4px;border:1px solid var(--ba-accent);border-radius:10px;background:var(--ba-accent);color:#fff;font-size:13px;font-weight:700;cursor:pointer}",
+      ".ba-retest:hover{background:var(--ba-accent-strong);border-color:var(--ba-accent-strong)}",
       ".ba-adv-toggle{display:flex;align-items:center;justify-content:center;gap:5px;width:100%;flex:0 0 auto;margin-top:10px;padding-top:11px;border:none;border-top:1px solid var(--ba-border);background:none;color:var(--ba-ink-soft);font-size:11px;font-weight:650;cursor:pointer}",
       ".ba-adv-toggle:hover{color:var(--ba-accent)}",
       ".ba-adv{display:none;margin-top:8px}",
@@ -2004,18 +2592,17 @@
       });
     master.querySelector("input").id = "ba-master";
 
-    // Contextual boost
-    const boost = document.createElement("button");
-    boost.id = "ba-boost";
-    boost.className = "ba-boost";
-    boost.type = "button";
-    boost.dataset.i18n = "boost";
-    boost.textContent = t("boost");
-    boost.addEventListener("click", function () {
-      saveConfig(Object.assign({}, config, { mode: "force" }));
-      recovery.avoidHost = currentVideoHost();
+    // Contextual action: one race now, for the fragment the player is on. It
+    // follows the same rule as an automatic race and never saves anything.
+    const retestButton = document.createElement("button");
+    retestButton.id = "ba-retest";
+    retestButton.className = "ba-retest";
+    retestButton.type = "button";
+    retestButton.dataset.i18n = "retest";
+    retestButton.textContent = t("retest");
+    retestButton.addEventListener("click", function () {
+      retest();
       renderStatus();
-      root.location.reload();
     });
 
     // Advanced toggle (pinned at panel bottom) + section. Keeping the toggle as
@@ -2039,8 +2626,12 @@
     ], config.selection, function (value) {
       saveConfig(Object.assign({}, config, { selection: value }));
       syncHostControls();
+      renderStatus();
     });
 
+    // What the fixed server is used for. In auto mode the routing engine picks
+    // healthy hosts from measurements, so neither this nor the Akamai rewrite
+    // applies there and both rows are hidden.
     const mode = createSelect([
       { value: "bad-only", key: "modeBad" },
       { value: "force", key: "modeForce" }
@@ -2048,6 +2639,11 @@
       saveConfig(Object.assign({}, config, { mode: value }));
       renderStatus();
     });
+    const modeField = createField("fWhen", mode);
+    const akamaiRow = createSwitchRow("akamaiTitle", "akamaiNote",
+      config.rewriteAkamai, function (checked) {
+        saveConfig(Object.assign({}, config, { rewriteAkamai: checked }));
+      });
 
     const hostInput = document.createElement("input");
     hostInput.type = "text";
@@ -2078,6 +2674,8 @@
       hostInput.value = config.pcdnHost;
       fixedHostField.hidden = !fixed;
       customHostField.hidden = !fixed || listed;
+      modeField.hidden = !fixed;
+      akamaiRow.hidden = !fixed;
     }
     syncHostControls();
 
@@ -2118,11 +2716,6 @@
         saveConfig(Object.assign({}, config, { stallRecovery: checked }));
       });
 
-    const akamaiRow = createSwitchRow("akamaiTitle", "akamaiNote",
-      config.rewriteAkamai, function (checked) {
-        saveConfig(Object.assign({}, config, { rewriteAkamai: checked }));
-      });
-
     const p2pRow = createSwitchRow("p2pTitle", "p2pNote",
       config.p2pGuard, function (checked) {
         saveConfig(Object.assign({}, config, { p2pGuard: checked }));
@@ -2160,7 +2753,7 @@
     adv.appendChild(createField("fServer", selection));
     adv.appendChild(fixedHostField);
     adv.appendChild(customHostField);
-    adv.appendChild(createField("fWhen", mode));
+    adv.appendChild(modeField);
     adv.appendChild(createField("fMcdn", mcdn));
     adv.appendChild(portRow);
     adv.appendChild(stallRow);
@@ -2176,7 +2769,7 @@
     body.appendChild(hero);
     body.appendChild(speedCard);
     body.appendChild(master);
-    body.appendChild(boost);
+    body.appendChild(retestButton);
     body.appendChild(adv);
 
     panel.appendChild(body);
@@ -2257,11 +2850,11 @@
     setConfig: function (next) { saveConfig(Object.assign({}, config, next || {})); renderStatus(); applyTheme(); return this.getConfig(); },
     getStats: function () { return JSON.parse(JSON.stringify(state)); },
     getDiagnostics: function () { return buildDiagnostics(); },
-    rewriteUrl: function (url) { return core.rewriteUrl(url, config); }
+    rewriteUrl: function (url) { return core.rewriteUrl(url, rewriteConfig()); },
+    retest: function () { const started = retest(); renderStatus(); return started; }
   };
 
-  const bootRanking = loadRanking();
-  applyRanking(bootRanking && bootRanking.ranking);
+  dropLegacyRankings();
   patchJsonParse();
   patchFetch();
   patchXHR();
