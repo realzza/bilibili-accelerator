@@ -219,6 +219,34 @@ test("raceVerdict switches only to a host that is clearly faster", () => {
   assert.equal(routing.raceVerdict([{ host: AKAM, ok: false }], 0, 786432).switchTo, null);
 });
 
+test("a stuck fragment moves the video only when the winner beats the host's own record", () => {
+  // From a real session: a mainland mirror delivering ~15 Mbps hung on one
+  // fragment; the winner took 2.2 s for 768 KB on a fresh connection.
+  const results = [{ host: TFHW, ok: true, ms: 2221, bytes: 786432 }, { host: HW, ok: false, ms: 1751, bytes: 0 }];
+  const once = routing.stuckRaceVerdict(results, 0, 15e6, 0, 786432);
+  assert.equal(once.switchTo, null, "one hang on a host that keeps up is a bad connection");
+  assert.equal(once.retryOn, TFHW, "but the fragment itself goes to the winner");
+  assert.equal(once.hostRateBps, 15e6);
+
+  const again = routing.stuckRaceVerdict(results, 0, 15e6, 1, 786432);
+  assert.equal(again.switchTo, TFHW, "a host that failed or hung within the window gets no credit");
+  assert.equal(again.retryOn, null);
+  assert.equal(again.hostRateBps, 0);
+
+  const unknown = routing.stuckRaceVerdict(results, 0, null, 0, 786432);
+  assert.equal(unknown.switchTo, TFHW, "with nothing measured yet, the stuck request is all there is");
+
+  // A slow fragment at 2 Mbps: a 2.2 s winner is no better for it, so neither moves.
+  const slow = routing.stuckRaceVerdict(results, 2e6, 15e6, 0, 786432);
+  assert.equal(slow.switchTo, null);
+  assert.equal(slow.retryOn, null);
+
+  // A winner clearly faster than the host's record takes the video.
+  const fast = routing.stuckRaceVerdict([{ host: AKAM, ok: true, ms: 200, bytes: 786432 }], 0, 15e6, 0, 786432);
+  assert.equal(fast.switchTo, AKAM);
+  assert.equal(fast.retryOn, null);
+});
+
 test("cooldowns double after each switch and after each race that changed nothing", () => {
   assert.equal(routing.nextCooldown("switch", 1), 10000);
   assert.equal(routing.nextCooldown("switch", 3), 40000);

@@ -286,6 +286,73 @@ test("a slow first fragment races the same bytes, and the winner takes the rest 
   assert.equal(hostOf(audio.url), ALI, "audio follows the video");
 });
 
+// Three fragments at 40 Mbps from the assigned host, then a nearly empty
+// buffer and a fragment that gets no first byte.
+async function hangAfterKeepingUp(env, range, onTimeout) {
+  let start = 0;
+  for (let i = 0; i < 3; i += 1) {
+    const x = env.playerRequest(cosovUrl(FILE), start + "-" + (start + 1499999));
+    await env.advance(300);
+    x.finish(206, 1500000);
+    start += 1500000;
+  }
+  env.video.ahead = 1;
+  const x = env.playerRequest(cosovUrl(FILE), range, onTimeout);
+  await env.advance(1500);   // no first byte after a second: stuck, and a race starts
+  return x;
+}
+
+test("one hung fragment on a host that keeps up is retried on the winner, and the video stays", async () => {
+  const env = loadEngine({ race: { [ALI]: { ms: 900, status: 206 }, [AKAM]: { ms: 1000, status: 206 } } });
+  env.parse(playurl());
+  let retry = null;
+  const x = await hangAfterKeepingUp(env, "4500000-5999999", () => {
+    retry = env.playerRequest(akamUrl(FILE), "4500000-5999999");
+  });
+  assert.deepEqual(env.fetches.map((f) => f.host), [AKAM, ALI]);
+  await env.advance(1000);
+
+  let diag = env.api.getDiagnostics();
+  assert.equal(diag.counters.switches, 0, "0.9 s for 768 KB is no match for 40 Mbps");
+  assert.equal(diag.session.races[0].switchTo, null);
+  assert.equal(diag.session.races[0].retryOn, ALI);
+  assert.equal(diag.session.races[0].stuckMbps, 0);
+  assert.equal(x.timeoutCalls, 1, "the stuck request still ended through the player's timeout path");
+  assert.equal(diag.synthetic.used, 1);
+  assert.ok(retry, "the player retried the range");
+  assert.equal(hostOf(retry.url), ALI, "on the winner, not the next URL in its own list");
+
+  await env.advance(3100);
+  const next = env.playerRequest(akamUrl(FILE), "6000000-7499999");
+  assert.equal(hostOf(next.url), COSOV, "the player moved on to its backup URL; the video stays on its host");
+  assert.ok(next.url.includes("os=cosovbv"), "through the URL Bilibili issued for it");
+  diag = env.api.getDiagnostics();
+  assert.equal(diag.session.activeHost, COSOV);
+  assert.equal(diag.counters.switches, 0);
+});
+
+test("a second hang within the error window moves the video", async () => {
+  const env = loadEngine({ race: { [ALI]: { ms: 900, status: 206 }, [AKAM]: { ms: 1000, status: 206 } } });
+  env.parse(playurl());
+  await hangAfterKeepingUp(env, "4500000-5999999", () => env.playerRequest(akamUrl(FILE), "4500000-5999999"));
+  await env.advance(1000);
+  assert.equal(env.api.getDiagnostics().counters.switches, 0);
+
+  await env.advance(3100);
+  let retry = null;
+  env.playerRequest(akamUrl(FILE), "6000000-7499999", () => {
+    retry = env.playerRequest(akamUrl(FILE), "6000000-7499999");
+  });
+  await env.advance(1500);
+  await env.advance(1000);
+  const diag = env.api.getDiagnostics();
+  assert.equal(diag.counters.switches, 1, "the host hung twice in 30 s");
+  assert.equal(diag.session.activeHost, ALI);
+  assert.equal(diag.session.switches[0].trigger, "stuck");
+  assert.equal(diag.session.switches[0].beforeMbps, 0, "with no credit for its earlier rate");
+  assert.equal(hostOf(retry.url), ALI);
+});
+
 test("Akamai is reached only through the URL Bilibili issued for it", async () => {
   const env = loadEngine({ race: { [AKAM]: { ms: 500, status: 206 }, [ALI]: { ms: 2500, status: 206 } } });
   env.parse(playurl());

@@ -449,6 +449,25 @@
     };
   }
 
+  // A race for a stuck fragment answers two questions. The fragment goes to
+  // the winner if the winner beats the stuck request. The video goes to the
+  // winner only if it also beats what the current host has been delivering:
+  // one request that hangs on a host that keeps up is a bad connection, not a
+  // bad host (about one connection in ten to a mainland mirror takes 3 to 6 s
+  // to set up). A host that already failed or hung within the error window
+  // gets no credit for its past rate.
+  //   returns raceVerdict's fields for the video, plus hostRateBps, the rate
+  //   the video decision used, and retryOn: the host that takes just the stuck
+  //   fragment while the video stays.
+  function stuckRaceVerdict(results, stuckRateBps, sustainedBps, recentErrors, raceBytes) {
+    const fragment = raceVerdict(results, stuckRateBps, raceBytes);
+    const hostRateBps = recentErrors > 0 ? (stuckRateBps || 0) : Math.max(stuckRateBps || 0, sustainedBps || 0);
+    const video = raceVerdict(results, hostRateBps, raceBytes);
+    video.hostRateBps = hostRateBps;
+    video.retryOn = !video.switchTo && fragment.switchTo ? fragment.switchTo : null;
+    return video;
+  }
+
   // Time before the next race: after a switch it doubles with each one; after
   // a race that changed nothing it doubles too, up to two minutes.
   function nextCooldown(kind, switches, previousMs) {
@@ -526,6 +545,7 @@
     evaluate,
     pickChallengers,
     raceVerdict,
+    stuckRaceVerdict,
     nextCooldown,
     historyScore,
     recentlyFailed,

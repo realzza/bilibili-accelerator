@@ -736,7 +736,9 @@
   // does while it relays a file it hasn't cached. So the engine watches the
   // player's own fragment downloads; when the host can't keep up it races two
   // alternatives on the bytes the player needs next, routes the rest of the
-  // video to the winner, and stays there.
+  // video to the winner, and stays there. A single fragment that hangs on a
+  // host that has been keeping up is retried on the winner, and the video
+  // stays put.
 
   const engine = {
     sessions: new Map(),        // cid -> session, one per video on the page
@@ -781,6 +783,7 @@
       active: null,          // where the engine routes; null leaves the player's URLs alone
       fallback: null,
       avoid: null,
+      detour: null,          // { host, until }: a stuck fragment's retry, while the video stays
       lastVideoKey: null,
       ends: {},              // file -> end of the last completed video range
       hosts: {},
@@ -984,11 +987,17 @@
     }
     const key = routing.fileKey(url);
     const session = key ? engine.sessions.get(routing.cidOf(key)) : null;
-    if (!session || !session.active) {
+    const rep = session ? session.table.reps[key] : null;
+    if (!rep) {
       return url;
     }
-    const rep = session.table.reps[key];
-    if (!rep) {
+    // A stuck fragment is being retried on the host that won its race. The
+    // player sends the retry to the next URL in its own list, so for these few
+    // seconds everything goes there, whatever host the request names.
+    if (session.detour && nowMs() < session.detour.until) {
+      return routing.urlFor(rep, session.detour.host) || url;
+    }
+    if (!session.active) {
       return url;
     }
     let target = session.active;
@@ -1042,7 +1051,9 @@
           now,
           requiredBps: session.requiredBps,
           bufferAheadS: bufferAhead(),
-          inflight: session.inflight.filter(function (r) { return r.kind === "video" && !r.handed; })
+          // Only requests on the host the video is on say anything about it. A
+          // retry sent elsewhere for a moment is left to the player's own timeouts.
+          inflight: session.inflight.filter(function (r) { return r.kind === "video" && !r.handed && r.host === host; })
             .map(function (r) {
               return {
                 total: r.total, loaded: r.loaded, startedAt: r.startedAt, firstByteAt: r.firstByteAt,
@@ -1052,7 +1063,7 @@
           estimateBps: stats.est.estimate(),
           measuredBytes: stats.est.bytes(),
           measuredMs: stats.est.ms(),
-          recentErrors: stats.errors.filter(function (t) { return now - t < routing.ERROR_WINDOW_MS; }).length
+          recentErrors: recentErrors(stats, now)
         });
         if (verdict) {
           startRace(session, verdict.trigger, verdict.req ? verdict.req.ref : null);
@@ -1060,6 +1071,10 @@
       }
     }
     refreshStatus();
+  }
+
+  function recentErrors(stats, now) {
+    return stats.errors.filter(function (t) { return now - t < routing.ERROR_WINDOW_MS; }).length;
   }
 
   function startRace(session, trigger, stuckReq) {
@@ -1280,11 +1295,21 @@
     const wall = Date.now();
     const now = nowMs();
     learnFromRace(session, results, false);
+    const challengers = results.filter(function (r) { return !r.incumbent; });
     const incumbent = results.filter(function (r) { return r.incumbent && r.ok; })[0];
-    const baseRate = incumbent ? incumbent.bytes * 8000 / Math.max(1, incumbent.ms) : currentRate;
-    const verdict = routing.raceVerdict(results.filter(function (r) { return !r.incumbent; }), baseRate, raceBytes);
+    let baseRate = incumbent ? incumbent.bytes * 8000 / Math.max(1, incumbent.ms) : currentRate;
+    let verdict;
+    if (trigger === "stuck" && !incumbent) {
+      const stats = hostStats(session, current);
+      verdict = routing.stuckRaceVerdict(challengers, currentRate, stats.est.estimate(),
+        recentErrors(stats, now), raceBytes);
+      baseRate = verdict.hostRateBps;
+    } else {
+      verdict = routing.raceVerdict(challengers, baseRate, raceBytes);
+    }
+    const retryOn = verdict.retryOn || null;
     results.forEach(function (r) {
-      if (!r.incumbent && r.host !== verdict.switchTo) {
+      if (!r.incumbent && r.host !== verdict.switchTo && r.host !== retryOn) {
         session.lost[r.host] = wall;
       }
     });
@@ -1293,13 +1318,15 @@
       trigger,
       from: current,
       currentMbps: round1(baseRate / 1e6),
+      stuckMbps: trigger === "stuck" ? round1(currentRate / 1e6) : undefined,
       contenders: results.map(function (r) {
         return {
           host: r.host, ok: r.ok, ms: Math.round(r.ms), kb: Math.round(r.bytes / 1024),
           status: r.status, incumbent: r.incumbent || undefined, cut: r.cut || undefined
         };
       }),
-      switchTo: verdict.switchTo
+      switchTo: verdict.switchTo,
+      retryOn: retryOn || undefined
     });
     if (session.races.length > 10) {
       session.races.shift();
@@ -1318,6 +1345,7 @@
       session.active = verdict.switchTo;
       session.fallback = verdict.runnerUp && verdict.runnerUp !== verdict.switchTo ? verdict.runnerUp : null;
       session.avoid = null;
+      session.detour = null;
       session.verdict = null;
       session.switches.push({
         at: new Date(wall).toISOString(), from: current, to: verdict.switchTo, trigger,
@@ -1329,6 +1357,11 @@
       if (trigger === "stuck" && stuckReq) {
         handTimeout(stuckReq);
       }
+    } else if (retryOn && stuckReq && retryStuck(session, current, retryOn, stuckReq)) {
+      // The video stays and only this fragment moves. The next race may
+      // start once the retry is under way, and by then the hang counts
+      // against the host.
+      session.nextRaceAt = now + AVOID_MS;
     } else {
       session.cooldownMs = routing.nextCooldown("none", 0, session.cooldownMs);
       session.nextRaceAt = now + session.cooldownMs;
@@ -1373,6 +1406,30 @@
     engine.synthetic.pending = { slot: req.key + "|" + req.start, deadline: nowMs() + RETRY_WINDOW_MS };
     try { onTimeout.call(xhr, progressEvent("timeout")); } catch (_) {}
     try { onEnd.call(xhr, progressEvent("loadend")); } catch (_) {}
+    return true;
+  }
+
+  // Retry one stuck fragment on another host and leave the video where it is.
+  // After a timeout the player moves to the next URL in its list for good, so
+  // leaving the video where it is means routing it there from now on. The
+  // detour goes in before the timeout is handed over, because the player may
+  // open its retry from inside the timeout handler. The hang counts against
+  // its host like a failed request, so a second one within the error window
+  // moves the video.
+  function retryStuck(session, current, host, req) {
+    const pinned = !session.active;
+    if (pinned) {
+      session.active = current;
+    }
+    session.detour = { host, until: nowMs() + AVOID_MS };
+    if (!handTimeout(req)) {
+      session.detour = null;
+      if (pinned) {
+        session.active = null;
+      }
+      return false;
+    }
+    hostStats(session, req.host || current).errors.push(nowMs());
     return true;
   }
 
@@ -2146,7 +2203,8 @@
       host,
       rateBps,
       needBps: session.requiredBps,
-      switched: !!session.active && session.active !== session.assigned
+      // A retry can pin the video to the host it is on without switching it.
+      switched: session.switches.length > 0 && !!session.active && session.active !== session.assigned
     };
     const short = rateBps !== null && session.requiredBps > 0 && rateBps < 1.2 * session.requiredBps;
     if (session.racing) {

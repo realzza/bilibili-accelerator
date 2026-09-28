@@ -187,7 +187,7 @@ There is no probe at page load and no stored ranking.
 
 | trigger | condition | why |
 | --- | --- | --- |
-| stuck fragment | the video fragment in flight will finish after the buffer runs out, with 2 s to spare, and has run for at least 0.5 s or 128 KB | a stall is about to happen or already has |
+| stuck fragment | a video fragment in flight on the video's host will finish after the buffer runs out, with 2 s to spare, and has run for at least 0.5 s or 128 KB; or it has had no first byte for 1 s with under 3 s buffered | a stall is about to happen or already has |
 | sustained shortfall | goodput over the last 4 MB or 8 s of transfer is under 1.2× the required rate, and less than 30 s is buffered | the buffer can't grow on this host |
 | errors | two failed requests on the active host within 30 s | the host is failing, not slow |
 
@@ -201,6 +201,8 @@ Before any history exists every host ties, and ties go to mainland mirrors. Bili
 
 The winner becomes the active host if it delivered the race bytes in at most two-thirds of the time the current host needs for the same bytes at its present rate. Otherwise nothing changes and the result goes into history. The race runs on a fresh connection and understates a mainland mirror's warm speed, so it isn't asked to prove the new host keeps up; the new host's own traffic answers that afterwards. The host being left rests for a minute like any loser, and the rate it was delivering goes into history.
 
+For a stuck fragment, the current host's present rate is the better of the stuck request's rate and the host's estimate from its completed fragments, unless the host already failed or hung within the last 30 s. One request that hangs on a host that has been keeping up is a bad connection, not a bad host: about one connection in ten to a mainland mirror takes 3 to 6 s to set up. The fragment itself still goes to the winner whenever the winner beats the stuck request; only the video stays (see [Making a switch take effect](#making-a-switch-take-effect)).
+
 A manual test before anything has been measured races the current host as well. It is then decided when the current host finishes, or when it has taken 1.5 times the winner's time without finishing, which is exactly the margin a switch needs.
 
 ### Making a switch take effect
@@ -211,7 +213,9 @@ If the trigger was a stuck fragment, and that request is a first attempt (a rang
 
 If `ontimeout` isn't a function on the request, as with a future player that uses `fetch` or `addEventListener`, no request is ended early. The switch then takes effect when the player's own timeout fires or the fragment completes.
 
-A request that fails on the active host is routed away from it on retry, to the runner-up of the last race or else the next candidate by history. Without this, taking over routing would disable the player's failover the same way force mode does now.
+When a race moves only the stuck fragment, the fragment gets the same synthetic timeout, and for the next 3 s every request of the session goes to the winner: the player sends its retry to the next URL in its own list, which may not be the winner. After that the video is routed to the host it was on. The player keeps using its next URL after a timeout, so without this the video would move anyway. The hang counts as an error on that host, so a second hang or failure within 30 s moves the video.
+
+A request that fails on the active host is routed away from it on retry, to the runner-up of the last race or else the next candidate by history. Without this, taking over routing would disable the player's failover the same way force mode does now. A retry sent elsewhere like this is not watched for being stuck: only requests on the video's own host trigger a race.
 
 ### Staying put
 
@@ -335,6 +339,8 @@ The maintainer delegated these on 2026-09-27. Each follows from the measurements
 Where the code refines the proposal, and why:
 
 - **Races are decided at the first finisher**, not after a grace period. In the first real-page run the 300 ms grace was half the time between detecting a stuck fragment and the player's retry completing.
+- **A stuck fragment moves the video only against the host's own record** (see [Choosing](#choosing-the-next-host)). In a Chromium run on a cold 4K video, `mirrorcos` had delivered 41 MB at 16.8 Mbps when one fragment got no first byte with under 3 s buffered. The stuck request's rate was 0, so any finisher won, and the video moved to `tf-all-tx`, which had taken 2.2 s for 768 KB: a third switch in a minute, for one bad connection. The fragment still needed rescuing; the video didn't need to move.
+- **Stuck detection looks only at requests on the video's host.** A retry sent to another host for a moment, after a failure or a hang, had been judged as if it were the video's host being slow.
 - **Unknown hosts score as the lower median and ties go to mainland mirrors** (see [Choosing](#choosing-the-next-host)). The pool's order would otherwise have made `mirroraliov`, the worst host for US viewers, every new viewer's first choice.
 - **A host counts as measured only after 128 KB.** The player fetches init and index segments of a few KB from both issued hosts; counting those as measurements kept Akamai out of the first challenger slot.
 - **The engine ticks only after a video fragment has been requested, only on player pages, and never in a hidden tab.** Home-page hover previews load playurls too.
@@ -343,7 +349,7 @@ Where the code refines the proposal, and why:
 
 ## Validation so far
 
-- `src/core/routing.js` holds the decisions as pure functions (19 tests in `test/routing.test.js`). `test/v5-engine.test.js` drives the page script end to end with an XHR shaped like the player's loader, a fake clock, a `<video>` with a buffer, and races (17 tests). The suite runs 113 tests.
+- `src/core/routing.js` holds the decisions as pure functions (20 tests in `test/routing.test.js`). `test/v5-engine.test.js` drives the page script end to end with an XHR shaped like the player's loader, a fake clock, a `<video>` with a buffer, and races (19 tests). The suite runs 116 tests.
 - **Chromium, real player, logged in, highest quality**, with the assigned host made slow by pointing the page's playurl at `mirroraliov` (1–2 Mbps for any file from this network). Two runs on two cold videos:
 
 | | run 1 (1080P, 1.6–2 MB fragments) | run 2 (720P, 1–1.7 MB fragments) |
