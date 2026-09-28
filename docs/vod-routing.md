@@ -1,6 +1,6 @@
 # VOD host selection and switching
 
-> Status: proposal for review, 2026-09-27. No code changes yet.
+> Status: implemented on this branch (0.5.0), 2026-09-27. The maintainer delegated the open decisions; they are recorded under [Decisions](#decisions). Awaiting code review and testing in Safari.
 >
 > Measured from the maintainer's network (US West, Ziply Fiber, no iCloud Private Relay) with Safari 27 running v0.4.1, and with Chromium logged in as 大会员 at the highest quality each video offers. Host speed changes with the hour in China, so times are given in PDT with Beijing time next to them. A measurement loop is running through Beijing's evening peak; its results will be added here before the design is final.
 
@@ -174,16 +174,12 @@ A session is one video on one page: a playurl payload for one `cid`, plus any la
 
 **Buffer.** `video.buffered` ahead of `currentTime`.
 
-**Race**, only when a trigger fires. Fetch the first 768 KB of the fragment in flight (all of it if shorter), or of the bytes right after the last completed fragment if nothing is in flight, from two challengers in parallel, with the page's native `fetch` so the request carries the page's `Referer`. The first to finish wins. Each race costs at most 1.5 MB. The requests use `credentials: "omit"`, like the player's own, which should let the browser reuse the connection for the player's retry; the winner's edge will also hold the start of the range by then. The race is timed from request start to completion, which is what the player pays, not from the headers.
+**Race**, only when a trigger fires. Fetch the first 768 KB of the fragment in flight (all of it if shorter), or of the bytes right after the last completed fragment if nothing is in flight, from two challengers in parallel, with the page's native `fetch` so the request carries the page's `Referer`. The race is decided as soon as its outcome is known: when the first challenger finishes. Contenders still running get another second so their numbers reach history, then are cancelled; one that finishes in that second becomes the fallback. Each race costs at most 1.5 MB. The requests use `credentials: "omit"`, like the player's own, which should let the browser reuse the connection for the player's retry; the winner's edge will also hold the start of the range by then. The race is timed from request start to completion, which is what the player pays, not from the headers.
 
 ### Initial selection
 
-A session starts native: requests go wherever the player sends them, with nothing rewritten. There are two exceptions.
-
-- If the base URL is PCDN or MCDN, `classify()` still applies. PCDN goes to the first issued UPOS host rather than to a ranking; MCDN follows `mcdnStrategy` as before.
-- If history says the assigned host was replaced in at least 6 of this viewer's last 10 sessions, the first video fragment is raced at once.
-
-Otherwise the first real fragment decides. A race starts if it has no first byte after 1 s, or if after 0.5 s of transfer it is arriving at less than 1.3× the required rate with more than a second still to go. On a popular video the assigned edge answers within 30–150 ms and nothing happens. On a cold one the race starts after about a second and takes 0.3–1.5 s, close to when the player's own 2 s deadline would fire, and it picks a measured host instead of simply the next URL. If the player's deadline fires first, its retry goes out as it does today, and the race result applies from the next request.
+A session starts native: requests go wherever the player sends them, with nothing rewritten. The one exception is a PCDN or MCDN base URL: if Bilibili issued a proper CDN URL as its backup, that URL is used as issued; otherwise `classify()` rewrites it as before (PCDN to the default target, MCDN by `mcdnStrategy`).
+The first real fragment decides. A race starts if it has no first byte after 1 s, or if after 0.5 s of transfer it is arriving at less than 1.3× the required rate with more than a second still to go. On a popular video the assigned edge answers within 30–150 ms and nothing happens. On a cold one the race starts after about a second and takes 0.3–1.5 s, close to when the player's own 2 s deadline would fire, and it picks a measured host instead of simply the next URL. If the player's deadline fires first, its retry goes out as it does today, and the race result applies from the next request.
 
 There is no probe at page load and no stored ranking.
 
@@ -199,9 +195,13 @@ Seeks, startup and `waiting` events are not triggers by themselves. Stalls are r
 
 ### Choosing the next host
 
-The challengers are the two best candidates by history that haven't failed in this session. The other issued host (`mirrorakam` or `mirrorcosov`) is always one of them until it has been measured in this session, since it is the player's own alternative and is sometimes the best. One challenger in five is drawn at random from the rest, so history keeps learning.
+The challengers are the two best candidates by history that haven't failed twice in this session or lost a race in the last minute. The other issued host (`mirrorakam` or `mirrorcosov`) is always one of them until it has carried at least 128 KB in this session, since it is the player's own alternative and is sometimes the best. A host with no history counts as the lower median of the measured ones, so it never outranks a host already measured as good, and hosts that failed within the hour go last. One challenger in five is drawn at random from the rest, so history keeps learning.
 
-The winner becomes the active host if it delivered the race bytes in at most two-thirds of the time the current host needs for the same bytes at its present rate. Otherwise nothing changes and the result goes into history. The race runs on a fresh connection and understates a mainland mirror's warm speed, so it isn't asked to prove the new host keeps up; the new host's own traffic answers that afterwards.
+Before any history exists every host ties, and ties go to mainland mirrors. Bilibili assigns one overseas edge per region, so the overseas mirrors it did not issue see little of that region's traffic and are cold, while a mainland mirror sits next to origin and holds every file. That is a statement about Bilibili's assignment, not about where the viewer is.
+
+The winner becomes the active host if it delivered the race bytes in at most two-thirds of the time the current host needs for the same bytes at its present rate. Otherwise nothing changes and the result goes into history. The race runs on a fresh connection and understates a mainland mirror's warm speed, so it isn't asked to prove the new host keeps up; the new host's own traffic answers that afterwards. The host being left rests for a minute like any loser, and the rate it was delivering goes into history.
+
+A manual test before anything has been measured races the current host as well. It is then decided when the current host finishes, or when it has taken 1.5 times the winner's time without finishing, which is exactly the margin a switch needs.
 
 ### Making a switch take effect
 
@@ -240,9 +240,9 @@ History only orders challengers and decides whether to race the first fragment. 
 
 - **Selection: auto** runs the engine above. `mode` has no effect in auto and its 何时 row is hidden, the same treatment PR #35 gave the fixed-host picker. A saved `mode: "force"` stays in storage and applies again if the viewer picks fixed.
 - **Selection: fixed** is unchanged: bad-only replaces only PCDN with the fixed host, force sends everything to it, and there is no engine.
-- **自动恢复 / Auto-recover** turns switching on and off. Off, auto keeps the PCDN handling and nothing else.
+- **自动切换线路 / Auto-switch servers** (was 自动恢复 / Auto-recover) turns switching on and off. Off, auto keeps the PCDN handling and keeps measuring, but races only when the viewer presses 测试其他线路.
 - **改写 Akamai** applies to fixed selection only. In auto, the issued Akamai URL is a candidate like any other and is measured.
-- **还在卡？再加把劲** goes. It saved force mode for good after one stall. If a manual action is wanted, it should be a one-shot 重新选择线路 that starts a race (see [Decisions](#decisions-for-review)).
+- **还在卡？再加把劲** goes. It saved force mode for good after one stall and reloaded the page. In its place, 测试其他线路 starts one race and saves nothing (see [Decisions](#decisions)).
 
 Removed from the auto path: `scheduleProbe` and `probeHost`, the `biliAccelerator.rank.*` cache, `rotateTarget` and `rotateCursor`, `recovery.avoidHost`, `enrichBackups`, and the use of `config.pcdnHost` as a runtime target. A schema bump deletes the old rank keys. `rankHosts` stays in core for the live-room work, which plans to rank race results with it.
 
@@ -250,16 +250,26 @@ Removed from the auto path: `scheduleProbe` and `probeHost`, the `biliAccelerato
 
 The report gains a `session` block that carries no URL beyond a bare host: the issued hosts per representation, the required rate, per host the requests, bytes, goodput and median first-byte time, every race (challengers, bytes, times, winner), every switch (from, to, trigger, rates before and after), synthetic timeouts, and whether routing was released.
 
-The panel should say what happened:
+The panel says what was measured and what was done:
 
 | state | 中文 | English |
 | --- | --- | --- |
-| native, keeping up | 正在使用 B 站分配的线路 · 12.3 Mbps（需要 4.1） | On Bilibili's assigned server · 12.3 Mbps (needs 4.1) |
-| switched | 已切换到 mirrorhw · 1.1 → 18 Mbps | Switched to mirrorhw · 1.1 → 18 Mbps |
-| racing | 当前线路速度不足，正在测试其他线路 | Current server too slow · testing others |
-| nothing better | 已测试 3 条线路，当前线路最快 | Tested 3 servers · current one is fastest |
+| on the assigned host | 播放流畅 · B 站分配的线路 · 海外 · 腾讯云 · 32.4 Mbps | Playing smoothly · Bilibili's assigned server · Overseas · Tencent Cloud · 32.4 Mbps |
+| switched | 播放流畅 · 已切换到 大陆 · 阿里云 · 0.9 → 16.5 Mbps | Playing smoothly · Switched to Mainland · Alibaba Cloud · 0.9 → 16.5 Mbps |
+| racing | 正在测试其他线路… · 当前片段下载过慢 | Testing other servers… · This part of the video is downloading too slowly |
+| nothing better | 网络较慢 · 已比较 3 条线路，当前线路最快 · 2.1 Mbps | Slow network · Compared 3 servers; this one is fastest · 2.1 Mbps |
+| stalled, host fine | 缓冲中 · 线路速度正常，等待播放器缓冲 | Buffering · The server is keeping up; waiting for the player |
 
-The counter counts switches, not rewritten URLs; the field report's page showed 已修复 1594 个慢连接.
+Hosts are named by region and cloud, not by hostname. The counter under the status counts switches on this video (本视频切换了 1 次线路), or failing that the P2P nodes kept out of playback; the field report's page had shown 已修复 1594 个慢连接, which counted rewritten URLs.
+
+### What the viewer sees
+
+- **Popular videos behave as if the extension were off.** Nothing is probed at page load and nothing is rewritten, so startup is exactly the player's own. The first fragment from the assigned edge shows it is fast and the engine never races.
+- **A cold video recovers in about two seconds instead of stalling.** On a real player with a slow assigned host: the stuck fragment was noticed 0.9 s after it started, the race took 0.7 s, and the player's retry finished on the winner half a second later. Left alone, that fragment needed about 15 s.
+- **No flapping.** A host that works is kept for the rest of the video. A race that finds nothing clearly faster changes nothing and waits longer before the next one, so a slow network produces one clear message, not a stream of switches.
+- **Nothing reloads and nothing is saved behind the viewer's back.** Switching happens between two fragment requests. Settings change only when the viewer changes them.
+- **One button, only when it can help.** 测试其他线路 appears after a stall or when the server measures short. Its result replaces the status line for a few seconds, including "this one is already fastest".
+- **Fewer settings to misread.** In auto mode the rows that no longer apply (适用范围, 改写 Akamai) are hidden. 自动恢复 is renamed 自动切换线路 and says what it does.
 
 ### Failure modes
 
@@ -284,17 +294,17 @@ The counter counts switches, not rewritten URLs; the field report's page showed 
 
 ### Phase 1: design review (this PR)
 
-Approval of this document and of the decisions below.
+Done: the open decisions were delegated and are recorded above.
 
-### Phase 2: implementation, on this PR
+### Phase 2: implementation, on this PR (done)
 
 - core: the session table (representations, issued URLs, the mapping), the goodput and in-flight estimates, trigger evaluation, race selection with hysteresis, history decay. All pure and unit-tested, as `rankHosts` is today.
 - page: `setRequestHeader` and `progress` in the XHR hook, routing by session, the race, the synthetic timeout, the settings and panel changes, the diagnostics block, the schema bump.
 - tests, in the vm harness (`test/v2-page.test.js`): native until a trigger; one race per trigger; Akamai reached through its issued URL and mirrors through host swaps; a retry routed away from a failing host; at most one synthetic timeout per range and four switches per session; nothing while hidden; nothing written to the saved config; fixed selection unchanged; PCDN and MCDN unchanged; live pages untouched; no URL in the diagnostics.
 
-### Phase 3: validation
+### Phase 3: validation (in progress)
 
-Chromium through the iframe harness, and Safari with the build installed. Logged in, highest quality. Two popular and two cold videos, five minutes each, off-peak and between 20:00 and 23:00 Beijing (05:00–08:00 PDT), against the extension turned off and against v0.4.1 on default settings.
+Chromium through the iframe harness (two runs above), and Safari with the build installed. Logged in, highest quality. Two popular and two cold videos, five minutes each, off-peak and between 20:00 and 23:00 Beijing (05:00–08:00 PDT), against the extension turned off and against v0.4.1 on default settings.
 
 Acceptance:
 
@@ -306,13 +316,44 @@ Acceptance:
 
 Then 0.5.0.
 
-## Decisions for review
+## Decisions
 
-1. **`mode` under auto.** Proposed: ignored and hidden, kept for fixed selection.
-2. **The boost button.** Proposed: removed. The alternative is a one-shot 重新选择线路 that races now.
-3. **Synthetic timeouts.** Proposed: on, with the limits above. The conservative alternative routes only later requests and waits for the player's own timeout, which costs up to 5–10 s of stall per switch.
-4. **Racing the first fragment from history.** Proposed: on for viewers whose assigned host was replaced in at least 6 of their last 10 sessions. The alternative always waits for the first fragment to show a problem.
-5. **`rewriteAkamai` under auto.** Proposed: no effect, since the issued Akamai URL is measured like any other host.
+The maintainer delegated these on 2026-09-27. Each follows from the measurements above.
+
+1. **`mode` is ignored under auto and its row hidden; fixed selection keeps it.** Force plus auto was the configuration that did the most damage in the field report, and its purpose, getting off a mediocre assigned host, is what the engine now does with evidence. A saved `force` stays in storage and applies again under fixed selection, where "send everything to this server" is a meaningful request. The row is renamed 适用范围 with options 仅 P2P/PCDN 节点 and 所有视频请求, which is what it means there.
+2. **The boost button is replaced by 测试其他线路.** A viewer who sees stutter should have something to press that acts now and shows a result. The old button silently saved a permanent setting and reloaded the page, losing the playback position. The new one runs one race under the same rule as an automatic race, saves nothing, and appears only after a stall or when the server measures short. Manual tests are spaced ten seconds apart.
+3. **Synthetic timeouts are on, with a self-check.** They are verified on the real player in Chromium, and nothing in them is browser-specific beyond `abort()`. Because Safari is unverified, the page watches for the player's retry of the same range within 3 s after each one; if it doesn't come, synthetic timeouts are switched off for the page and the report records it. The worst case is one missed retry per page, after which switches apply to later requests only. Only a first attempt of a range is ever ended this way.
+4. **No history-driven race on the first fragment, for now.** The first-fragment check already catches a cold host within about a second, so the gain would be about a second on some starts, paid for with a race before there is any evidence. It can be added once field reports show startup is where time is lost. Host history is still kept; it orders challengers.
+5. **`rewriteAkamai` has no effect under auto and its row is hidden there.** The Akamai URL Bilibili issues is one of the two assigned hosts and was the fastest host for one cold video; rewriting it away, as the field report's config did, removed a good candidate. It keeps its meaning under fixed selection.
+
+## Implementation notes
+
+Where the code refines the proposal, and why:
+
+- **Races are decided at the first finisher**, not after a grace period. In the first real-page run the 300 ms grace was half the time between detecting a stuck fragment and the player's retry completing.
+- **Unknown hosts score as the lower median and ties go to mainland mirrors** (see [Choosing](#choosing-the-next-host)). The pool's order would otherwise have made `mirroraliov`, the worst host for US viewers, every new viewer's first choice.
+- **A host counts as measured only after 128 KB.** The player fetches init and index segments of a few KB from both issued hosts; counting those as measurements kept Akamai out of the first challenger slot.
+- **The engine ticks only after a video fragment has been requested, only on player pages, and never in a hidden tab.** Home-page hover previews load playurls too.
+- **The required rate only goes up within a video.** It is the highest video bitrate the player has requested, so auto quality can't hide a slow host by stepping down. A viewer who lowers the quality by hand is still judged against the higher one, which can cost an extra race; bounded by the cooldowns.
+- **Routing state lives in the page.** A schema bump (4) resets an auto config's saved `pcdnHost`, which 0.4.x rotation could leave pointing at any host, and the 0.4.x ranking caches are deleted at boot.
+
+## Validation so far
+
+- `src/core/routing.js` holds the decisions as pure functions (19 tests in `test/routing.test.js`). `test/v5-engine.test.js` drives the page script end to end with an XHR shaped like the player's loader, a fake clock, a `<video>` with a buffer, and races (17 tests). The suite runs 113 tests.
+- **Chromium, real player, logged in, highest quality**, with the assigned host made slow by pointing the page's playurl at `mirroraliov` (1–2 Mbps for any file from this network). Two runs on two cold videos:
+
+| | run 1 (1080P, 1.6–2 MB fragments) | run 2 (720P, 1–1.7 MB fragments) |
+| --- | --- | --- |
+| stuck fragment noticed after | ~1.9 s | 0.9 s |
+| race | `mirrorali` 768 KB in 272 ms, `tf-all-hw` cut | `mirrorali` 768 KB in 717 ms, Akamai still running |
+| player's retry on the winner | 1.66 MB in 282 ms | 1.65 MB in 529 ms |
+| after the switch | 22–47 Mbps per fragment, buffer 8.6 → 70 s in 8 s | 16.5 Mbps estimate, buffer 4 → 70 s in 24 s |
+| stalls after startup | none | none |
+| synthetic timeouts / retries seen | 1 / 1 | 1 / 1 |
+
+- Control: the first attempt at run 1 happened in a background tab, where the engine stands aside by design. With the same slow host, the player sat at a startup stall for about 13 s, fetching a 2 MB fragment at 2.1 Mbps.
+- On the same cold video with the real assignment (`mirrorcosov`, 4.6 Mbps against 3.2 needed, around 08:00 Beijing), the engine did not race, as intended.
+- Not yet: Safari with the build installed, and Beijing's evening peak.
 
 ## Reproducing
 
@@ -327,5 +368,5 @@ Neither script writes a URL or query string into its results.
 
 - One network, US West. Viewers in Japan, Southeast Asia or Europe may get other hosts assigned; history is what adapts to that.
 - Peak hours in China aren't in these tables yet. The loop that covers them is running.
-- The synthetic timeout is verified in Chromium only.
+- The synthetic timeout is verified in Chromium only; in Safari it is guarded by the retry self-check.
 - Several per-host numbers are single samples. They show large gaps, not calibrated thresholds. The 1.2×, 1.3× and two-thirds factors are starting points for Phase 3 to tune.
