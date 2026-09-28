@@ -115,18 +115,6 @@ test("mode off disables all rewriting", () => {
   assert.equal(detail.changed, false);
 });
 
-test("alternativesFor builds host-swapped backups excluding current host", () => {
-  const original = "https://upos-sz-mirrorcos.bilivideo.com/upgcxcode/v.m4s?abc=1";
-  const alts = core.alternativesFor(original, {}, [
-    "upos-sz-mirrorcos.bilivideo.com",
-    "upos-sz-mirrorali.bilivideo.com",
-    "upos-sz-mirrorhw.bilivideo.com"
-  ]);
-  assert.equal(alts.length, 2);
-  assert.ok(alts.every((u) => u.includes("/upgcxcode/v.m4s")));
-  assert.ok(!alts.some((u) => new URL(u).hostname === "upos-sz-mirrorcos.bilivideo.com"));
-});
-
 test("throughputMbps converts bytes over a window to megabits per second", () => {
   // 1,000,000 bytes in 1000 ms = 8 Mbps
   assert.equal(core.throughputMbps(1e6, 1000), 8);
@@ -263,12 +251,23 @@ test("migration keeps a host the user pinned in fixed mode", () => {
   assert.deepEqual(cfg.candidatePool, core.CANDIDATE_POOL.slice());
 });
 
-test("migration leaves a non-default auto target alone", () => {
+test("a saved auto config drops the host 0.4.x rotation left in it", () => {
+  // 0.4.x moved pcdnHost along the ranking on every stall and saved it with
+  // the next unrelated setting. A real report came back with tf-all-tx saved,
+  // a host the viewer never chose.
   const cfg = core.normalizeConfig({
-    schemaVersion: 2,
+    schemaVersion: 3,
     selection: "auto",
-    pcdnHost: "upos-tf-all-hw.bilivideo.com"
+    mode: "force",
+    pcdnHost: "upos-tf-all-tx.bilivideo.com"
   });
+  assert.equal(cfg.pcdnHost, core.DEFAULT_CONFIG.pcdnHost);
+  assert.equal(cfg.mode, "force", "the saved mode stays; it applies again under fixed selection");
+  assert.equal(cfg.schemaVersion, 4);
+});
+
+test("a partial config without a version keeps the host it names", () => {
+  const cfg = core.normalizeConfig({ selection: "auto", pcdnHost: "upos-tf-all-hw.bilivideo.com" });
   assert.equal(cfg.pcdnHost, "upos-tf-all-hw.bilivideo.com");
 });
 

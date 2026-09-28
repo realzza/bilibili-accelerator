@@ -54,12 +54,6 @@ test("live /live-bvc/ URLs are never host-swapped or proxied", () => {
   assert.equal(detail.reason, "live-skip");
 });
 
-test("alternativesFor never fans out live URLs to VOD hosts", () => {
-  const alts = core.alternativesFor(
-    "https://cn-hk-eq-01-11.bilivideo.com/live-bvc/123/live_1234.m3u8?x=1", {});
-  assert.deepEqual(alts, []);
-});
-
 // ---- live url_info filtering --------------------------------------------------
 
 function livePayload() {

@@ -7,6 +7,7 @@ const extensionDist = path.join(dist, "extension");
 
 const pkg = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
 const core = await readFile(path.join(root, "src/core/rewrite.js"), "utf8");
+const routing = await readFile(path.join(root, "src/core/routing.js"), "utf8");
 const page = await readFile(path.join(root, "src/page/bili-accelerator.page.js"), "utf8");
 const content = await readFile(path.join(root, "src/extension/content.js"), "utf8");
 const manifest = JSON.parse(await readFile(path.join(root, "src/extension/manifest.json"), "utf8"));
@@ -43,8 +44,8 @@ const userscriptHeader = `// ==UserScript==
 await rm(dist, { recursive: true, force: true });
 await mkdir(extensionDist, { recursive: true });
 
-await writeFile(path.join(dist, "bilibili-accelerator.user.js"), `${userscriptHeader}\n${core}\n${page}\n`);
-await writeFile(path.join(extensionDist, "bili-accelerator.page.js"), `${core}\n${page}\n`);
+await writeFile(path.join(dist, "bilibili-accelerator.user.js"), `${userscriptHeader}\n${core}\n${routing}\n${page}\n`);
+await writeFile(path.join(extensionDist, "bili-accelerator.page.js"), `${core}\n${routing}\n${page}\n`);
 await writeFile(path.join(extensionDist, "content.js"), content);
 await writeFile(path.join(extensionDist, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
 await writeFile(path.join(extensionDist, "popup.html"), popupHtml);

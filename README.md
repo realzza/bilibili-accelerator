@@ -1,6 +1,6 @@
 # <img src="docs/assets/logo.svg" alt="" width="40" align="top">&nbsp;Bilibili Accelerator
 
-[English](./README.en.md) · [Greasy Fork](https://greasyfork.org/en/scripts/582026-bilibili-accelerator) · 当前版本 v0.4.1
+[English](./README.en.md) · [Greasy Fork](https://greasyfork.org/en/scripts/582026-bilibili-accelerator) · 当前版本 v0.5.0
 
 海外看 B 站，热门视频一般没什么问题，冷门视频经常一会儿流畅、一会儿卡死。
 
@@ -45,7 +45,8 @@ npm run build
 - 面板顶部是当前状态，下面是实时下载速度曲线。拿不到速度数据时，会退回显示前方缓冲了多少秒。
 - 明暗跟随系统。点顶部的日 / 月开关之后，就变成你手动指定的浅色或深色。
 - 高级设置里有 7 套主题色：哔哩蓝、青碧、翠绿、星紫、少女粉、落日橙、石墨灰。
-- 「还在卡？再加把劲」会切到更积极的模式，并刷新当前页面。
+- 状态栏注明当前使用的线路：原生线路（B 站为该视频分配的线路）或切换后的线路。实时速度只在下方的下载速度卡片中显示。
+- 本视频卡过或线路速度不足时，面板提供「测试其他线路」：立即比较几条线路，只在明显更快时切换，不保存设置，也不刷新页面。
 - 带宽保护默认关闭，开启后会限制页面占用你的上传带宽，需要刷新页面生效。
 - 网页全屏时 ⚡ 会淡出，鼠标移到右下角就能重新唤出。
 
@@ -55,8 +56,9 @@ npm run build
 
 | 版本 | 主要变化 |
 | --- | --- |
-| [v0.4.1](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.4.1) | 固定服务器改为下拉选择：原输入框在已有地址时只列出匹配的候选，须先清空才能看到其他服务器。列表改为自动模式实测的 8 个服务器，不再提供 Akamai（改写到 Akamai 的视频请求会返回 403），其他地址可通过「自定义…」填写。该设置仅在选择「使用固定服务器」后显示，自动模式下服务器由测速结果决定。高级设置中下拉框与输入框的文字左侧现已对齐 |
-| [v0.4.0](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.4.0) | 后台播放修复：切换至其他标签页后不再于数秒内卡住（Safari 最明显）。起因是加速器将 B 站自家的海外镜像改写至境内 CDN。候选服务器现覆盖境内外两档并全部参与实测，排序改为按实测吞吐而非应答时间，卡顿切换改为遍历完整列表。直播页的 ⚡ 图标也改为自动隐藏，不再遮挡弹幕栏 |
+| v0.5.0 | 线路改为按实测决定。每个视频先使用原生线路（B 站为该视频分配的线路），扩展测量播放器实际下载每个片段的速度；当前线路低于视频码率且缓冲不足时，在播放器接下来要用的数据上比较两条备选线路，切换到明显更快的一条并保持使用。卡住的片段经播放器自身的超时路径立即改由新线路重试；若原线路此前速度正常，只将该片段改由其他线路下载，视频不切换。取消页面加载时的测速、6 小时排序缓存和卡顿时的逐个轮换：测速只读文件开头，实际测的是往返时延；排序对所有视频通用，而同一线路对热门与冷门视频的速度可相差十倍以上；轮换会逐步落到排序末尾的线路。Akamai 只使用 B 站下发的地址。「还在卡？再加把劲」改为不保存设置的「测试其他线路」，自动模式下不再显示「适用范围」和「改写 Akamai」 |
+| [v0.4.1](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.4.1) | 固定服务器改为下拉选择，可填写自定义地址，不再提供 Akamai |
+| [v0.4.0](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.4.0) | 修复后台播放卡住；候选服务器覆盖境内外两档并按实测吞吐排序；直播页 ⚡ 自动隐藏 |
 | [v0.3.0](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.3.0) | 面板深浅色 + 7 套主题色；顶部主题 / 语言改成同一套滑动控件。核心逻辑没动 |
 | [v0.2.3](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.2.3) | 直播场景的稳定性修复；探测逻辑更准确；卡顿恢复会持续重试 |
 | [v0.2.2](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.2.2) | 速度曲线按「数据真正在传输的时段」算，缓冲填满时不再假装掉到 0 |
