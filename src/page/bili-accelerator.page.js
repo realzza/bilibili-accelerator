@@ -886,6 +886,7 @@
       samples: [],
       retry: !!session.requested[slot],
       handed: false,
+      raced: false,
       aborted: false,
       timedOut: false,
       ended: false
@@ -1055,7 +1056,9 @@
           bufferAheadS: bufferAhead(),
           // Only requests on the host the video is on say anything about it. A
           // retry sent elsewhere for a moment is left to the player's own timeouts.
-          inflight: session.inflight.filter(function (r) { return r.kind === "video" && !r.handed && r.host === host; })
+          inflight: session.inflight.filter(function (r) {
+            return r.kind === "video" && !r.handed && !r.raced && r.host === host;
+          })
             .map(function (r) {
               return {
                 total: r.total, loaded: r.loaded, startedAt: r.startedAt, firstByteAt: r.firstByteAt,
@@ -1091,6 +1094,10 @@
     const current = session.active || session.lastHost;
     if (!rep || !current) {
       return false;
+    }
+    if (stuckReq && trigger === "stuck") {
+      // Its bytes are raced once; after that the player's timeouts have it.
+      stuckReq.raced = true;
     }
     const start = stuckReq ? stuckReq.start : (session.ends[key] != null ? session.ends[key] + 1 : NaN);
     if (!(start >= 0)) {
@@ -1364,10 +1371,11 @@
       if (trigger === "stuck" && stuckReq) {
         handTimeout(stuckReq);
       }
-    } else if (retryOn && stuckReq && retryStuck(session, current, retryOn, stuckReq)) {
+    } else if (retryOn && stuckReq) {
       // The video stays and only this fragment moves. The next race may
       // start once the retry is under way, and by then the hang counts
-      // against the host.
+      // against the host, whether our timeout or the player's ended it.
+      retryStuck(session, current, retryOn, stuckReq);
       session.nextRaceAt = now + AVOID_MS;
     } else {
       session.cooldownMs = routing.nextCooldown("none", 0, session.cooldownMs);
@@ -1425,9 +1433,9 @@
   // The detour goes in before the timeout is handed over, because the player
   // may open its retry from inside the timeout handler. The hang counts
   // against its host like a failed request, so a second one within the error
-  // window moves the video. Returns false when no timeout could be handed
-  // over: the player's own timeout ended the request first, it is a retry, or
-  // synthetic timeouts are off.
+  // window moves the video. When no timeout can be handed over (the player's
+  // own timeout ended the request first, it is a retry, or synthetic timeouts
+  // are off), the player's timeout does the retry and records the error.
   function retryStuck(session, current, host, req) {
     if (!session.active) {
       session.active = current;
@@ -1436,10 +1444,9 @@
     session.detour = { host, until: nowMs() + AVOID_MS };
     if (!handTimeout(req)) {
       session.detour = null;
-      return false;
+      return;
     }
     hostStats(session, req.host || current).errors.push(nowMs());
-    return true;
   }
 
   function progressEvent(type) {

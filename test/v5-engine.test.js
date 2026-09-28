@@ -378,6 +378,13 @@ test("a race that outlasts the player's own timeout never times the request out 
   next.fail();
   const retry = env.playerRequest(akamUrl(FILE), "6000000-7499999");
   assert.equal(hostOf(retry.url), ALI, "a failure there retries on the race winner");
+
+  // That was the host's second failure in 30 s, and no long cooldown stands in the way.
+  await env.advance(4000);
+  const after = env.api.getDiagnostics();
+  assert.equal(after.counters.switches, 1);
+  assert.equal(after.session.switches[0].trigger, "errors");
+  assert.equal(after.session.activeHost, ALI);
 });
 
 test("Akamai is reached only through the URL Bilibili issued for it", async () => {
