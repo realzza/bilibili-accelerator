@@ -466,3 +466,36 @@ test("live segments are never measured or routed", async () => {
   assert.equal(env.fetches.length, 0);
   assert.equal(env.api.getDiagnostics().session, null);
 });
+
+// A manual test before anything is measured races the current host too, and
+// compares every host on the same bytes.
+async function manualWithoutEstimate(race) {
+  const env = loadEngine({ race });
+  env.parse(playurl());
+  env.video.ahead = 40;
+  const x = env.playerRequest(cosovUrl(FILE), "1000000-1099999");   // 100 KB: too little to estimate from
+  await env.advance(100);
+  x.finish(206, 100000);
+  assert.equal(env.api.retest(), true);
+  return env;
+}
+
+test("a manual test keeps the current host when it finishes first", async () => {
+  const env = await manualWithoutEstimate({ [COSOV]: { ms: 400, status: 206 }, [AKAM]: { ms: 900, status: 206 }, [ALI]: { ms: 800, status: 206 } });
+  assert.deepEqual(env.fetches.map((f) => f.host).sort(), [AKAM, ALI, COSOV].sort());
+  await env.advance(2000);
+  const race = env.api.getDiagnostics().session.races[0];
+  assert.equal(race.switchTo, null);
+  assert.equal(env.api.getDiagnostics().session.activeHost, null);
+});
+
+test("a manual test switches when the current host is 1.5x slower on the same bytes", async () => {
+  const env = await manualWithoutEstimate({ [COSOV]: { ms: 3000, status: 206 }, [AKAM]: { ms: 900, status: 206 }, [ALI]: { ms: 400, status: 206 } });
+  // ALI finishes at 400 ms; the current host has until 600 ms to match it.
+  await env.advance(700);
+  assert.equal(env.api.getDiagnostics().session.activeHost, ALI, "decided at 1.5x the winner's time");
+  const race = env.api.getDiagnostics().session.races[0];
+  const incumbent = race.contenders.find((c) => c.incumbent);
+  assert.equal(incumbent.host, COSOV);
+  assert.ok(incumbent.ms >= 600 && incumbent.ms < 1000, "its time is the margin it failed to beat: " + incumbent.ms);
+});

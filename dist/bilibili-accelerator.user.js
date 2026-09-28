@@ -2192,7 +2192,10 @@
       return;
     }
     stats.bytes += loaded;
-    session.measured[req.host] = true;
+    // An init or index segment is a few KB and says nothing about throughput.
+    if (loaded >= 128 * 1024) {
+      session.measured[req.host] = true;
+    }
     if (req.firstByteAt) {
       stats.ttfbs.push(req.firstByteAt - req.startedAt);
       if (stats.ttfbs.length > 30) {
@@ -2358,7 +2361,9 @@
     };
     state.races += 1;
     renderStatus();
-    runRace(contenders, start, end).then(function (results) {
+    runRace(contenders, start, end, function (late) {
+      learnFromRace(session, late, true);
+    }).then(function (results) {
       concludeRace(session, trigger, results, currentRate, end - start + 1, current, stuckReq);
     }, function () {
       session.racing = null;
@@ -2366,39 +2371,75 @@
     return true;
   }
 
-  // Fetch the same bytes from every contender at once. The first to finish
-  // wins; the others get 300 ms more, then whatever they moved is recorded
-  // and they are cancelled.
-  function runRace(contenders, start, end) {
+  // Fetch the same bytes from every contender at once and decide as soon as
+  // the outcome is known: when the first challenger finishes, or, if the
+  // current host is racing too, when it finishes or has taken SWITCH_GAIN
+  // times the winner's time without finishing. Contenders still running then
+  // get another second so their numbers reach history, and are cancelled.
+  function runRace(contenders, start, end, onLate) {
     const expected = end - start + 1;
     return new Promise(function (resolve) {
+      const t0 = nowMs();
       const results = contenders.map(function (c) {
         return { host: c.host, incumbent: !!c.incumbent, ok: false, status: 0, bytes: 0, ms: 0, cut: false, settled: false };
       });
+      const incumbent = results.filter(function (r) { return r.incumbent; })[0] || null;
       const controllers = [];
-      let left = contenders.length;
-      let grace = null;
-      let done = false;
-      function finish() {
-        if (done) {
+      let left = results.length;
+      let decided = false;
+      let decideTimer = null;
+      let cutTimer = null;
+      let pendingAtDecision = [];
+      const snapshot = function () { return results.map(function (r) { return Object.assign({}, r); }); };
+      function decide() {
+        if (decided) {
           return;
         }
-        done = true;
-        if (grace) {
-          clearTimeout(grace);
+        decided = true;
+        if (decideTimer) {
+          clearTimeout(decideTimer);
         }
-        results.forEach(function (r, i) {
-          if (!r.settled) {
-            r.cut = true;
-            try { if (controllers[i]) { controllers[i].abort(); } } catch (_) {}
+        if (incumbent && !incumbent.settled) {
+          incumbent.ms = nowMs() - t0;
+        }
+        pendingAtDecision = results.filter(function (r) { return !r.settled; }).map(function (r) { return r.host; });
+        resolve(snapshot());
+        cutTimer = setTimeout(function () {
+          results.forEach(function (r, i) {
+            if (!r.settled) {
+              r.cut = true;
+              try { if (controllers[i]) { controllers[i].abort(); } } catch (_) {}
+            }
+          });
+        }, 1000);
+      }
+      function settle(i) {
+        const r = results[i];
+        r.settled = true;
+        left -= 1;
+        if (!decided) {
+          if (r.incumbent || (r.ok && !incumbent)) {
+            decide();
+          } else if (r.ok && !decideTimer) {
+            decideTimer = setTimeout(decide, Math.max(0, r.ms * routing.SWITCH_GAIN - (nowMs() - t0)));
           }
-        });
-        resolve(results.map(function (r) { return Object.assign({}, r); }));
+        }
+        if (!left) {
+          if (cutTimer) {
+            clearTimeout(cutTimer);
+          }
+          if (!decided) {
+            decide();
+          } else if (onLate && pendingAtDecision.length) {
+            // Only what was still running at the decision: the rest was
+            // already learned from.
+            onLate(snapshot().filter(function (x) { return pendingAtDecision.indexOf(x.host) !== -1; }));
+          }
+        }
       }
       contenders.forEach(function (c, i) {
         const ctl = typeof AbortController === "function" ? new AbortController() : null;
         controllers.push(ctl);
-        const t0 = nowMs();
         const timer = setTimeout(function () {
           try { if (ctl) { ctl.abort(); } } catch (_) {}
         }, routing.RACE_TIMEOUT_MS);
@@ -2414,13 +2455,7 @@
           results[i].ms = nowMs() - t0;
         }).then(function () {
           clearTimeout(timer);
-          results[i].settled = true;
-          left -= 1;
-          if (!left) {
-            finish();
-          } else if (results[i].ok && !grace) {
-            grace = setTimeout(finish, 300);
-          }
+          settle(i);
         });
       });
     });
@@ -2459,19 +2494,35 @@
     });
   }
 
-  function concludeRace(session, trigger, results, currentRate, raceBytes, current, stuckReq) {
-    session.racing = null;
+  // What a race taught about each contender. At decision time only settled
+  // contenders count; the rest are learned from when they finish or are cut.
+  function learnFromRace(session, results, late) {
     const wall = Date.now();
-    const now = nowMs();
     results.forEach(function (r) {
+      if (!r.settled) {
+        return;
+      }
       if (r.ok || (r.cut && r.bytes >= 64 * 1024)) {
         engine.history = routing.recordSample(engine.history, r.host, r.bytes * 8 / 1000 / Math.max(1, r.ms), wall);
         session.measured[r.host] = true;
+        if (late && r.ok && session.active && r.host !== session.active && !session.fallback) {
+          session.fallback = r.host;
+        }
       } else if (!r.cut) {
         engine.history = routing.recordFailure(engine.history, r.host, wall);
         session.failed[r.host] = (session.failed[r.host] || 0) + 1;
       }
     });
+    if (late) {
+      saveHistory();
+    }
+  }
+
+  function concludeRace(session, trigger, results, currentRate, raceBytes, current, stuckReq) {
+    session.racing = null;
+    const wall = Date.now();
+    const now = nowMs();
+    learnFromRace(session, results, false);
     const incumbent = results.filter(function (r) { return r.incumbent && r.ok; })[0];
     const baseRate = incumbent ? incumbent.bytes * 8000 / Math.max(1, incumbent.ms) : currentRate;
     const verdict = routing.raceVerdict(results.filter(function (r) { return !r.incumbent; }), baseRate, raceBytes);
@@ -3204,7 +3255,7 @@
       },
       notes: {
         assigned: function (server, rate) { return "Bilibili's assigned server · " + server + (rate ? " · " + rate : ""); },
-        switched: function (server, rate) { return "Switched to " + server + (rate ? " · " + rate : ""); },
+        switched: function (server, rate, before) { return "Switched to " + server + (rate ? " · " + (before ? before + " → " : "") + rate : ""); },
         fixed: function (server, rate) { return "Fixed server · " + server + (rate ? " · " + rate : ""); },
         short: function (rate, need) { return "Current server " + rate + ", needs " + need; },
         stuck: "This part of the video is downloading too slowly",
@@ -3259,7 +3310,7 @@
       },
       notes: {
         assigned: function (server, rate) { return "B 站分配的线路 · " + server + (rate ? " · " + rate : ""); },
-        switched: function (server, rate) { return "已切换到 " + server + (rate ? " · " + rate : ""); },
+        switched: function (server, rate, before) { return "已切换到 " + server + (rate ? " · " + (before ? before + " → " : "") + rate : ""); },
         fixed: function (server, rate) { return "固定线路 · " + server + (rate ? " · " + rate : ""); },
         short: function (rate, need) { return "当前线路 " + rate + "，需要 " + need; },
         stuck: "当前片段下载过慢",
@@ -3353,9 +3404,13 @@
     return info;
   }
 
-  function formatRate(bps) {
+  function formatMbps(bps) {
     const mbps = bps / 1e6;
-    return (mbps >= 100 ? String(Math.round(mbps)) : mbps.toFixed(1)) + " Mbps";
+    return mbps >= 100 ? String(Math.round(mbps)) : mbps.toFixed(1);
+  }
+
+  function formatRate(bps) {
+    return formatMbps(bps) + " Mbps";
   }
 
   // "海外 · 腾讯云" rather than upos-sz-mirrorcosov.bilivideo.com.
@@ -3397,7 +3452,13 @@
     if (config.selection !== "auto") {
       return n.fixed(server, rate);
     }
-    return info.switched ? n.switched(server, rate) : n.assigned(server, rate);
+    if (info.switched) {
+      // What the switch bought, from the rate measured on the host it left.
+      const last = info.session.switches[info.session.switches.length - 1];
+      const before = last && last.beforeMbps > 0 ? formatMbps(last.beforeMbps * 1e6) : "";
+      return n.switched(server, rate, before);
+    }
+    return n.assigned(server, rate);
   }
 
   function countText(info) {
