@@ -2011,15 +2011,16 @@
         slow: ["Slow network", ""]
       },
       notes: {
-        assigned: function (server, rate) { return "Bilibili's assigned server · " + server + (rate ? " · " + rate : ""); },
-        switched: function (server, rate, before) { return "Switched to " + server + (rate ? " · " + (before ? before + " → " : "") + rate : ""); },
-        fixed: function (server, rate) { return "Fixed server · " + server + (rate ? " · " + rate : ""); },
-        short: function (rate, need) { return "Current server " + rate + ", needs " + need; },
+        native: function (server) { return "Native server · " + server; },
+        switched: function (server, before) { return "Switched to " + server + (before ? " (previous server " + before + " Mbps)" : ""); },
+        fixed: function (server) { return "Fixed server · " + server; },
+        short: "The current server is too slow for this video",
+        failing: "The current server is failing requests",
         stuck: "This part of the video is downloading too slowly",
         comparing: function (n) { return "Comparing " + n + " servers"; },
         keepingUp: "The server is keeping up; waiting for the player",
         measuring: "Measuring the current server",
-        fastest: function (n, rate) { return "Compared " + n + " servers; this one is fastest" + (rate ? " · " + rate : ""); }
+        fastest: function (n) { return "Compared " + n + " servers; this one is fastest"; }
       },
       regions: { overseas: "Overseas", mainland: "Mainland" },
       vendors: { tencent: "Tencent Cloud", alibaba: "Alibaba Cloud", huawei: "Huawei Cloud", akamai: "Akamai" },
@@ -2066,15 +2067,16 @@
         slow: ["网络较慢", ""]
       },
       notes: {
-        assigned: function (server, rate) { return "B 站分配的线路 · " + server + (rate ? " · " + rate : ""); },
-        switched: function (server, rate, before) { return "已切换到 " + server + (rate ? " · " + (before ? before + " → " : "") + rate : ""); },
-        fixed: function (server, rate) { return "固定线路 · " + server + (rate ? " · " + rate : ""); },
-        short: function (rate, need) { return "当前线路 " + rate + "，需要 " + need; },
+        native: function (server) { return "原生线路 · " + server; },
+        switched: function (server, before) { return "已切换到 " + server + (before ? "（原线路 " + before + " Mbps）" : ""); },
+        fixed: function (server) { return "固定线路 · " + server; },
+        short: "当前线路速度不足",
+        failing: "当前线路请求失败",
         stuck: "当前片段下载过慢",
         comparing: function (n) { return "正在比较 " + n + " 条线路"; },
         keepingUp: "线路速度正常，等待播放器缓冲",
         measuring: "正在测量当前线路",
-        fastest: function (n, rate) { return "已比较 " + n + " 条线路，当前线路最快" + (rate ? " · " + rate : ""); }
+        fastest: function (n) { return "已比较 " + n + " 条线路，当前线路最快"; }
       },
       regions: { overseas: "海外", mainland: "大陆" },
       vendors: { tencent: "腾讯云", alibaba: "阿里云", huawei: "华为云", akamai: "Akamai" },
@@ -2166,10 +2168,6 @@
     return mbps >= 100 ? String(Math.round(mbps)) : mbps.toFixed(1);
   }
 
-  function formatRate(bps) {
-    return formatMbps(bps) + " Mbps";
-  }
-
   // "海外 · 腾讯云" rather than upos-sz-mirrorcosov.bilivideo.com.
   function hostLabel(host) {
     const d = routing.describeHost(host);
@@ -2178,6 +2176,10 @@
     return d.region ? s.regions[d.region] + " · " + vendor : vendor;
   }
 
+  // The status line says which server is in use and what happened; the speed
+  // card below it is the one place that shows a live rate. The engine's own
+  // estimate counts video fragments only, per request, and would never match
+  // the card, which averages every media transfer over a few seconds.
   function statusNote(info) {
     const s = STRINGS[lang()];
     if (info.legacy || !info.session) {
@@ -2185,37 +2187,40 @@
     }
     const n = s.notes;
     const server = info.host ? hostLabel(info.host) : "";
-    const rate = info.rateBps !== null ? formatRate(info.rateBps) : "";
-    const need = info.needBps > 0 ? formatRate(info.needBps) : "";
+    const short = info.rateBps !== null && info.needBps > 0 && info.rateBps < 1.2 * info.needBps;
     if (info.key === "testing") {
       const racing = info.session.racing;
       if (racing.trigger === "manual") {
         return n.comparing(racing.compared);
       }
-      return racing.trigger === "shortfall" && rate && need ? n.short(rate, need) : n.stuck;
+      if (racing.trigger === "errors") {
+        return n.failing;
+      }
+      return racing.trigger === "stuck" ? n.stuck : n.short;
     }
     if (info.key === "buffering") {
-      if (!rate) {
+      if (info.rateBps === null) {
         return n.measuring;
       }
-      return need && info.rateBps < 1.2 * info.needBps ? n.short(rate, need) : n.keepingUp;
+      return short ? n.short : n.keepingUp;
     }
     if (info.verdict) {
-      return n.fastest(info.verdict.tested, rate);
+      return n.fastest(info.verdict.tested);
     }
     if (!server) {
       return n.measuring;
     }
     if (config.selection !== "auto") {
-      return n.fixed(server, rate);
+      return n.fixed(server);
     }
     if (info.switched) {
-      // What the switch bought, from the rate measured on the host it left.
+      // Why it switched: what the server it left was delivering. That is a
+      // past rate of another server, so it can't be mistaken for the card's.
       const last = info.session.switches[info.session.switches.length - 1];
       const before = last && last.beforeMbps > 0 ? formatMbps(last.beforeMbps * 1e6) : "";
-      return n.switched(server, rate, before);
+      return n.switched(server, before);
     }
-    return n.assigned(server, rate);
+    return n.native(server);
   }
 
   function countText(info) {
@@ -2228,13 +2233,16 @@
     return p2p > 0 ? s.p2pCount(p2p) : "";
   }
 
-  // Redraw when what the panel would say has changed, or while it is open so
-  // the rate stays current.
+  // Redraw when anything the panel shows would change: the state, the server,
+  // the switch count, the verdict, or whether the server measures short (which
+  // decides whether 测试其他线路 is offered).
   function refreshStatus() {
     const info = computeStatus();
+    const short = info.rateBps !== null && info.rateBps !== undefined && info.needBps > 0 &&
+      info.rateBps < 1.2 * info.needBps;
     const signature = [info.key, info.host || "", info.session ? info.session.switches.length : 0,
-      info.rateBps ? Math.round(info.rateBps / 5e5) : 0, info.verdict ? info.verdict.at : 0].join("|");
-    if (signature !== engine.rendered || panelIsOpen()) {
+      short, info.verdict ? info.verdict.at : 0].join("|");
+    if (signature !== engine.rendered) {
       engine.rendered = signature;
       renderStatus();
     }

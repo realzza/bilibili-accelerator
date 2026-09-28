@@ -254,13 +254,15 @@ The panel says what was measured and what was done:
 
 | state | 中文 | English |
 | --- | --- | --- |
-| on the assigned host | 播放流畅 · B 站分配的线路 · 海外 · 腾讯云 · 32.4 Mbps | Playing smoothly · Bilibili's assigned server · Overseas · Tencent Cloud · 32.4 Mbps |
-| switched | 播放流畅 · 已切换到 大陆 · 阿里云 · 0.9 → 16.5 Mbps | Playing smoothly · Switched to Mainland · Alibaba Cloud · 0.9 → 16.5 Mbps |
+| on the assigned host | 播放流畅 · 原生线路 · 海外 · 腾讯云 | Playing smoothly · Native server · Overseas · Tencent Cloud |
+| switched | 播放流畅 · 已切换到 大陆 · 阿里云（原线路 0.9 Mbps） | Playing smoothly · Switched to Mainland · Alibaba Cloud (previous server 0.9 Mbps) |
 | racing | 正在测试其他线路… · 当前片段下载过慢 | Testing other servers… · This part of the video is downloading too slowly |
-| nothing better | 网络较慢 · 已比较 3 条线路，当前线路最快 · 2.1 Mbps | Slow network · Compared 3 servers; this one is fastest · 2.1 Mbps |
+| nothing better | 网络较慢 · 已比较 3 条线路，当前线路最快 | Slow network · Compared 3 servers; this one is fastest |
 | stalled, host fine | 缓冲中 · 线路速度正常，等待播放器缓冲 | Buffering · The server is keeping up; waiting for the player |
 
-Hosts are named by region and cloud, not by hostname. The counter under the status counts switches on this video (本视频切换了 1 次线路), or failing that the P2P nodes kept out of playback; the field report's page had shown 已修复 1594 个慢连接, which counted rewritten URLs.
+The status line carries no live rate; the speed card under it is the only place one appears. The engine's estimate counts video fragments only, request by request, while the card averages every media transfer over a few seconds, so the two differ even when both are right, and side by side they read as a contradiction (the first Safari test showed 128 Mbps above a 51.6 Mbps card). The one number the status keeps is the rate of the server a switch left, which describes a different server. Whether a server is short is stated without a number for the same reason: the engine's threshold is on its own estimate, not on the card's.
+
+Hosts are named by region and cloud, not by hostname, and the host Bilibili assigned is called the native server (原生线路). The counter under the status counts switches on this video (本视频切换了 1 次线路), or failing that the P2P nodes kept out of playback; the field report's page had shown 已修复 1594 个慢连接, which counted rewritten URLs.
 
 ### What the viewer sees
 
