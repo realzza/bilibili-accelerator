@@ -79,7 +79,7 @@
     proxyHost: "proxy-tf-all-ws.bilivideo.com",
     rewriteAkamai: false,
     portHeuristic: true,                           // non-default port ⇒ PCDN
-    stallRecovery: true,                           // live failover on buffering
+    stallRecovery: true,                           // auto mode: switch servers on evidence
     p2pGuard: false,                               // opt-in WebRTC/PCDN neutralizer
     maxDepth: 20,
     schemaVersion: SCHEMA_VERSION
@@ -131,22 +131,14 @@
     // pin existing installs to the mainland-only pool permanently.
     if (!(storedVersion >= 3)) {
       merged.candidatePool = CANDIDATE_POOL.slice();
-      // Retire the old default target, which auto mode would otherwise keep
-      // using until its first probe lands. Narrow on purpose: only a config
-      // that carries an older version is a saved one, so an explicit host from
-      // a partial/ad-hoc config is never second-guessed. A host the user pinned
-      // is left alone too — in auto mode it is ephemeral anyway, since
-      // applyRanking overwrites it as soon as probing finishes.
-      if (typeof storedVersion === "number" && merged.selection !== "fixed" &&
-          cleanHost(merged.pcdnHost) === "upos-sz-mirrorcos.bilivideo.com") {
-        merged.pcdnHost = DEFAULT_CONFIG.pcdnHost;
-      }
     }
 
     // v4 stopped writing routing decisions into the config. Under auto, 0.4.x
     // pointed pcdnHost at whatever the rotation had reached and saved it with
     // the next unrelated setting, so a saved auto config can carry a host
-    // nobody chose. Fixed selection is the viewer's own choice and stays.
+    // nobody chose. Fixed selection is the viewer's own choice and stays. Only
+    // a config that carries a version is a saved one, so a host named in a
+    // partial config is never second-guessed.
     if (typeof storedVersion === "number" && storedVersion < 4 && merged.selection !== "fixed") {
       merged.pcdnHost = DEFAULT_CONFIG.pcdnHost;
     }
@@ -391,29 +383,6 @@
 
   function rewriteUrl(value, config) {
     return rewriteUrlDetail(value, config).url;
-  }
-
-  // Build host-swapped alternatives of a media URL for DASH backupUrl fan-out.
-  // Returns rewritten URL strings for each candidate host except the current one.
-  function alternativesFor(value, rawConfig, hosts) {
-    const config = normalizeConfig(rawConfig);
-    const url = parseUrl(String(value || ""));
-    if (!url || !isMediaUrl(url) || isLiveMediaUrl(url)) {
-      return [];
-    }
-    const pool = (hosts && hosts.length ? hosts : config.candidatePool) || [];
-    const current = url.hostname.toLowerCase();
-    const seen = {};
-    const out = [];
-    pool.forEach(function eachHost(host) {
-      const clean = cleanHost(host).toLowerCase();
-      if (!clean || clean === current || seen[clean]) {
-        return;
-      }
-      seen[clean] = true;
-      out.push(replaceHost(url, host));
-    });
-    return out;
   }
 
   // Convert a transferred byte count over a duration into megabits per second.
@@ -673,7 +642,6 @@
     isSlowLiveHost,
     filterLiveUrlInfo,
     selectTarget,
-    alternativesFor,
     throughputMbps,
     unionDurationMs,
     aggregateThroughput,
@@ -1028,9 +996,8 @@
     }
     const inflight = i.inflight || [];
     for (let k = 0; k < inflight.length; k += 1) {
-      const verdict = stuckVerdict(inflight[k], i.now, i.requiredBps, i.bufferAheadS);
-      if (verdict) {
-        return { trigger: "stuck", req: inflight[k], detail: verdict };
+      if (stuckVerdict(inflight[k], i.now, i.requiredBps, i.bufferAheadS)) {
+        return { trigger: "stuck", req: inflight[k] };
       }
     }
     const enough = i.measuredBytes >= SHORTFALL_MIN_BYTES || i.measuredMs >= SHORTFALL_MIN_MS;
@@ -1124,16 +1091,14 @@
     const bytes = raceBytes || RACE_BYTES;
     const currentMs = currentRateBps > 0 ? bytes * 8000 / currentRateBps : Infinity;
     if (!done.length) {
-      return { winner: null, runnerUp: null, switchTo: null, currentMs };
+      return { winner: null, runnerUp: null, switchTo: null };
     }
     const winner = done[0];
     const better = winner.ms * SWITCH_GAIN <= currentMs;
     return {
       winner: winner.host,
       runnerUp: done[1] ? done[1].host : null,
-      switchTo: better ? winner.host : null,
-      winnerMs: winner.ms,
-      currentMs
+      switchTo: better ? winner.host : null
     };
   }
 
@@ -1215,16 +1180,15 @@
     RACE_TIMEOUT_MS,
     MAX_SWITCHES,
     ERROR_WINDOW_MS,
-    ERROR_LIMIT,
+    SHORTFALL_RATE_FACTOR,
     SWITCH_GAIN,
     AUDIO_ID_RE,
     fileKey,
     cidOf,
     repIdOf,
     parseRange,
+    dashContainers,
     buildTable,
-    isAkamai,
-    isUposHost,
     urlFor,
     candidatesFor,
     createEstimator,
@@ -1533,8 +1497,8 @@
       // carry the viewer's mid, buvid, IP-derived oi and signed tokens, and the
       // diagnostics report is built to be pasted into public issues. Redacting
       // here (not just at display) means those tokens never persist in memory.
-      const fromHost = core.hostOf(item.original) || String(item.original || "").replace(/^https?:\/\//, "").split("/")[0];
-      if (P2P_REASONS.indexOf(item.reason) !== -1 && fromHost) {
+      const fromHost = core.hostOf(item.original);
+      if (fromHost && P2P_REASONS.indexOf(item.reason) !== -1) {
         state.p2pAvoided[fromHost] = true;
       }
       return {
@@ -1542,7 +1506,7 @@
         source,
         reason: item.reason,
         fromHost,
-        toHost: core.hostOf(item.url) || String(item.url || "").replace(/^https?:\/\//, "").split("/")[0]
+        toHost: core.hostOf(item.url)
       };
     })).slice(-50);
     if (state.status === "idle") {
@@ -1585,12 +1549,7 @@
     if (config.selection !== "auto" || !config.enabled || config.mode === "off") {
       return;
     }
-    [payload && payload.data, payload && payload.result,
-      payload && payload.result && payload.result.video_info, payload].forEach(function (container) {
-      const dash = container && typeof container === "object" && container.dash;
-      if (!dash || typeof dash !== "object") {
-        return;
-      }
+    routing.dashContainers(payload).forEach(function (dash) {
       ["video", "audio"].forEach(function (kind) {
         (Array.isArray(dash[kind]) ? dash[kind] : []).forEach(function (entry) {
           if (!entry || typeof entry !== "object") {
@@ -1617,12 +1576,19 @@
     });
   }
 
+  // Every playurl goes through the same steps, in this order: the engine reads
+  // the URLs as issued, a PCDN base gives way to an issued backup, and then the
+  // per-URL rules run.
+  function rewritePlayurl(payload, tracker) {
+    ingestPlayurl(payload);
+    promoteIssued(payload, tracker);
+    return core.rewriteObject(payload, rewriteConfig(), tracker);
+  }
+
   function rewritePayload(payload, source) {
     const tracker = { changed: false, rewrites: [] };
     try {
-      ingestPlayurl(payload);
-      promoteIssued(payload, tracker);
-      const rewritten = core.rewriteObject(payload, rewriteConfig(), tracker);
+      const rewritten = rewritePlayurl(payload, tracker);
       record(tracker.rewrites, source);
       filterLivePcdn(rewritten, source);
       return rewritten;
@@ -1764,9 +1730,7 @@
           let live = { changed: false, rewrites: [] };
           try {
             parsed = nativeJsonParse(text);
-            ingestPlayurl(parsed);
-            promoteIssued(parsed, tracker);
-            core.rewriteObject(parsed, rewriteConfig(), tracker);
+            rewritePlayurl(parsed, tracker);
             live = core.filterLiveUrlInfo(parsed, config);
           } catch (_) {
             return response;
@@ -1857,7 +1821,6 @@
             }
           });
           xhr.addEventListener("abort", function onAbort() { req.aborted = true; });
-          xhr.addEventListener("timeout", function onTimeout() { req.timedOut = true; });
           xhr.addEventListener("loadend", function onEnd(event) {
             endRequest(req, xhr.status, event && typeof event.loaded === "number" ? event.loaded : 0);
           });
@@ -1877,9 +1840,7 @@
             }
             const parsed = nativeJsonParse(text);
             const tracker = { changed: false, rewrites: [] };
-            ingestPlayurl(parsed);
-            promoteIssued(parsed, tracker);
-            core.rewriteObject(parsed, rewriteConfig(), tracker);
+            rewritePlayurl(parsed, tracker);
             const live = core.filterLiveUrlInfo(parsed, config);
             if (!tracker.changed && !live.changed) {
               return;
@@ -2133,7 +2094,6 @@
       handed: false,
       raced: false,
       aborted: false,
-      timedOut: false,
       ended: false
     };
     session.requested[slot] = true;
@@ -2384,8 +2344,6 @@
     }
     session.racing = {
       trigger,
-      at: wall,
-      hosts: contenders.map(function (c) { return c.host; }),
       compared: contenders.length + (contenders.some(function (c) { return c.incumbent; }) ? 0 : 1)
     };
     state.races += 1;
@@ -3323,7 +3281,7 @@
       status: {
         off: ["Acceleration off", "Turn it on to move slow videos to faster servers"],
         idle: ["Ready", "Open a video and it'll kick in"],
-        smooth: ["Playing smoothly", "Open a video and it'll kick in"],
+        smooth: ["Playing smoothly", ""],
         testing: ["Testing other servers…", ""],
         buffering: ["Buffering", ""],
         slow: ["Slow network", ""]
@@ -3379,7 +3337,7 @@
       status: {
         off: ["已关闭加速", "打开后自动为慢视频选择更快的线路"],
         idle: ["就绪", "打开视频后自动生效"],
-        smooth: ["播放流畅", "打开视频后自动生效"],
+        smooth: ["播放流畅", ""],
         testing: ["正在测试其他线路…", ""],
         buffering: ["缓冲中", ""],
         slow: ["网络较慢", ""]
@@ -3463,16 +3421,17 @@
       session,
       host,
       rateBps,
-      needBps: session.requiredBps,
+      // Below what the stream needs, by the same margin a shortfall race uses.
+      short: rateBps !== null && session.requiredBps > 0 &&
+        rateBps < routing.SHORTFALL_RATE_FACTOR * session.requiredBps,
       // A retry can pin the video to the host it is on without switching it.
       switched: session.switches.length > 0 && !!session.active && session.active !== session.assigned
     };
-    const short = rateBps !== null && session.requiredBps > 0 && rateBps < 1.2 * session.requiredBps;
     if (session.racing) {
       info.key = "testing";
     } else if (engine.stalling) {
       info.key = "buffering";
-    } else if (session.verdict && short) {
+    } else if (session.verdict && info.short) {
       info.key = "slow";
     }
     if (session.verdict && (info.key === "slow" ||
@@ -3502,7 +3461,6 @@
     }
     const n = s.notes;
     const server = info.host ? hostLabel(info.host) : "";
-    const short = info.rateBps !== null && info.needBps > 0 && info.rateBps < 1.2 * info.needBps;
     if (info.key === "testing") {
       const racing = info.session.racing;
       if (racing.trigger === "manual") {
@@ -3517,7 +3475,7 @@
       if (info.rateBps === null) {
         return n.measuring;
       }
-      return short ? n.short : n.keepingUp;
+      return info.short ? n.short : n.keepingUp;
     }
     if (info.verdict) {
       return n.fastest(info.verdict.tested);
@@ -3546,10 +3504,8 @@
   // decides whether 测试其他线路 is offered).
   function refreshStatus() {
     const info = computeStatus();
-    const short = info.rateBps !== null && info.rateBps !== undefined && info.needBps > 0 &&
-      info.rateBps < 1.2 * info.needBps;
     const signature = [info.key, info.host || "", info.session ? info.session.switches.length : 0,
-      short, info.verdict ? info.verdict.at : 0].join("|");
+      !!info.short, info.verdict ? info.verdict.at : 0].join("|");
     if (signature !== engine.rendered) {
       engine.rendered = signature;
       renderStatus();
@@ -3761,8 +3717,7 @@
       // the server measured below what the stream needs.
       const session = info.session;
       const relevant = !info.legacy && !!session && !session.racing && autoRouting() && isPlayerPage() &&
-        (session.stalls > 0 || info.key === "slow" || info.key === "buffering" ||
-          (info.rateBps !== null && session.requiredBps > 0 && info.rateBps < 1.2 * session.requiredBps));
+        (session.stalls > 0 || info.key === "buffering" || info.short);
       retestButton.style.display = relevant ? "block" : "none";
     }
   }
@@ -3979,10 +3934,7 @@
     retestButton.type = "button";
     retestButton.dataset.i18n = "retest";
     retestButton.textContent = t("retest");
-    retestButton.addEventListener("click", function () {
-      retest();
-      renderStatus();
-    });
+    retestButton.addEventListener("click", function () { retest(); });
 
     // Advanced toggle (pinned at panel bottom) + section. Keeping the toggle as
     // the bottom-most element means expanding grows the panel upward while the
@@ -4230,7 +4182,7 @@
     getStats: function () { return JSON.parse(JSON.stringify(state)); },
     getDiagnostics: function () { return buildDiagnostics(); },
     rewriteUrl: function (url) { return core.rewriteUrl(url, rewriteConfig()); },
-    retest: function () { const started = retest(); renderStatus(); return started; }
+    retest: function () { return retest(); }
   };
 
   dropLegacyRankings();

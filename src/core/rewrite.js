@@ -79,7 +79,7 @@
     proxyHost: "proxy-tf-all-ws.bilivideo.com",
     rewriteAkamai: false,
     portHeuristic: true,                           // non-default port ⇒ PCDN
-    stallRecovery: true,                           // live failover on buffering
+    stallRecovery: true,                           // auto mode: switch servers on evidence
     p2pGuard: false,                               // opt-in WebRTC/PCDN neutralizer
     maxDepth: 20,
     schemaVersion: SCHEMA_VERSION
@@ -131,22 +131,14 @@
     // pin existing installs to the mainland-only pool permanently.
     if (!(storedVersion >= 3)) {
       merged.candidatePool = CANDIDATE_POOL.slice();
-      // Retire the old default target, which auto mode would otherwise keep
-      // using until its first probe lands. Narrow on purpose: only a config
-      // that carries an older version is a saved one, so an explicit host from
-      // a partial/ad-hoc config is never second-guessed. A host the user pinned
-      // is left alone too — in auto mode it is ephemeral anyway, since
-      // applyRanking overwrites it as soon as probing finishes.
-      if (typeof storedVersion === "number" && merged.selection !== "fixed" &&
-          cleanHost(merged.pcdnHost) === "upos-sz-mirrorcos.bilivideo.com") {
-        merged.pcdnHost = DEFAULT_CONFIG.pcdnHost;
-      }
     }
 
     // v4 stopped writing routing decisions into the config. Under auto, 0.4.x
     // pointed pcdnHost at whatever the rotation had reached and saved it with
     // the next unrelated setting, so a saved auto config can carry a host
-    // nobody chose. Fixed selection is the viewer's own choice and stays.
+    // nobody chose. Fixed selection is the viewer's own choice and stays. Only
+    // a config that carries a version is a saved one, so a host named in a
+    // partial config is never second-guessed.
     if (typeof storedVersion === "number" && storedVersion < 4 && merged.selection !== "fixed") {
       merged.pcdnHost = DEFAULT_CONFIG.pcdnHost;
     }
@@ -391,29 +383,6 @@
 
   function rewriteUrl(value, config) {
     return rewriteUrlDetail(value, config).url;
-  }
-
-  // Build host-swapped alternatives of a media URL for DASH backupUrl fan-out.
-  // Returns rewritten URL strings for each candidate host except the current one.
-  function alternativesFor(value, rawConfig, hosts) {
-    const config = normalizeConfig(rawConfig);
-    const url = parseUrl(String(value || ""));
-    if (!url || !isMediaUrl(url) || isLiveMediaUrl(url)) {
-      return [];
-    }
-    const pool = (hosts && hosts.length ? hosts : config.candidatePool) || [];
-    const current = url.hostname.toLowerCase();
-    const seen = {};
-    const out = [];
-    pool.forEach(function eachHost(host) {
-      const clean = cleanHost(host).toLowerCase();
-      if (!clean || clean === current || seen[clean]) {
-        return;
-      }
-      seen[clean] = true;
-      out.push(replaceHost(url, host));
-    });
-    return out;
   }
 
   // Convert a transferred byte count over a duration into megabits per second.
@@ -673,7 +642,6 @@
     isSlowLiveHost,
     filterLiveUrlInfo,
     selectTarget,
-    alternativesFor,
     throughputMbps,
     unionDurationMs,
     aggregateThroughput,

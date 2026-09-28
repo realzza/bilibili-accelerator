@@ -288,8 +288,8 @@
       // carry the viewer's mid, buvid, IP-derived oi and signed tokens, and the
       // diagnostics report is built to be pasted into public issues. Redacting
       // here (not just at display) means those tokens never persist in memory.
-      const fromHost = core.hostOf(item.original) || String(item.original || "").replace(/^https?:\/\//, "").split("/")[0];
-      if (P2P_REASONS.indexOf(item.reason) !== -1 && fromHost) {
+      const fromHost = core.hostOf(item.original);
+      if (fromHost && P2P_REASONS.indexOf(item.reason) !== -1) {
         state.p2pAvoided[fromHost] = true;
       }
       return {
@@ -297,7 +297,7 @@
         source,
         reason: item.reason,
         fromHost,
-        toHost: core.hostOf(item.url) || String(item.url || "").replace(/^https?:\/\//, "").split("/")[0]
+        toHost: core.hostOf(item.url)
       };
     })).slice(-50);
     if (state.status === "idle") {
@@ -340,12 +340,7 @@
     if (config.selection !== "auto" || !config.enabled || config.mode === "off") {
       return;
     }
-    [payload && payload.data, payload && payload.result,
-      payload && payload.result && payload.result.video_info, payload].forEach(function (container) {
-      const dash = container && typeof container === "object" && container.dash;
-      if (!dash || typeof dash !== "object") {
-        return;
-      }
+    routing.dashContainers(payload).forEach(function (dash) {
       ["video", "audio"].forEach(function (kind) {
         (Array.isArray(dash[kind]) ? dash[kind] : []).forEach(function (entry) {
           if (!entry || typeof entry !== "object") {
@@ -372,12 +367,19 @@
     });
   }
 
+  // Every playurl goes through the same steps, in this order: the engine reads
+  // the URLs as issued, a PCDN base gives way to an issued backup, and then the
+  // per-URL rules run.
+  function rewritePlayurl(payload, tracker) {
+    ingestPlayurl(payload);
+    promoteIssued(payload, tracker);
+    return core.rewriteObject(payload, rewriteConfig(), tracker);
+  }
+
   function rewritePayload(payload, source) {
     const tracker = { changed: false, rewrites: [] };
     try {
-      ingestPlayurl(payload);
-      promoteIssued(payload, tracker);
-      const rewritten = core.rewriteObject(payload, rewriteConfig(), tracker);
+      const rewritten = rewritePlayurl(payload, tracker);
       record(tracker.rewrites, source);
       filterLivePcdn(rewritten, source);
       return rewritten;
@@ -519,9 +521,7 @@
           let live = { changed: false, rewrites: [] };
           try {
             parsed = nativeJsonParse(text);
-            ingestPlayurl(parsed);
-            promoteIssued(parsed, tracker);
-            core.rewriteObject(parsed, rewriteConfig(), tracker);
+            rewritePlayurl(parsed, tracker);
             live = core.filterLiveUrlInfo(parsed, config);
           } catch (_) {
             return response;
@@ -612,7 +612,6 @@
             }
           });
           xhr.addEventListener("abort", function onAbort() { req.aborted = true; });
-          xhr.addEventListener("timeout", function onTimeout() { req.timedOut = true; });
           xhr.addEventListener("loadend", function onEnd(event) {
             endRequest(req, xhr.status, event && typeof event.loaded === "number" ? event.loaded : 0);
           });
@@ -632,9 +631,7 @@
             }
             const parsed = nativeJsonParse(text);
             const tracker = { changed: false, rewrites: [] };
-            ingestPlayurl(parsed);
-            promoteIssued(parsed, tracker);
-            core.rewriteObject(parsed, rewriteConfig(), tracker);
+            rewritePlayurl(parsed, tracker);
             const live = core.filterLiveUrlInfo(parsed, config);
             if (!tracker.changed && !live.changed) {
               return;
@@ -888,7 +885,6 @@
       handed: false,
       raced: false,
       aborted: false,
-      timedOut: false,
       ended: false
     };
     session.requested[slot] = true;
@@ -1139,8 +1135,6 @@
     }
     session.racing = {
       trigger,
-      at: wall,
-      hosts: contenders.map(function (c) { return c.host; }),
       compared: contenders.length + (contenders.some(function (c) { return c.incumbent; }) ? 0 : 1)
     };
     state.races += 1;
@@ -2078,7 +2072,7 @@
       status: {
         off: ["Acceleration off", "Turn it on to move slow videos to faster servers"],
         idle: ["Ready", "Open a video and it'll kick in"],
-        smooth: ["Playing smoothly", "Open a video and it'll kick in"],
+        smooth: ["Playing smoothly", ""],
         testing: ["Testing other servers…", ""],
         buffering: ["Buffering", ""],
         slow: ["Slow network", ""]
@@ -2134,7 +2128,7 @@
       status: {
         off: ["已关闭加速", "打开后自动为慢视频选择更快的线路"],
         idle: ["就绪", "打开视频后自动生效"],
-        smooth: ["播放流畅", "打开视频后自动生效"],
+        smooth: ["播放流畅", ""],
         testing: ["正在测试其他线路…", ""],
         buffering: ["缓冲中", ""],
         slow: ["网络较慢", ""]
@@ -2218,16 +2212,17 @@
       session,
       host,
       rateBps,
-      needBps: session.requiredBps,
+      // Below what the stream needs, by the same margin a shortfall race uses.
+      short: rateBps !== null && session.requiredBps > 0 &&
+        rateBps < routing.SHORTFALL_RATE_FACTOR * session.requiredBps,
       // A retry can pin the video to the host it is on without switching it.
       switched: session.switches.length > 0 && !!session.active && session.active !== session.assigned
     };
-    const short = rateBps !== null && session.requiredBps > 0 && rateBps < 1.2 * session.requiredBps;
     if (session.racing) {
       info.key = "testing";
     } else if (engine.stalling) {
       info.key = "buffering";
-    } else if (session.verdict && short) {
+    } else if (session.verdict && info.short) {
       info.key = "slow";
     }
     if (session.verdict && (info.key === "slow" ||
@@ -2257,7 +2252,6 @@
     }
     const n = s.notes;
     const server = info.host ? hostLabel(info.host) : "";
-    const short = info.rateBps !== null && info.needBps > 0 && info.rateBps < 1.2 * info.needBps;
     if (info.key === "testing") {
       const racing = info.session.racing;
       if (racing.trigger === "manual") {
@@ -2272,7 +2266,7 @@
       if (info.rateBps === null) {
         return n.measuring;
       }
-      return short ? n.short : n.keepingUp;
+      return info.short ? n.short : n.keepingUp;
     }
     if (info.verdict) {
       return n.fastest(info.verdict.tested);
@@ -2301,10 +2295,8 @@
   // decides whether 测试其他线路 is offered).
   function refreshStatus() {
     const info = computeStatus();
-    const short = info.rateBps !== null && info.rateBps !== undefined && info.needBps > 0 &&
-      info.rateBps < 1.2 * info.needBps;
     const signature = [info.key, info.host || "", info.session ? info.session.switches.length : 0,
-      short, info.verdict ? info.verdict.at : 0].join("|");
+      !!info.short, info.verdict ? info.verdict.at : 0].join("|");
     if (signature !== engine.rendered) {
       engine.rendered = signature;
       renderStatus();
@@ -2516,8 +2508,7 @@
       // the server measured below what the stream needs.
       const session = info.session;
       const relevant = !info.legacy && !!session && !session.racing && autoRouting() && isPlayerPage() &&
-        (session.stalls > 0 || info.key === "slow" || info.key === "buffering" ||
-          (info.rateBps !== null && session.requiredBps > 0 && info.rateBps < 1.2 * session.requiredBps));
+        (session.stalls > 0 || info.key === "buffering" || info.short);
       retestButton.style.display = relevant ? "block" : "none";
     }
   }
@@ -2734,10 +2725,7 @@
     retestButton.type = "button";
     retestButton.dataset.i18n = "retest";
     retestButton.textContent = t("retest");
-    retestButton.addEventListener("click", function () {
-      retest();
-      renderStatus();
-    });
+    retestButton.addEventListener("click", function () { retest(); });
 
     // Advanced toggle (pinned at panel bottom) + section. Keeping the toggle as
     // the bottom-most element means expanding grows the panel upward while the
@@ -2985,7 +2973,7 @@
     getStats: function () { return JSON.parse(JSON.stringify(state)); },
     getDiagnostics: function () { return buildDiagnostics(); },
     rewriteUrl: function (url) { return core.rewriteUrl(url, rewriteConfig()); },
-    retest: function () { const started = retest(); renderStatus(); return started; }
+    retest: function () { return retest(); }
   };
 
   dropLegacyRankings();

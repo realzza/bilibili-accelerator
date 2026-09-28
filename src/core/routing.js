@@ -340,9 +340,8 @@
     }
     const inflight = i.inflight || [];
     for (let k = 0; k < inflight.length; k += 1) {
-      const verdict = stuckVerdict(inflight[k], i.now, i.requiredBps, i.bufferAheadS);
-      if (verdict) {
-        return { trigger: "stuck", req: inflight[k], detail: verdict };
+      if (stuckVerdict(inflight[k], i.now, i.requiredBps, i.bufferAheadS)) {
+        return { trigger: "stuck", req: inflight[k] };
       }
     }
     const enough = i.measuredBytes >= SHORTFALL_MIN_BYTES || i.measuredMs >= SHORTFALL_MIN_MS;
@@ -436,16 +435,14 @@
     const bytes = raceBytes || RACE_BYTES;
     const currentMs = currentRateBps > 0 ? bytes * 8000 / currentRateBps : Infinity;
     if (!done.length) {
-      return { winner: null, runnerUp: null, switchTo: null, currentMs };
+      return { winner: null, runnerUp: null, switchTo: null };
     }
     const winner = done[0];
     const better = winner.ms * SWITCH_GAIN <= currentMs;
     return {
       winner: winner.host,
       runnerUp: done[1] ? done[1].host : null,
-      switchTo: better ? winner.host : null,
-      winnerMs: winner.ms,
-      currentMs
+      switchTo: better ? winner.host : null
     };
   }
 
@@ -527,16 +524,15 @@
     RACE_TIMEOUT_MS,
     MAX_SWITCHES,
     ERROR_WINDOW_MS,
-    ERROR_LIMIT,
+    SHORTFALL_RATE_FACTOR,
     SWITCH_GAIN,
     AUDIO_ID_RE,
     fileKey,
     cidOf,
     repIdOf,
     parseRange,
+    dashContainers,
     buildTable,
-    isAkamai,
-    isUposHost,
     urlFor,
     candidatesFor,
     createEstimator,

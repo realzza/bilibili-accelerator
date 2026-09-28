@@ -115,18 +115,6 @@ test("mode off disables all rewriting", () => {
   assert.equal(detail.changed, false);
 });
 
-test("alternativesFor builds host-swapped backups excluding current host", () => {
-  const original = "https://upos-sz-mirrorcos.bilivideo.com/upgcxcode/v.m4s?abc=1";
-  const alts = core.alternativesFor(original, {}, [
-    "upos-sz-mirrorcos.bilivideo.com",
-    "upos-sz-mirrorali.bilivideo.com",
-    "upos-sz-mirrorhw.bilivideo.com"
-  ]);
-  assert.equal(alts.length, 2);
-  assert.ok(alts.every((u) => u.includes("/upgcxcode/v.m4s")));
-  assert.ok(!alts.some((u) => new URL(u).hostname === "upos-sz-mirrorcos.bilivideo.com"));
-});
-
 test("throughputMbps converts bytes over a window to megabits per second", () => {
   // 1,000,000 bytes in 1000 ms = 8 Mbps
   assert.equal(core.throughputMbps(1e6, 1000), 8);
