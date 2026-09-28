@@ -364,6 +364,7 @@ Where the code refines the proposal, and why:
 
 - Control: the first attempt at run 1 happened in a background tab, where the engine stands aside by design. With the same slow host, the player sat at a startup stall for about 13 s, fetching a 2 MB fragment at 2.1 Mbps.
 - On the same cold video with the real assignment (`mirrorcosov`, 4.6 Mbps against 3.2 needed, around 08:00 Beijing), the engine did not race, as intended.
+- **A fragment that hangs on a host that keeps up** (Chromium, logged in, a popular video at 4K, build `6d6fc71`). Right after a seek to an unbuffered position, the harness sent one video fragment to an unroutable address (192.0.2.1), so it got no first byte. In three runs the race judged the host on its record (`mirrorcosov` at 181 and 67 Mbps, Akamai at 28 Mbps) and moved only the fragment: no switch, and the panel kept 原生线路. When the race finished before the player's 2 s timeout, the synthetic timeout sent the retry to the winner (Akamai, 768 KB in 380 ms) and playback resumed 2.5 s after the seek. When the player's timeout finished first, the engine handed no second timeout and the player's own retry went through. Two errors on one host within 30 s still moved the video, by the errors trigger. A hang with more than 3 s buffered is left to the player's timeout, which moves that representation to the next URL in its list.
 - Not yet: Safari with the build installed, and Beijing's evening peak.
 
 ## Reproducing
