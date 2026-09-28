@@ -1,22 +1,22 @@
 # VOD host selection and switching
 
-> Status: implemented on this branch (0.5.0), 2026-09-27. The maintainer delegated the open decisions; they are recorded under [Decisions](#decisions). Awaiting code review and testing in Safari.
+> Status: implemented in 0.5.0 (PR #38). The maintainer delegated the open decisions during review; they are recorded under [Decisions](#decisions).
 >
-> Measured from the maintainer's network (US West, Ziply Fiber, no iCloud Private Relay) with Safari 27 running v0.4.1, and with Chromium logged in as 大会员 at the highest quality each video offers. Host speed changes with the hour in China, so times are given in PDT with Beijing time next to them. A measurement loop is running through Beijing's evening peak; its results will be added here before the design is final.
+> Measured from the maintainer's network (US West, Ziply Fiber, no iCloud Private Relay) with Safari 27 running v0.4.1, and with Chromium logged in as 大会员 at the highest quality each video offers. Host speed changes with the hour in China, so times are given in PDT with Beijing time next to them.
 
 ## Short answer
 
-The extension picks a host once per six hours from a probe that measures the wrong thing, applies the pick to every video, and on each stall walks one step down its list without checking whether the next host is any better. On the maintainer's machine it started on a host that couldn't carry the stream, reached the end of the list after six switches, and along the way overrode the one good decision the player had made on its own.
+Up to 0.4.x the extension picked a host once per six hours from a probe that measured the wrong thing, applied the pick to every video, and on each stall walked one step down its list without checking whether the next host was any better. On the maintainer's machine it started on a host that couldn't carry the stream, reached the end of the list after six switches, and along the way overrode the one good decision the player had made on its own.
 
 Three findings drive the redesign.
 
 1. **Which host is fast depends on the video.** Bilibili's overseas edge `mirrorcosov` moved a popular 4K file at 94 Mbps and a new upload at 4–8 Mbps in the same minute. It is fast when other overseas viewers have already pulled the file and slow when it has to relay from origin. No ranking computed once and reused across videos can be right for both.
-2. **The shipped probe ranks round-trip time, not throughput.** It reads the first 768 KB of a file. That window is TCP slow start plus whatever the edge already holds of the file's head. Mainland mirrors look slow in it (6–10 Mbps) and then sustain 38–84 Mbps; a cold overseas edge looks fast (17.6 Mbps) and then drops to 3.1.
+2. **The 0.4.x probe ranked round-trip time, not throughput.** It read the first 768 KB of a file. That window is TCP slow start plus whatever the edge already holds of the file's head. Mainland mirrors look slow in it (6–10 Mbps) and then sustain 38–84 Mbps; a cold overseas edge looks fast (17.6 Mbps) and then drops to 3.1.
 3. **The player already fails over, but only on errors and timeouts.** Bilibili's player is a dash.js fork. It keeps a sticky URL index per representation and moves to the next URL when a request errors, gets no first byte within about two seconds, or runs past its total timeout. It can't see a host that answers at once and then delivers below the stream's bitrate. That is where the stutter comes from, and it is the case the extension has to handle.
 
-The design starts every video on the host Bilibili assigned. It measures what the player actually receives, fragment by fragment. When the host can't keep up, it races two alternatives on the bytes the player needs next, routes the rest of the session to the winner, and ends the stuck request through the player's own retry path so the switch takes effect at once. After a successful switch it stays put. The six-hour ranking, the page-load probe of the whole pool, the rotation cursor and the backup-URL fan-out are removed.
+The design starts every video on the host Bilibili assigned. It measures what the player actually receives, fragment by fragment. When the host can't keep up, it races two alternatives on the bytes the player needs next, routes the rest of the session to the winner, and ends the stuck request through the player's own retry path so the switch takes effect at once. After a successful switch it stays put. A single fragment that hangs on a host that has been keeping up is retried on the winner, and the video stays. The six-hour ranking, the page-load probe of the whole pool, the rotation cursor and the backup-URL fan-out are removed.
 
-## What goes wrong today
+## What went wrong in 0.4.x
 
 ### A field report
 
@@ -139,7 +139,7 @@ A host that answers quickly and then trickles trips none of these. A cold `mirro
 A switch only helps if the fragment the player is waiting for moves too. Two ways of ending that request were tested.
 
 - **Lowering `xhr.timeout` mid-flight.** In Chromium, setting it to 1 fires `timeout` at once. In Safari 27 it does nothing: the request completed normally whether the change came before the response headers or after. Not usable.
-- **A synthetic timeout.** Detach the player's handlers from that request, abort it natively, then call the player's own `ontimeout` and `onloadend`. To the loader this is a timeout like any other: status 0, the retry path, the next URL. On the real player in Chromium (logged in, 1080P+ HEVC, a 2.96 MB fragment on `mirrorcosov`) the retry went out 1 ms later, playback resumed, and no error was shown. In that run the retry went to the player's next URL, `mirrorakam`, which then missed the player's own first-byte deadline; under this design it would have gone to the winner of a race. The technique uses no browser feature beyond `abort()`, so it should behave the same in Safari, but that isn't verified yet. The document-start iframe harness used for live rooms can't run the player in WebKit, where the frame's media requests go out without a `Referer`. Phase 3 has to confirm it with the build installed.
+- **A synthetic timeout.** Detach the player's handlers from that request, abort it natively, then call the player's own `ontimeout` and `onloadend`. To the loader this is a timeout like any other: status 0, the retry path, the next URL. On the real player in Chromium (logged in, 1080P+ HEVC, a 2.96 MB fragment on `mirrorcosov`) the retry went out 1 ms later, playback resumed, and no error was shown. In that run the retry went to the player's next URL, `mirrorakam`, which then missed the player's own first-byte deadline; under this design it would have gone to the winner of a race. The technique uses no browser feature beyond `abort()`, so it should behave the same in Safari, where it is guarded by a retry self-check (see [Decisions](#decisions)). The document-start iframe harness used for live rooms can't run the player in WebKit, where the frame's media requests go out without a `Referer`.
 
 A native `abort()` alone won't do. The loader treats an abort as intentional, and would run both its abort path and, through `onloadend`, its retry path.
 
@@ -168,7 +168,7 @@ A session is one video on one page: a playurl payload for one `cid`, plus any la
 
 ### Measurement
 
-**Passive.** The XHR hook already sees every media request. With `setRequestHeader` (to read `Range`) and a `progress` listener added, it records for each request the host, representation, range, bytes, time to first byte and time to completion. Goodput per host and session comes from video fragments only: bytes over the union of their transfer intervals, using the existing `aggregateThroughput`. Audio fragments are about 40 KB and mostly first-byte time, so they would read as a slow host; they count toward errors but not goodput. The estimate follows Shaka Player's rules: a fragment under 16 KB doesn't count on its own, nothing is trusted before 128 KB in total, and a fast and a slow average (2 s and 5 s half-lives) are kept and the lower one used, so the estimate falls quickly and recovers slowly.
+**Passive.** The XHR hook already sees every media request. With `setRequestHeader` (to read `Range`) and a `progress` listener added, it records for each request the host, representation, range, bytes, time to first byte and time to completion. Goodput per host and session comes from video fragments only, each timed from send to its last byte. Audio fragments are about 40 KB and mostly first-byte time, so they would read as a slow host; they count toward errors but not goodput. The estimate follows Shaka Player's rules: a fragment under 16 KB doesn't count on its own, nothing is trusted before 128 KB in total, and a fast and a slow average (2 s and 5 s half-lives) are kept and the lower one used, so the estimate falls quickly and recovers slowly.
 
 **In flight.** For the video fragment currently loading, `progress` events give the bytes so far and the rate over the last second, and from those a predicted finish.
 
@@ -179,7 +179,8 @@ A session is one video on one page: a playurl payload for one `cid`, plus any la
 ### Initial selection
 
 A session starts native: requests go wherever the player sends them, with nothing rewritten. The one exception is a PCDN or MCDN base URL: if Bilibili issued a proper CDN URL as its backup, that URL is used as issued; otherwise `classify()` rewrites it as before (PCDN to the default target, MCDN by `mcdnStrategy`).
-The first real fragment decides. A race starts if it has no first byte after 1 s, or if after 0.5 s of transfer it is arriving at less than 1.3× the required rate with more than a second still to go. On a popular video the assigned edge answers within 30–150 ms and nothing happens. On a cold one the race starts after about a second and takes 0.3–1.5 s, close to when the player's own 2 s deadline would fire, and it picks a measured host instead of simply the next URL. If the player's deadline fires first, its retry goes out as it does today, and the race result applies from the next request.
+
+The first real fragment decides. A race starts if it has no first byte after 1 s, or if after 0.5 s of transfer it is arriving at less than 1.3× the required rate with more than a second still to go. On a popular video the assigned edge answers within 30–150 ms and nothing happens. On a cold one the race starts after about a second and takes 0.3–1.5 s, close to when the player's own 2 s deadline would fire, and it picks a measured host instead of simply the next URL. If the player's deadline fires first, its retry goes out as it would without the extension, and the race result applies from the next request.
 
 There is no probe at page load and no stored ranking.
 
@@ -215,44 +216,35 @@ If `ontimeout` isn't a function on the request, as with a future player that use
 
 When a race moves only the stuck fragment, the fragment gets the same synthetic timeout, and for the next 3 s every request of the session goes to the winner: the player sends its retry to the next URL in its own list, which may not be the winner. After that the video is routed to the host it was on, and a request that fails there retries on the winner. The player keeps using its next URL after a timeout, so without this the video would move anyway. The hang counts as an error on that host, so a second hang or failure within 30 s moves the video.
 
-A request that fails on the active host is routed away from it on retry, to the runner-up of the last race or else the next candidate by history. Without this, taking over routing would disable the player's failover the same way force mode does now. A retry sent elsewhere like this is not watched for being stuck: only requests on the video's own host trigger a race.
+A request that fails on the active host is routed away from it on retry, to the runner-up of the last race or else the next candidate by history. Without this, taking over routing would disable the player's failover the same way force mode does. A retry sent elsewhere like this is not watched for being stuck: only requests on the video's own host trigger a race.
 
 ### Staying put
 
-- A new host is judged on its own traffic after 10 s of transfer or 4 MB. Before that, only errors count against it.
+- A new host's sustained rate is judged after 8 s of transfer or 4 MB. Before that, only errors and stuck fragments count against it.
 - After a switch there is no new race for 10 s, and each further switch in the session doubles the wait (10, 20, 40 s).
-- At most four switches per session. After that the session keeps the best host it has measured.
+- At most four switches per session. After that the engine starts no races of its own; only 测试其他线路 can still move the video.
 - A quality change keeps the active host, and its traffic is measured like any other.
-- If every candidate has failed, routing stops for the session and the player's own URLs go out as issued.
-
-### The field report, replayed
-
-Expected behavior, not a measurement, using the numbers above. The session starts on `mirrorcosov`, which Bilibili assigned. The first 1080P+ fragment arrives at about 1.1 Mbps, under 1.3× the required 3.75, so a race starts after half a second. The challengers are `mirrorakam`, the other issued host, and the best mainland mirror by history, say `mirrorhw`. `mirrorhw` delivers its 768 KB in one to two seconds including the new connection, against more than five seconds for `mirrorcosov` at its present rate, so it wins. The stuck fragment gets a synthetic timeout, the player retries it on `mirrorhw`, and the buffer fills at 20 Mbps. One switch, and no rotation afterwards.
-
-On the popular 4K video in the same table nothing happens at all: `mirrorcosov` answers in 60 ms at 94 Mbps and the session never leaves it.
+- If no candidate is left to race, a race changes nothing and the next one waits longer, up to two minutes.
 
 ### History
 
-Per region (time zone, as today), in `localStorage` under a new key:
+Per region (by time zone), in `localStorage` under `biliAccelerator.hosts.v1.`: per host, an average of race results and of the rate a host was delivering when a switch left it, with a three-day half-life, a sample count, and the time of the last failure.
 
-- per host, an average of race and session goodput with a three-day half-life, a sample count, and the time of the last failure;
-- over the last 10 sessions, how often the assigned host was replaced.
-
-History only orders challengers and decides whether to race the first fragment. It never picks the active host without a race. A host with no history counts as average, so new or long-unused hosts still get tried.
+History only orders challengers. It never picks the active host without a race, and a host with no history still gets tried (see [Choosing](#choosing-the-next-host)).
 
 ### Settings
 
-- **Selection: auto** runs the engine above. `mode` has no effect in auto and its 何时 row is hidden, the same treatment PR #35 gave the fixed-host picker. A saved `mode: "force"` stays in storage and applies again if the viewer picks fixed.
+- **Selection: auto** runs the engine above. `mode` has no effect in auto and its row (适用范围, was 何时) is hidden, the same treatment PR #35 gave the fixed-host picker. A saved `mode: "force"` stays in storage and applies again if the viewer picks fixed.
 - **Selection: fixed** is unchanged: bad-only replaces only PCDN with the fixed host, force sends everything to it, and there is no engine.
 - **自动切换线路 / Auto-switch servers** (was 自动恢复 / Auto-recover) turns switching on and off. Off, auto keeps the PCDN handling and keeps measuring, but races only when the viewer presses 测试其他线路.
 - **改写 Akamai** applies to fixed selection only. In auto, the issued Akamai URL is a candidate like any other and is measured.
 - **还在卡？再加把劲** goes. It saved force mode for good after one stall and reloaded the page. In its place, 测试其他线路 starts one race and saves nothing (see [Decisions](#decisions)).
 
-Removed from the auto path: `scheduleProbe` and `probeHost`, the `biliAccelerator.rank.*` cache, `rotateTarget` and `rotateCursor`, `recovery.avoidHost`, `enrichBackups`, and the use of `config.pcdnHost` as a runtime target. A schema bump deletes the old rank keys. `rankHosts` stays in core for the live-room work, which plans to rank race results with it.
+Removed from the auto path: `scheduleProbe` and `probeHost`, the `biliAccelerator.rank.*` cache, `rotateTarget` and `rotateCursor`, `recovery.avoidHost`, `enrichBackups`, and the use of `config.pcdnHost` as a runtime target. The old rank keys are deleted at boot, and a schema bump (4) resets a saved auto `pcdnHost`. `rankHosts` stays in core for the live-room work, which plans to rank race results with it.
 
 ### Diagnostics and panel
 
-The report gains a `session` block that carries no URL beyond a bare host: the issued hosts per representation, the required rate, per host the requests, bytes, goodput and median first-byte time, every race (challengers, bytes, times, winner), every switch (from, to, trigger, rates before and after), synthetic timeouts, and whether routing was released.
+The report gains a `session` block that carries no URL beyond a bare host: the issued hosts per representation, the required rate, per host the requests, bytes, goodput and median first-byte time, every race (contenders, bytes, times, and the switch or retry it led to) and every switch (from, to, trigger, the rate it left). The synthetic-timeout counters sit beside the block.
 
 The panel says what was measured and what was done:
 
@@ -284,7 +276,7 @@ Hosts are named by region and cloud, not by hostname, and the host Bilibili assi
 | failure | handling |
 | --- | --- |
 | the player changes its loader | synthetic timeouts are skipped unless `ontimeout` is a function property; routing and measurement don't depend on it |
-| a synthetic timeout confuses the player | at most one per range and four per session; Phase 3 watches for player error toasts and `downloadError` |
+| a synthetic timeout confuses the player | at most one per range; a second hang on the same host within 30 s switches instead, and after four switches the engine starts no races of its own |
 | mainland connection setup fails | the race filters it out; two failures mark the host failed for the session |
 | signed URLs expire | the player fetches a new playurl, and the session table is rebuilt from it |
 | every path is congested | the race finds nothing clearly faster, and nothing changes |
@@ -298,32 +290,6 @@ Hosts are named by region and cloud, not by hostname, and the host Bilibili assi
 - **Warming edges or prefetching.** Only the race range is fetched twice.
 - **Live rooms.** They have their own design in progress. The session table and the race could be shared later.
 
-## Plan
-
-### Phase 1: design review (this PR)
-
-Done: the open decisions were delegated and are recorded above.
-
-### Phase 2: implementation, on this PR (done)
-
-- core: the session table (representations, issued URLs, the mapping), the goodput and in-flight estimates, trigger evaluation, race selection with hysteresis, history decay. All pure and unit-tested, as `rankHosts` is today.
-- page: `setRequestHeader` and `progress` in the XHR hook, routing by session, the race, the synthetic timeout, the settings and panel changes, the diagnostics block, the schema bump.
-- tests, in the vm harness (`test/v2-page.test.js`): native until a trigger; one race per trigger; Akamai reached through its issued URL and mirrors through host swaps; a retry routed away from a failing host; at most one synthetic timeout per range and four switches per session; nothing while hidden; nothing written to the saved config; fixed selection unchanged; PCDN and MCDN unchanged; live pages untouched; no URL in the diagnostics.
-
-### Phase 3: validation (in progress)
-
-Chromium through the iframe harness (two runs above), and Safari with the build installed. Logged in, highest quality. Two popular and two cold videos, five minutes each, off-peak and between 20:00 and 23:00 Beijing (05:00–08:00 PDT), against the extension turned off and against v0.4.1 on default settings.
-
-Acceptance:
-
-- cold videos: total stall time and stall count no worse than with the extension off, and at least halved relative to v0.4.1;
-- popular videos: no switches and no change in startup time relative to the extension off;
-- at most two switches per video in 95% of sessions;
-- no player error toast caused by a synthetic timeout, in either browser;
-- no switch while the tab is hidden.
-
-Then 0.5.0.
-
 ## Decisions
 
 The maintainer delegated these on 2026-09-27. Each follows from the measurements above.
@@ -336,7 +302,7 @@ The maintainer delegated these on 2026-09-27. Each follows from the measurements
 
 ## Implementation notes
 
-Where the code refines the proposal, and why:
+Where the code refines the design above, and why:
 
 - **Races are decided at the first finisher**, not after a grace period. In the first real-page run the 300 ms grace was half the time between detecting a stuck fragment and the player's retry completing.
 - **A stuck fragment moves the video only against the host's own record** (see [Choosing](#choosing-the-next-host)). In a Chromium run on a cold 4K video, `mirrorcos` had delivered 41 MB at 16.8 Mbps when one fragment got no first byte with under 3 s buffered. The stuck request's rate was 0, so any finisher won, and the video moved to `tf-all-tx`, which had taken 2.2 s for 768 KB: a third switch in a minute, for one bad connection. The fragment still needed rescuing; the video didn't need to move.
@@ -350,7 +316,7 @@ Where the code refines the proposal, and why:
 
 ## Validation so far
 
-- `src/core/routing.js` holds the decisions as pure functions (20 tests in `test/routing.test.js`). `test/v5-engine.test.js` drives the page script end to end with an XHR shaped like the player's loader, a fake clock, a `<video>` with a buffer, and races (20 tests). The suite runs 117 tests.
+- `src/core/routing.js` holds the decisions as pure functions (20 tests in `test/routing.test.js`). `test/v5-engine.test.js` drives the page script end to end with an XHR shaped like the player's loader, a fake clock, a `<video>` with a buffer, and races (20 tests). The suite runs 115 tests.
 - **Chromium, real player, logged in, highest quality**, with the assigned host made slow by pointing the page's playurl at `mirroraliov` (1–2 Mbps for any file from this network). Two runs on two cold videos:
 
 | | run 1 (1080P, 1.6–2 MB fragments) | run 2 (720P, 1–1.7 MB fragments) |
@@ -365,20 +331,17 @@ Where the code refines the proposal, and why:
 - Control: the first attempt at run 1 happened in a background tab, where the engine stands aside by design. With the same slow host, the player sat at a startup stall for about 13 s, fetching a 2 MB fragment at 2.1 Mbps.
 - On the same cold video with the real assignment (`mirrorcosov`, 4.6 Mbps against 3.2 needed, around 08:00 Beijing), the engine did not race, as intended.
 - **A fragment that hangs on a host that keeps up** (Chromium, logged in, a popular video at 4K, build `6d6fc71`). Right after a seek to an unbuffered position, the harness sent one video fragment to an unroutable address (192.0.2.1), so it got no first byte. In three runs the race judged the host on its record (`mirrorcosov` at 181 and 67 Mbps, Akamai at 28 Mbps) and moved only the fragment: no switch, and the panel kept 原生线路. When the race finished before the player's 2 s timeout, the synthetic timeout sent the retry to the winner (Akamai, 768 KB in 380 ms) and playback resumed 2.5 s after the seek. When the player's timeout finished first, the engine handed no second timeout and the player's own retry went through. Two errors on one host within 30 s still moved the video, by the errors trigger. A hang with more than 3 s buffered is left to the player's timeout, which moves that representation to the next URL in its list.
-- Not yet: Safari with the build installed, and Beijing's evening peak.
+- Safari: the maintainer tested the installed build and found no functional problems. `synthetic.noRetry` in the report shows whether the synthetic timeout ever failed there.
 
 ## Reproducing
 
-- `scripts/research/vod-hosts.mjs` runs one measurement round from a terminal, logged out, at the qualities a logged-out viewer gets (480P and below). For a popular, a moderately watched and a freshly uploaded video it records Bilibili's assignment, replicates the shipped probe, and makes three sequential 512 KB range requests per host at a random offset, over one connection per host. With `--harvest-cold 40` it prints a list of fresh uploads instead.
-- `scripts/research/vod-hosts.page.js` does the same inside a logged-in `bilibili.com` tab at the highest quality the account can play, with 768 KB requests, and repeats every three hours, or every 30 minutes during Beijing's evening peak. Set `window.__measConfig.cold` to the harvested list first, paste the script into the console, and read `window.__meas` later.
+- The measurement scripts behind the tables, one for a terminal at logged-out qualities and one for a logged-in tab at the account's highest quality, are in PR #38's history rather than the repository. Neither writes a URL or query string into its results.
 - The iframe harness runs a build, or a test hook, at document start on a real video page: fetch the page's HTML with credentials, insert the script at the top of `<head>`, and `document.write` the result into a full-viewport same-origin iframe. It works in Chromium. In WebKit the frame's media requests go out without a `Referer` and fail, so Safari needs the build installed.
 - The player facts come from `s1.hdslb.com/bfs/static/player/main/core.ba67b466.js`: the fragment loader and its timeouts are in the `HTTPLoader` and `XHRLoader` factories, and the retry defaults in `MediaPlayerModel`.
-
-Neither script writes a URL or query string into its results.
 
 ## Limits
 
 - One network, US West. Viewers in Japan, Southeast Asia or Europe may get other hosts assigned; history is what adapts to that.
-- Peak hours in China aren't in these tables yet. The loop that covers them is running.
+- Peak hours in China aren't in these tables.
 - The synthetic timeout is verified in Chromium only; in Safari it is guarded by the retry self-check.
-- Several per-host numbers are single samples. They show large gaps, not calibrated thresholds. The 1.2×, 1.3× and two-thirds factors are starting points for Phase 3 to tune.
+- Several per-host numbers are single samples. They show large gaps, not calibrated thresholds. The 1.2×, 1.3× and two-thirds factors are starting points, to be tuned from field reports.
