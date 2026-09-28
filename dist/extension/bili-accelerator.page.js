@@ -3237,7 +3237,7 @@
       },
       notes: {
         native: function (server) { return "Native server · " + server; },
-        switched: function (server, before) { return "Switched to " + server + (before ? " (previous server " + before + " Mbps)" : ""); },
+        switched: function (server) { return "Switched to " + server; },
         fixed: function (server) { return "Fixed server · " + server; },
         short: "The current server is too slow for this video",
         failing: "The current server is failing requests",
@@ -3274,8 +3274,8 @@
       hostCustom: "Custom…", fCustomHost: "Server address", hostPlaceholder: "Enter a server address",
       modeBad: "P2P/PCDN nodes only", modeForce: "All video requests",
       mcdnAll: "Proxy all MCDN", mcdnV1: "Proxy /v1 only", mcdnReplace: "Replace host",
-      portTitle: "Catch hidden PCDN", portNote: "Treat odd-port servers as slow (recommended)",
-      stallTitle: "Auto-switch servers", stallNote: "When a server can't keep up, test others and switch to a faster one",
+      portTitle: "Catch hidden PCDN", portNote: "Treat odd ports as slow (recommended)",
+      stallTitle: "Auto-switch servers", stallNote: "Switch when a server can't keep up",
       akamaiTitle: "Rewrite Akamai", akamaiNote: "Only if Akamai is slow on your network",
       p2pTitle: "Stop bandwidth sharing", p2pNote: "Block Bilibili's P2P upload (reload to apply)",
       diag: "Copy report", diagCopied: "Copied ✓", diagConsole: "See console",
@@ -3293,7 +3293,7 @@
       },
       notes: {
         native: function (server) { return "原生线路 · " + server; },
-        switched: function (server, before) { return "已切换到 " + server + (before ? "（原线路 " + before + " Mbps）" : ""); },
+        switched: function (server) { return "已切换到 " + server; },
         fixed: function (server) { return "固定线路 · " + server; },
         short: "当前线路速度不足",
         failing: "当前线路请求失败",
@@ -3331,7 +3331,7 @@
       modeBad: "仅 P2P/PCDN 节点", modeForce: "所有视频请求",
       mcdnAll: "代理所有 MCDN", mcdnV1: "仅代理 /v1", mcdnReplace: "替换域名",
       portTitle: "抓取隐藏 PCDN", portNote: "把奇怪端口的服务器当作慢节点（推荐）",
-      stallTitle: "自动切换线路", stallNote: "当前线路速度不足时，自动测试并切换到更快的线路",
+      stallTitle: "自动切换线路", stallNote: "线路速度不足时，自动切换到更快的线路",
       akamaiTitle: "改写 Akamai", akamaiNote: "仅当 Akamai 在你的网络上很慢时使用",
       p2pTitle: "停止带宽共享", p2pNote: "阻止 B 站的 P2P 上传（刷新后生效）",
       diag: "复制诊断报告", diagCopied: "已复制 ✓", diagConsole: "见控制台",
@@ -3388,11 +3388,6 @@
     return info;
   }
 
-  function formatMbps(bps) {
-    const mbps = bps / 1e6;
-    return mbps >= 100 ? String(Math.round(mbps)) : mbps.toFixed(1);
-  }
-
   // "海外 · 腾讯云" rather than upos-sz-mirrorcosov.bilivideo.com.
   function hostLabel(host) {
     const d = routing.describeHost(host);
@@ -3401,10 +3396,11 @@
     return d.region ? s.regions[d.region] + " · " + vendor : vendor;
   }
 
-  // The status line says which server is in use and what happened; the speed
-  // card below it is the one place that shows a live rate. The engine's own
-  // estimate counts video fragments only, per request, and would never match
-  // the card, which averages every media transfer over a few seconds.
+  // The status line says which server is in use and what happened, with no
+  // rates: the speed card below it is the one place that shows one. The
+  // engine's own estimate counts video fragments only, per request, and would
+  // never match the card, which averages every media transfer over a few
+  // seconds. Each note fits one line of the panel in both languages.
   function statusNote(info) {
     const s = STRINGS[lang()];
     if (info.legacy || !info.session) {
@@ -3438,14 +3434,7 @@
     if (config.selection !== "auto") {
       return n.fixed(server);
     }
-    if (info.switched) {
-      // Why it switched: what the server it left was delivering. That is a
-      // past rate of another server, so it can't be mistaken for the card's.
-      const last = info.session.switches[info.session.switches.length - 1];
-      const before = last && last.beforeMbps > 0 ? formatMbps(last.beforeMbps * 1e6) : "";
-      return n.switched(server, before);
-    }
-    return n.native(server);
+    return info.switched ? n.switched(server) : n.native(server);
   }
 
   function countText(info) {
@@ -3726,8 +3715,10 @@
       ".ba-dot.ba-testing,.ba-dot.ba-buffering,.ba-dot.ba-slow{background:var(--ba-warn-bg)}.ba-dot.ba-testing:after,.ba-dot.ba-buffering:after,.ba-dot.ba-slow:after{background:var(--ba-warn)}",
       ".ba-dot.ba-off:after{background:var(--ba-dot)}",
       ".ba-word{font-size:15px;font-weight:800;color:var(--ba-ink)}",
-      ".ba-subnote{font-size:11px;color:var(--ba-ink-soft);margin-top:2px;line-height:1.4}",
-      ".ba-count{font-size:11px;color:var(--ba-ink-faint);margin-top:6px}",
+      // Notes are written to fit one line. When one can't (a custom host name,
+      // a narrow window), balance the two lines rather than leave a stub.
+      ".ba-subnote{font-size:11px;color:var(--ba-ink-soft);margin-top:2px;line-height:1.4;text-wrap:balance}",
+      ".ba-count{font-size:11px;color:var(--ba-ink-faint);margin-top:6px;text-wrap:balance}",
       ".ba-speed{margin:0 0 10px;padding:10px 12px;border:1px solid var(--ba-border);border-radius:10px;background:var(--ba-card)}",
       ".ba-speed-top{display:flex;align-items:baseline;justify-content:space-between;gap:8px}",
       ".ba-speed-label{font-size:12px;font-weight:700;color:var(--ba-ink-mid)}",
@@ -3742,7 +3733,7 @@
       ".ba-switch-row[hidden]{display:none}",
       ".ba-switch-text{display:grid;gap:2px}",
       ".ba-switch-title{font-size:13px;font-weight:750;color:var(--ba-ink)}",
-      ".ba-switch-note{font-size:11px;color:var(--ba-ink-soft);line-height:1.3}",
+      ".ba-switch-note{font-size:11px;color:var(--ba-ink-soft);line-height:1.3;text-wrap:balance}",
       ".ba-switch{position:relative;display:inline-flex;width:42px;height:24px;flex:0 0 auto}",
       ".ba-switch input{position:absolute;opacity:0;width:1px;height:1px}",
       ".ba-slider{position:absolute;inset:0;border-radius:999px;background:var(--ba-slider-off);cursor:pointer;transition:background .16s ease}",

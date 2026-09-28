@@ -255,12 +255,14 @@ The panel says what was measured and what was done:
 | state | 中文 | English |
 | --- | --- | --- |
 | on the assigned host | 播放流畅 · 原生线路 · 海外 · 腾讯云 | Playing smoothly · Native server · Overseas · Tencent Cloud |
-| switched | 播放流畅 · 已切换到 大陆 · 阿里云（原线路 0.9 Mbps） | Playing smoothly · Switched to Mainland · Alibaba Cloud (previous server 0.9 Mbps) |
+| switched | 播放流畅 · 已切换到 大陆 · 阿里云 | Playing smoothly · Switched to Mainland · Alibaba Cloud |
 | racing | 正在测试其他线路… · 当前片段下载过慢 | Testing other servers… · This part of the video is downloading too slowly |
 | nothing better | 网络较慢 · 已比较 3 条线路，当前线路最快 | Slow network · Compared 3 servers; this one is fastest |
 | stalled, host fine | 缓冲中 · 线路速度正常，等待播放器缓冲 | Buffering · The server is keeping up; waiting for the player |
 
-The status line carries no live rate; the speed card under it is the only place one appears. The engine's estimate counts video fragments only, request by request, while the card averages every media transfer over a few seconds, so the two differ even when both are right, and side by side they read as a contradiction (the first Safari test showed 128 Mbps above a 51.6 Mbps card). The one number the status keeps is the rate of the server a switch left, which describes a different server. Whether a server is short is stated without a number for the same reason: the engine's threshold is on its own estimate, not on the card's.
+The status line carries no rates; the speed card under it is the only place one appears. The engine's estimate counts video fragments only, request by request, while the card averages every media transfer over a few seconds, so the two differ even when both are right, and side by side they read as a contradiction (the first Safari test showed 128 Mbps above a 51.6 Mbps card). Whether a server is short is stated without a number for the same reason: the engine's threshold is on its own estimate, not on the card's. A switch used to add the rate of the server it left; in English that pushed the note onto a second line, and the viewer can't act on it, so it is kept only in the report (`session.switches[].beforeMbps`).
+
+Every status note and every settings note fits on one line of the 340 px panel in both languages, measured in the panel's 11 px system font on macOS: status notes are at most 250 px wide out of 306, settings notes at most 225 out of 226. Two settings notes used to wrap and were shortened: the odd-port note in English (Treat odd ports as slow) and the auto-switch note in both languages (Switch when a server can't keep up; 线路速度不足时，自动切换到更快的线路). A note that still can't fit, such as a fixed server with a long custom name or a panel in a narrow window, wraps into two balanced lines (`text-wrap: balance`) instead of leaving a stub on the second.
 
 Hosts are named by region and cloud, not by hostname, and the host Bilibili assigned is called the native server (原生线路). The counter under the status counts switches on this video (本视频切换了 1 次线路), or failing that the P2P nodes kept out of playback; the field report's page had shown 已修复 1594 个慢连接, which counted rewritten URLs.
 

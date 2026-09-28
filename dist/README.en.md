@@ -45,7 +45,7 @@ Open `chrome://extensions`, turn on Developer mode, and load `dist/extension`.
 - The top of the panel shows current status; below it is a live download-speed graph. When speed data isn't available, it falls back to how many seconds are buffered ahead.
 - Appearance follows the system theme. Once you pick the sun or moon in the header, that choice sticks.
 - Advanced settings has seven accents: Bilibili Blue, Teal, Emerald, Violet, Pink, Sunset, and Graphite.
-- The status line names the server in use: the native server (the one Bilibili assigned to this video), or the one it switched to, with the rate of the server it left. The live rate appears only in the download-speed card below it.
+- The status line names the server in use: the native server (the one Bilibili assigned to this video) or the one it switched to. The live rate appears only in the download-speed card below it.
 - If the video has stalled or the server is short, **Test other servers** compares a few servers right away and switches only to one that is clearly faster. It saves nothing and doesn't reload the page.
 - The bandwidth guard is off by default. Turning it on limits the page's use of your upload bandwidth; reload the page afterwards.
 - In web fullscreen the ⚡ badge fades out. Move the pointer to the lower-right corner to bring it back.
