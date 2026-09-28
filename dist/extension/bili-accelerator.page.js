@@ -2132,7 +2132,8 @@
       retry: !!session.requested[slot],
       handed: false,
       aborted: false,
-      timedOut: false
+      timedOut: false,
+      ended: false
     };
     session.requested[slot] = true;
     const pending = engine.synthetic.pending;
@@ -2170,6 +2171,7 @@
 
   function endRequest(req, status, loaded) {
     const session = req.session;
+    req.ended = true;
     const index = session.inflight.indexOf(req);
     if (index !== -1) {
       session.inflight.splice(index, 1);
@@ -2318,8 +2320,11 @@
     refreshStatus();
   }
 
-  function recentErrors(stats, now) {
-    return stats.errors.filter(function (t) { return now - t < routing.ERROR_WINDOW_MS; }).length;
+  // Errors within the window, or only those before a given time.
+  function recentErrors(stats, now, before) {
+    return stats.errors.filter(function (t) {
+      return now - t < routing.ERROR_WINDOW_MS && !(t >= before);
+    }).length;
   }
 
   function startRace(session, trigger, stuckReq) {
@@ -2545,9 +2550,11 @@
     let baseRate = incumbent ? incumbent.bytes * 8000 / Math.max(1, incumbent.ms) : currentRate;
     let verdict;
     if (trigger === "stuck" && !incumbent) {
+      // Errors from before the stuck request: if the player's own timeout
+      // ended it during the race, that is this same hang, not an earlier one.
       const stats = hostStats(session, current);
       verdict = routing.stuckRaceVerdict(challengers, currentRate, stats.est.estimate(),
-        recentErrors(stats, now), raceBytes);
+        recentErrors(stats, now, stuckReq ? stuckReq.startedAt : undefined), raceBytes);
       baseRate = verdict.hostRateBps;
     } else {
       verdict = routing.raceVerdict(challengers, baseRate, raceBytes);
@@ -2630,7 +2637,9 @@
   // through onloadend, its retry path.
   function handTimeout(req) {
     const xhr = req.xhr;
-    if (engine.synthetic.disabled || req.retry || req.handed || !xhr || xhr.readyState === 4) {
+    // A race can outlast the request: the player's own timeout may have ended
+    // it already, and after abort() readyState reads 0, not 4.
+    if (engine.synthetic.disabled || req.retry || req.handed || req.ended || !xhr || xhr.readyState === 4) {
       return false;
     }
     const onTimeout = xhr.ontimeout;
@@ -2655,23 +2664,23 @@
   }
 
   // Retry one stuck fragment on another host and leave the video where it is.
-  // After a timeout the player moves to the next URL in its list for good, so
-  // leaving the video where it is means routing it there from now on. The
-  // detour goes in before the timeout is handed over, because the player may
-  // open its retry from inside the timeout handler. The hang counts against
-  // its host like a failed request, so a second one within the error window
-  // moves the video.
+  // After a timeout, the player's own or ours, the player moves to the next
+  // URL in its list for good, so leaving the video where it is means routing
+  // it there from now on; a request that fails there retries on the winner.
+  // The detour goes in before the timeout is handed over, because the player
+  // may open its retry from inside the timeout handler. The hang counts
+  // against its host like a failed request, so a second one within the error
+  // window moves the video. Returns false when no timeout could be handed
+  // over: the player's own timeout ended the request first, it is a retry, or
+  // synthetic timeouts are off.
   function retryStuck(session, current, host, req) {
-    const pinned = !session.active;
-    if (pinned) {
+    if (!session.active) {
       session.active = current;
     }
+    session.fallback = host;
     session.detour = { host, until: nowMs() + AVOID_MS };
     if (!handTimeout(req)) {
       session.detour = null;
-      if (pinned) {
-        session.active = null;
-      }
       return false;
     }
     hostStats(session, req.host || current).errors.push(nowMs());

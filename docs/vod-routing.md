@@ -213,7 +213,7 @@ If the trigger was a stuck fragment, and that request is a first attempt (a rang
 
 If `ontimeout` isn't a function on the request, as with a future player that uses `fetch` or `addEventListener`, no request is ended early. The switch then takes effect when the player's own timeout fires or the fragment completes.
 
-When a race moves only the stuck fragment, the fragment gets the same synthetic timeout, and for the next 3 s every request of the session goes to the winner: the player sends its retry to the next URL in its own list, which may not be the winner. After that the video is routed to the host it was on. The player keeps using its next URL after a timeout, so without this the video would move anyway. The hang counts as an error on that host, so a second hang or failure within 30 s moves the video.
+When a race moves only the stuck fragment, the fragment gets the same synthetic timeout, and for the next 3 s every request of the session goes to the winner: the player sends its retry to the next URL in its own list, which may not be the winner. After that the video is routed to the host it was on, and a request that fails there retries on the winner. The player keeps using its next URL after a timeout, so without this the video would move anyway. The hang counts as an error on that host, so a second hang or failure within 30 s moves the video.
 
 A request that fails on the active host is routed away from it on retry, to the runner-up of the last race or else the next candidate by history. Without this, taking over routing would disable the player's failover the same way force mode does now. A retry sent elsewhere like this is not watched for being stuck: only requests on the video's own host trigger a race.
 
@@ -341,6 +341,7 @@ Where the code refines the proposal, and why:
 - **Races are decided at the first finisher**, not after a grace period. In the first real-page run the 300 ms grace was half the time between detecting a stuck fragment and the player's retry completing.
 - **A stuck fragment moves the video only against the host's own record** (see [Choosing](#choosing-the-next-host)). In a Chromium run on a cold 4K video, `mirrorcos` had delivered 41 MB at 16.8 Mbps when one fragment got no first byte with under 3 s buffered. The stuck request's rate was 0, so any finisher won, and the video moved to `tf-all-tx`, which had taken 2.2 s for 768 KB: a third switch in a minute, for one bad connection. The fragment still needed rescuing; the video didn't need to move.
 - **Stuck detection looks only at requests on the video's host.** A retry sent to another host for a moment, after a failure or a hang, had been judged as if it were the video's host being slow.
+- **A race can outlast the request it was for.** The engine notices a missing first byte after 1 to 1.5 s, the player gives up on it at about 2 s, and a race against mainland mirrors takes up to 2.2 s. If the player's own timeout ends the request first, the engine hands it no second timeout (after `abort()` the request reads `readyState` 0, which the first check missed), and the error that timeout records is not held against the host as an earlier failure: it is the same hang.
 - **Unknown hosts score as the lower median and ties go to mainland mirrors** (see [Choosing](#choosing-the-next-host)). The pool's order would otherwise have made `mirroraliov`, the worst host for US viewers, every new viewer's first choice.
 - **A host counts as measured only after 128 KB.** The player fetches init and index segments of a few KB from both issued hosts; counting those as measurements kept Akamai out of the first challenger slot.
 - **The engine ticks only after a video fragment has been requested, only on player pages, and never in a hidden tab.** Home-page hover previews load playurls too.
@@ -349,7 +350,7 @@ Where the code refines the proposal, and why:
 
 ## Validation so far
 
-- `src/core/routing.js` holds the decisions as pure functions (20 tests in `test/routing.test.js`). `test/v5-engine.test.js` drives the page script end to end with an XHR shaped like the player's loader, a fake clock, a `<video>` with a buffer, and races (19 tests). The suite runs 116 tests.
+- `src/core/routing.js` holds the decisions as pure functions (20 tests in `test/routing.test.js`). `test/v5-engine.test.js` drives the page script end to end with an XHR shaped like the player's loader, a fake clock, a `<video>` with a buffer, and races (20 tests). The suite runs 117 tests.
 - **Chromium, real player, logged in, highest quality**, with the assigned host made slow by pointing the page's playurl at `mirroraliov` (1–2 Mbps for any file from this network). Two runs on two cold videos:
 
 | | run 1 (1080P, 1.6–2 MB fragments) | run 2 (720P, 1–1.7 MB fragments) |

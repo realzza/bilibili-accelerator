@@ -353,6 +353,33 @@ test("a second hang within the error window moves the video", async () => {
   assert.equal(hostOf(retry.url), ALI);
 });
 
+test("a race that outlasts the player's own timeout never times the request out twice", async () => {
+  const env = loadEngine({ race: { [ALI]: { ms: 1800, status: 206 }, [AKAM]: { ms: 2500, status: 206 } } });
+  env.parse(playurl());
+  const x = await hangAfterKeepingUp(env, "4500000-5999999");
+  await env.advance(550);
+  // The player's no-first-byte deadline passes first: it aborts the request
+  // (readyState ends at 0, not 4) and retries on the next URL in its list.
+  x.abort();
+  const own = env.playerRequest(akamUrl(FILE), "4500000-5999999");
+  assert.equal(hostOf(own.url), AKAM);
+  await env.advance(2000);
+
+  const diag = env.api.getDiagnostics();
+  assert.equal(diag.session.races[0].retryOn, ALI, "the hang the player timed out is not an earlier failure");
+  assert.equal(diag.counters.switches, 0);
+  assert.equal(x.timeoutCalls, undefined, "no second timeout for a request the player already ended");
+  assert.equal(diag.synthetic.used, 0);
+  assert.equal(diag.session.activeHost, COSOV, "the video stays on its host");
+
+  const next = env.playerRequest(akamUrl(FILE), "6000000-7499999");
+  assert.equal(hostOf(next.url), COSOV);
+  await env.advance(50);
+  next.fail();
+  const retry = env.playerRequest(akamUrl(FILE), "6000000-7499999");
+  assert.equal(hostOf(retry.url), ALI, "a failure there retries on the race winner");
+});
+
 test("Akamai is reached only through the URL Bilibili issued for it", async () => {
   const env = loadEngine({ race: { [AKAM]: { ms: 500, status: 206 }, [ALI]: { ms: 2500, status: 206 } } });
   env.parse(playurl());
