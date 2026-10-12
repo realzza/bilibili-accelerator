@@ -1655,8 +1655,9 @@
   let speedTimer = null;
 
   // Panel motion. While the panel is open the chart is redrawn every frame so
-  // the curve glides between the one-second samples; `live` adds the effects
-  // reserved for smooth playback (status ripple, glint, endpoint pulse).
+  // the curve glides between the one-second samples; `live` adds the chart
+  // effects reserved for smooth playback (glint, endpoint pulse). The status
+  // dot has its own animation per state, see syncMotion().
   const motion = { raf: 0, live: false };
   const GLINT_MS = 3200;
   const PULSE_MS = 2000;
@@ -1802,9 +1803,13 @@
     const run = panelIsOpen() && !document.hidden &&
       typeof root.requestAnimationFrame === "function" && !prefersReducedMotion();
     motion.live = run && speed.playing && status.key === "smooth";
+    // The dot moves only while something is in progress: playback, a race, or
+    // the player waiting for data. Slow, idle and off are standing conditions
+    // and stay still.
+    const animate = motion.live || (run && (status.key === "testing" || status.key === "buffering"));
     const dot = shadow.getElementById("ba-dot");
     if (dot) {
-      const name = "ba-dot ba-" + status.key + (motion.live ? " ba-live" : "");
+      const name = "ba-dot ba-" + status.key + (animate ? " ba-live" : "");
       if (dot.className !== name) {
         dot.className = name;
       }
@@ -2704,17 +2709,26 @@
       ".ba-seg-opt[aria-pressed=\"true\"]{color:#fff}",
       "@media (prefers-reduced-motion:reduce){.ba-seg-thumb{transition:none}}",
       ".ba-hero{display:flex;flex-direction:column;align-items:center;text-align:center;padding:4px 0 14px}",
-      ".ba-dot{position:relative;width:46px;height:46px;border-radius:50%;display:grid;place-items:center;margin-bottom:8px;background:var(--ba-dot-bg)}",
-      ".ba-dot:after{content:'';position:relative;width:14px;height:14px;border-radius:50%;background:var(--ba-dot)}",
-      // Smooth playback: two rings leave the dot half a cycle apart while the
-      // dot itself breathes. syncMotion() sets ba-live, and never under
-      // prefers-reduced-motion.
+      ".ba-dot{position:relative;width:46px;height:46px;border-radius:50%;display:grid;place-items:center;margin-bottom:8px;background:var(--ba-dot-bg);transition:background-color .3s ease}",
+      ".ba-dot:after{content:'';position:relative;width:14px;height:14px;border-radius:50%;background:var(--ba-dot);transition:background-color .3s ease}",
+      // syncMotion() sets ba-live while the state is in progress, and never
+      // under prefers-reduced-motion. Smooth: two rings leave the dot half a
+      // cycle apart while the dot breathes.
       ".ba-ring{position:absolute;inset:0;border-radius:50%;background:var(--ba-good);opacity:0;pointer-events:none}",
-      ".ba-dot.ba-live .ba-ring{animation:ba-ripple 2.8s cubic-bezier(.2,.6,.35,1) infinite}",
-      ".ba-dot.ba-live .ba-ring+.ba-ring{animation-delay:1.4s}",
-      ".ba-dot.ba-live:after{animation:ba-breathe 2.8s ease-in-out infinite}",
+      ".ba-smooth.ba-live .ba-ring{animation:ba-ripple 2.8s cubic-bezier(.2,.6,.35,1) infinite}",
+      ".ba-smooth.ba-live .ba-ring+.ba-ring{animation-delay:1.4s}",
+      ".ba-smooth.ba-live:after{animation:ba-breathe 2.8s ease-in-out infinite}",
       "@keyframes ba-ripple{0%{opacity:.42;transform:scale(.3)}75%,100%{opacity:0;transform:scale(1.3)}}",
       "@keyframes ba-breathe{0%,100%{transform:scale(1)}50%{transform:scale(1.14)}}",
+      // Testing: an arc circles the dot, as a spinner would.
+      ".ba-testing.ba-live .ba-ring:first-child{inset:-4px;opacity:1;background:conic-gradient(transparent 25%,var(--ba-warn));-webkit-mask:radial-gradient(farthest-side,transparent calc(100% - 2.5px),#000 calc(100% - 2px));mask:radial-gradient(farthest-side,transparent calc(100% - 2.5px),#000 calc(100% - 2px));animation:ba-spin 1s linear infinite}",
+      "@keyframes ba-spin{to{transform:rotate(360deg)}}",
+      // Buffering: a ring closes in on the dot, the smooth ripple in reverse,
+      // and the dot dims until it arrives.
+      ".ba-buffering.ba-live .ba-ring:first-child{background:var(--ba-warn);animation:ba-gather 1.5s cubic-bezier(.45,0,.85,.6) infinite}",
+      ".ba-buffering.ba-live:after{animation:ba-dim 1.5s ease-in-out infinite}",
+      "@keyframes ba-gather{0%{opacity:0;transform:scale(1.2)}25%{opacity:.34}100%{opacity:.12;transform:scale(.3)}}",
+      "@keyframes ba-dim{0%,100%{opacity:1}55%{opacity:.5}}",
       ".ba-dot.ba-smooth{background:var(--ba-good-bg)}.ba-dot.ba-smooth:after{background:var(--ba-good)}",
       ".ba-dot.ba-testing,.ba-dot.ba-buffering,.ba-dot.ba-slow{background:var(--ba-warn-bg)}.ba-dot.ba-testing:after,.ba-dot.ba-buffering:after,.ba-dot.ba-slow:after{background:var(--ba-warn)}",
       ".ba-dot.ba-off:after{background:var(--ba-dot)}",
