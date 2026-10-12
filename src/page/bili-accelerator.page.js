@@ -1937,11 +1937,19 @@
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, w, h);
 
-    const series = smoothSeries(speedSeries());
+    const raw = speedSeries();
+    const series = smoothSeries(raw);
     if (!series.length) {
       return;
     }
     const n = series.length;
+    const p = tickPhase();
+    // A new sample turns the previous endpoint into an interior point, which
+    // the moving average would shift at once. Blend that in over the tick so
+    // the endpoint dot leaves from exactly where it was.
+    if (n >= 3) {
+      series[n - 2] = raw[n - 2] + (series[n - 2] - raw[n - 2]) * p;
+    }
 
     const floor = speed.mode === "buffer" ? 30 : 1;
     let dataMax = floor;
@@ -1969,7 +1977,6 @@
     // newest one over the tick, so it advances continuously. While the series
     // is still filling, the x-axis is elastic and stretches across the full
     // width; once it holds SPEED_SAMPLES + 1 points the window slides instead.
-    const p = tickPhase();
     const left = n > SPEED_SAMPLES ? p : 0;
     const right = Math.max(n - 2 + p, 0);
     const step = plotW / Math.max(right - left, 0.05);
