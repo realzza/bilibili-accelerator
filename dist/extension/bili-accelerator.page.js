@@ -2853,11 +2853,22 @@
     peakMbps: 0,
     bufferSec: 0,
     dispMax: 0,                   // eased y-axis maximum (smooth rescaling)
+    maxAt: 0,                     // when dispMax was last eased
     sawBytes: false,
     activeTicks: 0,               // ticks where playback advanced
-    lastTime: 0
+    lastTime: 0,
+    playing: false,               // playback advanced during the last tick
+    prevMbps: 0,                  // dispMbps one tick ago, for the readout tween
+    tickAt: 0                     // when the last sample was pushed
   };
   let speedTimer = null;
+
+  // Panel motion. While the panel is open the chart is redrawn every frame so
+  // the curve glides between the one-second samples; `live` adds the effects
+  // reserved for smooth playback (status ripple, glint, endpoint pulse).
+  const motion = { raf: 0, live: false };
+  const GLINT_MS = 3200;
+  const PULSE_MS = 2000;
 
   function nowMs() {
     return (root.performance && root.performance.now) ? root.performance.now() : Date.now();
@@ -2937,15 +2948,20 @@
     if (speed.dispMbps < 0.05) {
       speed.dispMbps = 0;
     }
+    speed.prevMbps = speed.currentMbps;
     speed.currentMbps = speed.dispMbps;
+    speed.playing = playing;
+    speed.tickAt = now;
 
+    // One sample more than the chart shows: the oldest slides out on the left
+    // while the newest slides in on the right.
     speed.mbpsSeries.push(speed.dispMbps);
-    if (speed.mbpsSeries.length > SPEED_SAMPLES) {
+    if (speed.mbpsSeries.length > SPEED_SAMPLES + 1) {
       speed.mbpsSeries.shift();
     }
 
     speed.bufSeries.push(speed.bufferSec);
-    if (speed.bufSeries.length > SPEED_SAMPLES) {
+    if (speed.bufSeries.length > SPEED_SAMPLES + 1) {
       speed.bufSeries.shift();
     }
 
@@ -2959,9 +2975,82 @@
     }
 
     if (panelIsOpen()) {
+      syncMotion();
       drawSpeed();
       updateSpeedReadouts();
     }
+  }
+
+  function prefersReducedMotion() {
+    try {
+      return !!(root.matchMedia && root.matchMedia("(prefers-reduced-motion: reduce)").matches);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // How far the current one-second tick has run, 0..1. Without the frame loop
+  // (panel closed, reduced motion) it is 1: the chart shows the newest sample
+  // at the right edge and only moves once a second.
+  function tickPhase() {
+    if (!motion.raf) {
+      return 1;
+    }
+    return Math.max(0, Math.min(1, (nowMs() - speed.tickAt) / SPEED_TICK_MS));
+  }
+
+  // Start or stop the frame loop and set the status dot's class. Called on
+  // every tick and status render; the loop also ends itself once the panel
+  // closes or the tab is hidden, and the next tick restarts it.
+  function syncMotion(info) {
+    const shadow = getShadow();
+    if (!shadow) {
+      return;
+    }
+    const status = info || computeStatus();
+    const run = panelIsOpen() && !document.hidden &&
+      typeof root.requestAnimationFrame === "function" && !prefersReducedMotion();
+    motion.live = run && speed.playing && status.key === "smooth";
+    const dot = shadow.getElementById("ba-dot");
+    if (dot) {
+      const name = "ba-dot ba-" + status.key + (motion.live ? " ba-live" : "");
+      if (dot.className !== name) {
+        dot.className = name;
+      }
+    }
+    if (run && !motion.raf) {
+      motion.raf = root.requestAnimationFrame(motionFrame);
+    } else if (!run && motion.raf) {
+      if (typeof root.cancelAnimationFrame === "function") {
+        root.cancelAnimationFrame(motion.raf);
+      }
+      motion.raf = 0;
+    }
+  }
+
+  function motionFrame() {
+    motion.raf = 0;
+    if (!panelIsOpen() || document.hidden) {
+      return;
+    }
+    motion.raf = root.requestAnimationFrame(motionFrame);
+    drawSpeed();
+    const shadow = getShadow();
+    const value = shadow && shadow.getElementById("ba-spd-now");
+    if (value && speed.mode === "speed") {
+      const text = shownMbps().toFixed(1);
+      if (value.textContent !== text) {
+        value.textContent = text;
+      }
+    }
+  }
+
+  // The readout counts up or down to the new sample over the first 0.6 s of a
+  // tick instead of jumping.
+  function shownMbps() {
+    const k = Math.min(1, tickPhase() / 0.6);
+    const eased = 1 - Math.pow(1 - k, 3);
+    return speed.prevMbps + (speed.currentMbps - speed.prevMbps) * eased;
   }
 
   function speedSeries() {
@@ -3048,49 +3137,81 @@
     const dpr = root.devicePixelRatio || 1;
     const w = canvas.clientWidth || 296;
     const h = canvas.clientHeight || 46;
-    canvas.width = Math.round(w * dpr);
-    canvas.height = Math.round(h * dpr);
+    // Assigning a canvas size reallocates its buffer, so only do it on change.
+    if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+      canvas.width = Math.round(w * dpr);
+      canvas.height = Math.round(h * dpr);
+    }
     const ctx = canvas.getContext("2d");
-    ctx.scale(dpr, dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, w, h);
 
     const series = smoothSeries(speedSeries());
     if (!series.length) {
       return;
     }
+    const n = series.length;
 
     const floor = speed.mode === "buffer" ? 30 : 1;
     let dataMax = floor;
-    for (let i = 0; i < series.length; i += 1) {
+    for (let i = 0; i < n; i += 1) {
       if (series[i] > dataMax) {
         dataMax = series[i];
       }
     }
     // Ease the displayed maximum toward a nice ceiling so rescaling glides.
+    // The rate is per second, so it holds whatever the frame rate is.
     const target = niceCeil(dataMax);
+    const now = nowMs();
+    const dt = speed.maxAt ? Math.min(1, (now - speed.maxAt) / SPEED_TICK_MS) : 1;
+    speed.maxAt = now;
     speed.dispMax = speed.dispMax > 0
-      ? speed.dispMax + (target - speed.dispMax) * 0.25
+      ? speed.dispMax + (target - speed.dispMax) * (1 - Math.pow(0.75, dt))
       : target;
     const max = Math.max(speed.dispMax, floor);
 
     const padTop = 5;
     const padBottom = 2;
-    // Elastic x-axis: while the series is still filling, stretch it across the
-    // full width so the curve looks alive from the first seconds; once it caps
-    // at SPEED_SAMPLES the step stabilizes and the window simply slides.
-    const step = w / Math.max(1, series.length - 1);
+    // Room on the right for the endpoint dot and its pulse.
+    const plotW = w - 7;
+    // The curve ends at a point that travels from the previous sample to the
+    // newest one over the tick, so it advances continuously. While the series
+    // is still filling, the x-axis is elastic and stretches across the full
+    // width; once it holds SPEED_SAMPLES + 1 points the window slides instead.
+    const p = tickPhase();
+    const left = n > SPEED_SAMPLES ? p : 0;
+    const right = Math.max(n - 2 + p, 0);
+    const step = plotW / Math.max(right - left, 0.05);
     const xs = [];
     const ys = [];
-    for (let i = 0; i < series.length; i += 1) {
-      xs.push(i * step);
+    for (let i = 0; i < n; i += 1) {
+      xs.push((i - left) * step);
       ys.push(h - padBottom - (series[i] / max) * (h - padTop - padBottom));
     }
-    const tan = series.length >= 2 ? monotoneTangents(xs, ys) : [0];
+    const tan = n >= 2 ? monotoneTangents(xs, ys) : [0];
+
+    // Where the curve crosses the right edge of the plot: the last segment
+    // evaluated at p (x is linear in the Bézier parameter here).
+    const lx = n >= 2 ? plotW : 0;
+    let ly = ys[n - 1];
+    if (n >= 2 && p < 1) {
+      const dx = step / 3;
+      const y0 = ys[n - 2];
+      const c0 = y0 + tan[n - 2] * dx;
+      const c1 = ys[n - 1] - tan[n - 1] * dx;
+      const q = 1 - p;
+      ly = q * q * q * y0 + 3 * q * q * p * c0 + 3 * q * p * p * c1 + p * p * p * ys[n - 1];
+    }
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, n >= 2 ? plotW : w, h);
+    ctx.clip();
 
     // Gradient area fill.
     ctx.beginPath();
     tracePath(ctx, xs, ys, tan);
-    ctx.lineTo(xs[xs.length - 1], h);
+    ctx.lineTo(xs[n - 1], h);
     ctx.lineTo(xs[0], h);
     ctx.closePath();
     const grad = ctx.createLinearGradient(0, 0, 0, h);
@@ -3108,9 +3229,39 @@
     ctx.lineCap = "round";
     ctx.stroke();
 
+    // Smooth playback: a highlight runs along the line toward the endpoint.
+    if (motion.live) {
+      // A wide accent glow under a white core, so it reads on both themes.
+      const band = 46;
+      const gx = -band + ((now % GLINT_MS) / GLINT_MS) * (plotW + band * 2);
+      const glow = ctx.createLinearGradient(gx - band, 0, gx + band, 0);
+      glow.addColorStop(0, "rgba(" + speedPaint.accentRgb + ",0)");
+      glow.addColorStop(0.5, "rgba(" + speedPaint.accentRgb + ",0.38)");
+      glow.addColorStop(1, "rgba(" + speedPaint.accentRgb + ",0)");
+      ctx.lineWidth = 6;
+      ctx.strokeStyle = glow;
+      ctx.stroke();
+      const core = ctx.createLinearGradient(gx - band / 2, 0, gx + band / 2, 0);
+      core.addColorStop(0, "rgba(255,255,255,0)");
+      core.addColorStop(0.5, "rgba(255,255,255,0.6)");
+      core.addColorStop(1, "rgba(255,255,255,0)");
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = core;
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // Smooth playback: the endpoint sends out a fading ring.
+    if (motion.live) {
+      const k = (now % PULSE_MS) / PULSE_MS;
+      const eased = 1 - Math.pow(1 - k, 3);
+      ctx.beginPath();
+      ctx.arc(lx, ly, 3.2 + eased * 3.6, 0, Math.PI * 2);
+      ctx.fillStyle = "rgba(" + speedPaint.accentRgb + "," + (0.4 * (1 - eased)).toFixed(3) + ")";
+      ctx.fill();
+    }
+
     // Leading-edge dot at the current value.
-    const lx = xs[xs.length - 1];
-    const ly = ys[ys.length - 1];
     ctx.beginPath();
     ctx.arc(lx, ly, 3.2, 0, Math.PI * 2);
     ctx.fillStyle = speedPaint.accent;
@@ -3145,7 +3296,7 @@
     if (value) {
       value.textContent = speed.mode === "buffer"
         ? String(Math.round(speed.bufferSec))
-        : speed.currentMbps.toFixed(1);
+        : shownMbps().toFixed(1);
     }
     if (foot) {
       foot.textContent = speed.mode === "buffer"
@@ -3690,16 +3841,13 @@
     const strings = STRINGS[lang()];
     const words = strings.status[info.key] || strings.status.idle;
 
-    const dot = shadow.getElementById("ba-dot");
     const word = shadow.getElementById("ba-word");
     const note = shadow.getElementById("ba-note");
     const count = shadow.getElementById("ba-count");
     const retestButton = shadow.getElementById("ba-retest");
     const master = shadow.getElementById("ba-master");
 
-    if (dot) {
-      dot.className = "ba-dot ba-" + info.key;
-    }
+    syncMotion(info);
     if (word) {
       word.textContent = words[0];
     }
@@ -3758,8 +3906,17 @@
       ".ba-seg-opt[aria-pressed=\"true\"]{color:#fff}",
       "@media (prefers-reduced-motion:reduce){.ba-seg-thumb{transition:none}}",
       ".ba-hero{display:flex;flex-direction:column;align-items:center;text-align:center;padding:4px 0 14px}",
-      ".ba-dot{width:46px;height:46px;border-radius:50%;display:grid;place-items:center;margin-bottom:8px;background:var(--ba-dot-bg)}",
-      ".ba-dot:after{content:'';width:14px;height:14px;border-radius:50%;background:var(--ba-dot)}",
+      ".ba-dot{position:relative;width:46px;height:46px;border-radius:50%;display:grid;place-items:center;margin-bottom:8px;background:var(--ba-dot-bg)}",
+      ".ba-dot:after{content:'';position:relative;width:14px;height:14px;border-radius:50%;background:var(--ba-dot)}",
+      // Smooth playback: two rings leave the dot half a cycle apart while the
+      // dot itself breathes. syncMotion() sets ba-live, and never under
+      // prefers-reduced-motion.
+      ".ba-ring{position:absolute;inset:0;border-radius:50%;background:var(--ba-good);opacity:0;pointer-events:none}",
+      ".ba-dot.ba-live .ba-ring{animation:ba-ripple 2.8s cubic-bezier(.2,.6,.35,1) infinite}",
+      ".ba-dot.ba-live .ba-ring+.ba-ring{animation-delay:1.4s}",
+      ".ba-dot.ba-live:after{animation:ba-breathe 2.8s ease-in-out infinite}",
+      "@keyframes ba-ripple{0%{opacity:.42;transform:scale(.3)}75%,100%{opacity:0;transform:scale(1.3)}}",
+      "@keyframes ba-breathe{0%,100%{transform:scale(1)}50%{transform:scale(1.14)}}",
       ".ba-dot.ba-smooth{background:var(--ba-good-bg)}.ba-dot.ba-smooth:after{background:var(--ba-good)}",
       ".ba-dot.ba-testing,.ba-dot.ba-buffering,.ba-dot.ba-slow{background:var(--ba-warn-bg)}.ba-dot.ba-testing:after,.ba-dot.ba-buffering:after,.ba-dot.ba-slow:after{background:var(--ba-warn)}",
       ".ba-dot.ba-off:after{background:var(--ba-dot)}",
@@ -3862,6 +4019,11 @@
     const dot = document.createElement("div");
     dot.id = "ba-dot";
     dot.className = "ba-dot";
+    for (let i = 0; i < 2; i += 1) {
+      const ring = document.createElement("span");
+      ring.className = "ba-ring";
+      dot.appendChild(ring);
+    }
     const word = document.createElement("div");
     word.id = "ba-word";
     word.className = "ba-word";
