@@ -2,7 +2,7 @@
 // @name         Bilibili Accelerator
 // @name:zh-CN   Bilibili Accelerator - B站海外播放加速
 // @namespace    https://github.com/realzza/bilibili-accelerator
-// @version      0.5.0
+// @version      0.5.1
 // @description  Smoother Bilibili playback for overseas viewers.
 // @description:zh-CN 缓解海外用户看 B 站冷门视频时的卡顿。
 // @author       realzza
@@ -1235,7 +1235,7 @@
   }
   root.__BILI_ACCELERATOR_INSTALLED__ = true;
 
-  const VERSION = "0.5.0";
+  const VERSION = "0.5.1";
   const STORAGE_KEY = "biliAccelerator.config.v2";
   const LEGACY_KEY = "biliAccelerator.config.v1";
   // Per-host history of measured delivery, per region. It only orders the

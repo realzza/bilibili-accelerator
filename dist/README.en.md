@@ -1,6 +1,6 @@
 # <img src="docs/assets/logo.svg" alt="" width="40" align="top">&nbsp;Bilibili Accelerator
 
-[中文](./README.md) · [Greasy Fork](https://greasyfork.org/en/scripts/582026-bilibili-accelerator) · v0.5.0
+[中文](./README.md) · [Greasy Fork](https://greasyfork.org/en/scripts/582026-bilibili-accelerator) · v0.5.1
 
 Watching Bilibili from outside mainland China, popular videos are usually fine. Everything else tends to stutter — smooth one moment, buffering the next.
 
@@ -56,7 +56,8 @@ Full notes live in [Releases](https://github.com/realzza/bilibili-accelerator/re
 
 | Version | What changed |
 | --- | --- |
-| v0.5.0 | Servers are now chosen by measurement. Each video starts on its native server, the one Bilibili assigned, and the extension measures how fast the player actually downloads each fragment. When that falls below the video's bitrate while the buffer is low, two alternatives race for the bytes the player needs next, and the video moves to the winner if it is clearly faster, then stays there. A stuck fragment is retried on the new server at once, through the player's own timeout path; if the server it hung on had been keeping up, only that fragment moves and the video stays. Gone: the probe at page load, the six-hour ranking and the step-by-step rotation on stalls. The probe read only the start of a file and so measured round-trip time; the ranking applied to every video, though one server can be ten times faster on a popular video than on a rarely watched one; and the rotation drifted to the bottom of the list. Akamai is used only through the address Bilibili issues. **Still buffering? Boost harder** is replaced by **Test other servers**, which saves no setting, and auto mode no longer shows Apply to or Rewrite Akamai |
+| v0.5.1 | The panel now moves with playback. While a video plays smoothly, the status dot sends out rings, a highlight runs along the speed curve and the curve's endpoint pulses. A server test shows an arc circling the dot, and buffering shows a ring closing in on it; Slow network, Ready and Off stay still. With the panel open the speed curve is redrawn every frame, so it advances continuously between the one-second samples and the readout counts to each new value. The endpoint dot is no longer cut off by the edge of the chart. Nothing animates while the panel is closed, the tab is in the background, or the system asks for reduced motion. Server selection is unchanged |
+| [v0.5.0](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.5.0) | Servers are chosen by measurement: each video starts on its native server and moves to a clearly faster one when that falls short; the page-load probe, six-hour ranking and step-by-step rotation are gone; **Test other servers** replaces **Still buffering? Boost harder** |
 | [v0.4.1](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.4.1) | Fixed server is now a dropdown with a Custom… option, and no longer offers Akamai |
 | [v0.4.0](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.4.0) | Fixes background playback stalls; candidate servers span both tiers and are ranked by measured throughput; the ⚡ badge auto-hides on live pages |
 | [v0.3.0](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.3.0) | Light/dark panel and seven accent themes; header theme and language share one sliding control. Core behavior untouched |

@@ -8,7 +8,7 @@
   }
   root.__BILI_ACCELERATOR_INSTALLED__ = true;
 
-  const VERSION = "0.5.0";
+  const VERSION = "0.5.1";
   const STORAGE_KEY = "biliAccelerator.config.v2";
   const LEGACY_KEY = "biliAccelerator.config.v1";
   // Per-host history of measured delivery, per region. It only orders the
