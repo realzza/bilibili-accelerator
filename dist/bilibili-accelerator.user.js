@@ -786,11 +786,16 @@
 
   // ---- the session table ----------------------------------------------------
 
+  // Where a playurl keeps its DASH manifest. A video page has it in `data`. A
+  // bangumi page has it under `video_info`: in `result` for the playurl inline
+  // in the page, and in `data` for the one it fetches on an episode change.
   function dashContainers(payload) {
     if (!payload || typeof payload !== "object") {
       return [];
     }
-    return [payload.data, payload.result, payload.result && payload.result.video_info, payload]
+    const data = payload.data;
+    const result = payload.result;
+    return [data, data && data.video_info, result, result && result.video_info, payload]
       .filter(function (c) { return c && typeof c === "object" && c.dash && typeof c.dash === "object"; })
       .map(function (c) { return c.dash; });
   }
@@ -1666,11 +1671,16 @@
 
   // ---- interception -------------------------------------------------------
 
+  // Responses the fetch hook reads. For a body the page reads with
+  // response.json() this is the only hook it passes: that parse is native and
+  // never reaches JSON.parse on the page. The bangumi page reads an episode's
+  // playurl that way on an episode change, from /ogv/player/playview.
   function isInterestingFetch(input) {
     const url = requestUrlOf(input);
     return typeof url === "string" &&
       (url.includes("/x/player") ||
         url.includes("/pgc/player") ||
+        url.includes("/ogv/player") ||
         url.includes("playurl") ||
         url.includes("getRoomPlayInfo") ||
         url.includes("bilivideo"));

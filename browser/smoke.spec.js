@@ -1,7 +1,9 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const pkg = require("../package.json");
-const { test, expect, PCDN, PCDN_VIDEO, ISSUED_VIDEO, SEGMENT_BYTES } = require("./site");
+const {
+  test, expect, COSOV, AKAM, PCDN, PCDN_VIDEO, ISSUED_VIDEO, EPISODE_ISSUED_VIDEO, SEGMENT_BYTES
+} = require("./site");
 
 // What the unit tests can't see, because they run the page script against a
 // stub DOM: that the built userscript installs in a real browser, that its
@@ -62,6 +64,33 @@ test("a request for a PCDN node leaves the browser for the rewritten URL", async
   expect(new URL(rewritten).host).not.toBe(PCDN);
   await page.evaluate((url) => window.fixture.loadSegment(url), PCDN_VIDEO);
   expect(site.segments).toEqual([rewritten]);
+});
+
+// A bangumi page fetches an episode's playurl when the viewer changes episode
+// and reads it with response.json(). That parse is the browser's own and never
+// calls JSON.parse on the page, so the fetch hook is the only place the script
+// sees the episode, and the one read there has to build the engine's table.
+test("a bangumi episode's playurl, read with response.json(), is rewritten and gives the engine its table", async ({ page }) => {
+  await page.evaluate(() => {
+    const routing = window.BiliAcceleratorRouting;
+    const buildTable = routing.buildTable;
+    window.tablesBuilt = 0;
+    routing.buildTable = function () {
+      window.tablesBuilt += 1;
+      return buildTable.apply(this, arguments);
+    };
+  });
+  const info = await page.evaluate(() => window.fixture.changeEpisode());
+  const video = info.data.video_info.dash.video[0];
+  expect(video.base_url).toBe(EPISODE_ISSUED_VIDEO);
+  expect(JSON.stringify(info)).not.toContain(PCDN);
+  await page.evaluate((url) => window.fixture.loadSegment(url), video.base_url);
+  const diag = await page.evaluate(() => window.BiliAccelerator.getDiagnostics());
+  expect(diag.session.requiredMbps).toBe(0.6);
+  expect(diag.session.issued).toEqual({ "video 32 avc1": [COSOV, AKAM], "audio 30280 mp4a": [COSOV, AKAM] });
+  // One rewrite for the page's inline playurl, one for the episode's.
+  expect(diag.recentRewrites.map((rewrite) => rewrite.source)).toEqual(["__playinfo__", "fetch"]);
+  expect(await page.evaluate(() => window.tablesBuilt)).toBe(1);
 });
 
 test("the panel follows the system theme until one is picked, and keeps the pick", async ({ page }) => {

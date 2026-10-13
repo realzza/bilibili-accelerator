@@ -439,11 +439,16 @@
 
   // ---- interception -------------------------------------------------------
 
+  // Responses the fetch hook reads. For a body the page reads with
+  // response.json() this is the only hook it passes: that parse is native and
+  // never reaches JSON.parse on the page. The bangumi page reads an episode's
+  // playurl that way on an episode change, from /ogv/player/playview.
   function isInterestingFetch(input) {
     const url = requestUrlOf(input);
     return typeof url === "string" &&
       (url.includes("/x/player") ||
         url.includes("/pgc/player") ||
+        url.includes("/ogv/player") ||
         url.includes("playurl") ||
         url.includes("getRoomPlayInfo") ||
         url.includes("bilivideo"));

@@ -43,10 +43,46 @@ function playurl() {
   };
 }
 
+// An episode a bangumi page changes to without a page load. The page asks
+// /ogv/player/playview for the episode's playurl, which keeps its DASH data
+// one level further down than a video page's, under data.video_info.
+const PLAYVIEW = "//api.bilibili.com/ogv/player/playview?w_rid=9f2c61d0a7b34e58&wts=1791852002";
+const episodeUrl = (host, rep, query) =>
+  "https://" + host + "/upgcxcode/19/40/587174019/587174019-1-" + rep + ".m4s?" + query;
+const EPISODE_ISSUED_VIDEO = episodeUrl(COSOV, 30032, "os=cosovbv&upsig=ff");
+
+function playview() {
+  return {
+    code: 0,
+    message: "success",
+    ttl: 1,
+    data: {
+      play_video_type: "whole",
+      video_info: {
+        quality: 32,
+        dash: {
+          video: [{
+            id: 32, bandwidth: 633623, codecs: "avc1.64001F",
+            base_url: episodeUrl(PCDN, 30032, "os=mcdn&upsig=ee"),
+            backup_url: [EPISODE_ISSUED_VIDEO, episodeUrl(AKAM, 30032, "os=akam&hdnts=gg")]
+          }],
+          audio: [{
+            id: 30280, bandwidth: 321833, codecs: "mp4a.40.2",
+            base_url: episodeUrl(COSOV, 30280, "os=cosovbv&upsig=hh"),
+            backup_url: [episodeUrl(AKAM, 30280, "os=akam&hdnts=ii")]
+          }]
+        }
+      },
+      arc: { biz_type: 2, aid: 331253392, cid: 587174019 }
+    }
+  };
+}
+
 function pageHtml() {
   const values = {
     playinfo: JSON.stringify(playurl()).replace(/</g, "\\u003c"),
     playurl: PLAYURL,
+    playview: PLAYVIEW,
     lastByte: SEGMENT_BYTES - 1
   };
   return fs.readFileSync(path.join(__dirname, "video.html"), "utf8")
@@ -67,6 +103,27 @@ function answer(route, site) {
   }
   if (request.url() === PLAYURL) {
     return route.fulfill({ contentType: "application/json", headers: cors, body: JSON.stringify(playurl()) });
+  }
+  if (url.hostname === "api.bilibili.com" && url.pathname === "/ogv/player/playview") {
+    // The page sends its cookies and a JSON body, so the browser asks first
+    // and wants its own origin named in the answer.
+    const allow = {
+      "access-control-allow-origin": new URL(PAGE_URL).origin,
+      "access-control-allow-credentials": "true"
+    };
+    if (request.method() === "OPTIONS") {
+      return route.fulfill({
+        status: 204,
+        headers: Object.assign({ "access-control-allow-headers": "content-type" }, allow)
+      });
+    }
+    if (request.method() === "POST") {
+      return route.fulfill({
+        contentType: "application/json; charset=utf-8",
+        headers: allow,
+        body: JSON.stringify(playview())
+      });
+    }
   }
   if (isCdnHost(url.hostname)) {
     if (request.method() === "OPTIONS") {
@@ -109,4 +166,6 @@ const test = base.extend({
   }, { auto: true }]
 });
 
-module.exports = { test, expect, PCDN, PCDN_VIDEO, ISSUED_VIDEO, SEGMENT_BYTES };
+module.exports = {
+  test, expect, COSOV, AKAM, PCDN, PCDN_VIDEO, ISSUED_VIDEO, EPISODE_ISSUED_VIDEO, SEGMENT_BYTES
+};

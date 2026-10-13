@@ -27,6 +27,18 @@ window.fixture = {
     });
   },
 
+  // An episode's playurl, requested the way a bangumi page does when the
+  // viewer changes episode: a POST by fetch, the answer read with
+  // response.json().
+  changeEpisode: function () {
+    return fetch("{{playview}}", {
+      method: "POST",
+      body: JSON.stringify({ video_index: { ogv_season_id: 39308, ogv_episode_id: 416235 } }),
+      headers: { "Content-Type": "application/json" },
+      credentials: "include"
+    }).then(function (response) { return response.json(); });
+  },
+
   // One fragment, requested the way the player's loader does: XHR, a byte
   // range, an ArrayBuffer back. Resolves with the number of bytes received.
   loadSegment: function (url) {

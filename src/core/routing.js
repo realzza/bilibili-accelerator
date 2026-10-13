@@ -112,11 +112,16 @@
 
   // ---- the session table ----------------------------------------------------
 
+  // Where a playurl keeps its DASH manifest. A video page has it in `data`. A
+  // bangumi page has it under `video_info`: in `result` for the playurl inline
+  // in the page, and in `data` for the one it fetches on an episode change.
   function dashContainers(payload) {
     if (!payload || typeof payload !== "object") {
       return [];
     }
-    return [payload.data, payload.result, payload.result && payload.result.video_info, payload]
+    const data = payload.data;
+    const result = payload.result;
+    return [data, data && data.video_info, result, result && result.video_info, payload]
       .filter(function (c) { return c && typeof c === "object" && c.dash && typeof c.dash === "object"; })
       .map(function (c) { return c.dash; });
   }
