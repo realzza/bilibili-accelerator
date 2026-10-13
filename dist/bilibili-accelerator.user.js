@@ -2587,6 +2587,7 @@
         beforeMbps: round1(baseRate / 1e6)
       });
       state.switches += 1;
+      zapBadge();
       session.cooldownMs = 0;
       session.nextRaceAt = now + routing.nextCooldown("switch", session.switches.length);
       if (trigger === "stuck" && stuckReq) {
@@ -3350,6 +3351,22 @@
     return !!(host && host.shadowRoot && host.shadowRoot.querySelector(".ba-panel.open"));
   }
 
+  // The video just moved to another server: one ring leaves the badge and the
+  // bolt flickers. The panel is usually closed at that moment, so this is the
+  // only sign of it. Skipped where it would not be seen, or is not wanted.
+  function zapBadge() {
+    const host = document.getElementById(BUTTON_ID);
+    const badge = host && host.shadowRoot && host.shadowRoot.querySelector(".ba-toggle");
+    if (!badge || !badge.classList || document.hidden || prefersReducedMotion() ||
+        host.classList.contains(IMMERSED_CLASS)) {
+      return;
+    }
+    // Dropping the class and reading layout restarts a zap still in flight.
+    badge.classList.remove("ba-zap");
+    void badge.offsetWidth;
+    badge.classList.add("ba-zap");
+  }
+
   function revealBadge() {
     setBadgeHidden(false);
     if (revealTimer) {
@@ -3919,9 +3936,17 @@
       ":host(.ba-lifted){bottom:84px}",
       "*{box-sizing:border-box}",
       "button,input,select{font:inherit}",
-      ".ba-toggle{display:grid;place-items:center;width:40px;height:40px;border:1px solid rgba(255,255,255,.4);border-radius:50%;background:linear-gradient(135deg,var(--ba-grad-a),var(--ba-grad-b));color:#fff;box-shadow:0 8px 22px var(--ba-accent-shadow),0 1px 0 rgba(255,255,255,.45) inset;cursor:pointer;padding:0;transition:transform .16s ease,box-shadow .16s ease}",
-      ".ba-toggle:hover{transform:translateY(-1px)}",
+      ".ba-toggle{position:relative;display:grid;place-items:center;width:40px;height:40px;border:1px solid rgba(255,255,255,.4);border-radius:50%;background:linear-gradient(135deg,var(--ba-grad-a),var(--ba-grad-b));color:#fff;box-shadow:0 8px 22px var(--ba-accent-shadow),0 1px 0 rgba(255,255,255,.45) inset;cursor:pointer;padding:0;transition:transform .16s ease,box-shadow .16s ease}",
+      ".ba-toggle:hover{transform:translateY(-1px);box-shadow:0 10px 28px var(--ba-accent-shadow),0 1px 0 rgba(255,255,255,.45) inset}",
+      ".ba-toggle:active{transform:scale(.93)}",
       ".ba-toggle svg{width:20px;height:20px;display:block}",
+      // The badge sits beside the video on every page, so it never loops. The
+      // bolt flickers once on hover, and once with a ring when zapBadge() marks
+      // a server switch.
+      ".ba-toggle:hover svg,.ba-toggle.ba-zap svg{animation:ba-strike .5s ease-out}",
+      ".ba-toggle.ba-zap:after{content:'';position:absolute;inset:-1px;border-radius:50%;border:2px solid var(--ba-accent);opacity:0;pointer-events:none;animation:ba-burst .8s cubic-bezier(.2,.6,.35,1)}",
+      "@keyframes ba-strike{0%,100%{transform:scale(1);opacity:1}18%{transform:scale(1.22) rotate(-6deg);opacity:.5}32%{opacity:1}46%{transform:scale(1.12) rotate(3deg);opacity:.65}62%{opacity:1}}",
+      "@keyframes ba-burst{0%{opacity:.75;transform:scale(1)}100%{opacity:0;transform:scale(1.9)}}",
       ".ba-panel{display:none;flex-direction:column;position:absolute;right:0;bottom:48px;width:min(340px,calc(100vw - 36px));max-height:calc(100vh - 96px);padding:16px;border:1px solid var(--ba-border);border-radius:14px;background:var(--ba-surface);box-shadow:0 18px 46px var(--ba-panel-shadow);backdrop-filter:saturate(180%) blur(18px);-webkit-backdrop-filter:saturate(180%) blur(18px)}",
       ".ba-panel.open{display:flex}",
       ".ba-body{overflow-y:auto;min-height:0}",
@@ -3934,7 +3959,7 @@
       ".ba-seg-opt{position:relative;z-index:1;display:grid;place-items:center;border:none;background:none;padding:0;cursor:pointer;color:var(--ba-ink-soft);font-size:11px;font-weight:700;line-height:1;transition:color .18s ease}",
       ".ba-seg-opt svg{width:15px;height:15px;display:block}",
       ".ba-seg-opt[aria-pressed=\"true\"]{color:#fff}",
-      "@media (prefers-reduced-motion:reduce){.ba-seg-thumb{transition:none}}",
+      "@media (prefers-reduced-motion:reduce){.ba-seg-thumb{transition:none}.ba-toggle:hover svg{animation:none}}",
       ".ba-hero{display:flex;flex-direction:column;align-items:center;text-align:center;padding:4px 0 14px}",
       ".ba-dot{position:relative;width:46px;height:46px;border-radius:50%;display:grid;place-items:center;margin-bottom:8px;background:var(--ba-dot-bg);transition:background-color .3s ease}",
       ".ba-dot:after{content:'';position:relative;width:14px;height:14px;border-radius:50%;background:var(--ba-dot);transition:background-color .3s ease}",
@@ -4016,6 +4041,11 @@
     toggle.setAttribute("aria-label", "Bilibili Accelerator");
     toggle.innerHTML = "<svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path fill=\"currentColor\" d=\"M13 2 4 14h7l-1 8 10-13h-7l1-7Z\"/></svg>";
     toggle.addEventListener("mouseenter", function () { if (immersive) { revealBadge(); } });
+    toggle.addEventListener("animationend", function (event) {
+      if (event.animationName === "ba-burst") {
+        toggle.classList.remove("ba-zap");
+      }
+    });
 
     const panel = document.createElement("section");
     panel.className = "ba-panel";
