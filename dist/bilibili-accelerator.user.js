@@ -3946,7 +3946,8 @@
       ".ba-toggle:hover svg,.ba-toggle.ba-zap svg{animation:ba-strike .5s ease-out}",
       ".ba-toggle.ba-zap:after{content:'';position:absolute;inset:-1px;border-radius:50%;border:2px solid var(--ba-accent);opacity:0;pointer-events:none;animation:ba-burst .8s cubic-bezier(.2,.6,.35,1)}",
       "@keyframes ba-strike{0%,100%{transform:scale(1);opacity:1}18%{transform:scale(1.22) rotate(-6deg);opacity:.5}32%{opacity:1}46%{transform:scale(1.12) rotate(3deg);opacity:.65}62%{opacity:1}}",
-      "@keyframes ba-burst{0%{opacity:.75;transform:scale(1)}100%{opacity:0;transform:scale(1.9)}}",
+      // 1.8 keeps the ring inside the 18px between the badge and the viewport edge.
+      "@keyframes ba-burst{0%{opacity:.75;transform:scale(1)}100%{opacity:0;transform:scale(1.8)}}",
       ".ba-panel{display:none;flex-direction:column;position:absolute;right:0;bottom:48px;width:min(340px,calc(100vw - 36px));max-height:calc(100vh - 96px);padding:16px;border:1px solid var(--ba-border);border-radius:14px;background:var(--ba-surface);box-shadow:0 18px 46px var(--ba-panel-shadow);backdrop-filter:saturate(180%) blur(18px);-webkit-backdrop-filter:saturate(180%) blur(18px)}",
       ".ba-panel.open{display:flex}",
       ".ba-body{overflow-y:auto;min-height:0}",
