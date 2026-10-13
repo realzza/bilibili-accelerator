@@ -69,6 +69,26 @@ test("the session table reads bangumi and bare dash shapes and skips unusable UR
   assert.equal(routing.buildTable({ uid: 0, play_url: "https://x/live-bvc/1/index.m3u8" }), null);
 });
 
+// /ogv/player/playview, which a bangumi page requests on an episode change.
+test("the session table reads a bangumi episode's playurl from data.video_info", () => {
+  const playview = {
+    code: 0,
+    message: "success",
+    ttl: 1,
+    data: {
+      play_video_type: "whole",
+      video_info: Object.assign({ quality: 112, timelength: 1440063 }, playurl().data),
+      arc: { biz_type: 2, aid: 331253392, cid: 42231991605 }
+    }
+  };
+  assert.equal(routing.dashContainers(playview).length, 1);
+  const table = routing.buildTable(playview);
+  assert.equal(table.cid, "42231991605");
+  assert.deepEqual(Object.keys(table.reps), ["42231991605-1-30102.m4s", "42231991605-1-30280.m4s"]);
+  assert.deepEqual(table.reps["42231991605-1-30102.m4s"].issued, [COSOV, AKAM]);
+  assert.equal(table.reps["42231991605-1-30102.m4s"].bandwidth, 3753786);
+});
+
 test("urlFor uses an issued URL as is and swaps hosts only onto UPOS mirrors", () => {
   const rep = routing.buildTable(playurl()).reps["42231991605-1-30102.m4s"];
   assert.equal(routing.urlFor(rep, AKAM), rep.urls[AKAM], "Akamai only through its issued URL");

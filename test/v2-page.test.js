@@ -620,3 +620,125 @@ test("bangumi video_info.dash has its PCDN rewritten; durl is left as issued", (
   assert.equal(durl.data.durl[0].backup_url, undefined);
 });
 
+
+// ---- bangumi: a playurl under data.video_info --------------------------------
+
+const COSOV = "upos-sz-mirrorcosov.bilivideo.com";
+const AKAM = "upos-hz-mirrorakam.akamaized.net";
+const EPISODE_VIDEO = { id: 32, file: 30032, bandwidth: 633623, codecs: "avc1.64001F" };
+const EPISODE_AUDIO = { id: 30280, file: 30280, bandwidth: 321833, codecs: "mp4a.40.2" };
+
+// One video and one audio representation of a bangumi file, each issued for
+// both hosts, with the keys that API uses.
+function bangumiDash(cid, video, audio) {
+  const rep = (r) => {
+    const file = "/upgcxcode/19/40/" + cid + "/" + cid + "-1-" + r.file + ".m4s";
+    return {
+      id: r.id, bandwidth: r.bandwidth, codecs: r.codecs,
+      base_url: "https://" + COSOV + file + "?os=cosovbv&upsig=aa",
+      backup_url: ["https://" + AKAM + file + "?os=akam&hdnts=bb"]
+    };
+  };
+  return { video: [rep(video)], audio: [rep(audio)] };
+}
+
+// What /ogv/player/playview answers with on an episode change.
+function playview(dash) {
+  return {
+    code: 0,
+    message: "success",
+    ttl: 1,
+    data: { play_video_type: "whole", video_info: { quality: 32, dash }, arc: { biz_type: 2, cid: 587174019 } }
+  };
+}
+
+// A page whose fetch answers with `payload`, and the cid of every session
+// table the script builds from what it reads.
+function loadPageAnswering(payload) {
+  const original = new Response(JSON.stringify(payload), {
+    headers: { "content-type": "application/json; charset=utf-8" }
+  });
+  // The engine starts its tick on the first video fragment. Nothing here waits
+  // for one, and a real interval would keep the test process alive.
+  const sandbox = loadPage({ fetch: async () => original, setInterval: () => 1 });
+  const routing = sandbox.BiliAcceleratorRouting;
+  const buildTable = routing.buildTable;
+  const built = [];
+  routing.buildTable = function () {
+    const table = buildTable.apply(this, arguments);
+    built.push(table && table.cid);
+    return table;
+  };
+  return { sandbox, original, built };
+}
+
+// The engine's session for a video, as a diagnostics report shows it, once
+// the player has asked for one of its video fragments.
+function sessionAfterRequest(sandbox, url) {
+  const xhr = new sandbox.XMLHttpRequest();
+  xhr.open("GET", url);
+  xhr.send();
+  return JSON.parse(JSON.stringify(sandbox.BiliAccelerator.getDiagnostics().session));
+}
+
+// The bangumi page reads this response with response.json(), which never
+// reaches JSON.parse on the page: the fetch hook is the only place the script
+// sees an episode the viewer changed to.
+test("a bangumi episode's playurl, fetched on an episode change, is rewritten and builds its table once", async () => {
+  const dash = bangumiDash("587174019", EPISODE_VIDEO, EPISODE_AUDIO);
+  const video = dash.video[0];
+  const [cosov, akam] = [video.base_url, video.backup_url[0]];
+  video.base_url = "https://xy203x0x113x7xy.mcdn.bilivideo.cn:4483/upgcxcode/19/40/587174019/587174019-1-30032.m4s?os=mcdn&upsig=cc";
+  video.backup_url = [cosov, akam];
+  const { sandbox, built } = loadPageAnswering(playview(dash));
+
+  const response = await sandbox.fetch("//api.bilibili.com/ogv/player/playview?w_rid=x&wts=1", {
+    method: "POST",
+    body: JSON.stringify({ video_index: { ogv_episode_id: 416235 } })
+  });
+  const read = (await response.json()).data.video_info.dash.video[0];
+  assert.equal(read.base_url, cosov, "the PCDN base gave way to the issued backup");
+  assert.deepEqual(read.backup_url, [akam]);
+  assert.deepEqual(built, ["587174019"]);
+
+  const session = sessionAfterRequest(sandbox, read.base_url);
+  assert.equal(session.requiredMbps, 0.6);
+  assert.deepEqual(session.issued, { "video 32 avc1": [COSOV, AKAM], "audio 30280 mp4a": [COSOV, AKAM] });
+  const rewrites = Array.from(sandbox.BiliAccelerator.getDiagnostics().recentRewrites);
+  assert.deepEqual(rewrites.map((r) => r.source + " " + r.reason), ["fetch pcdn-promote"]);
+});
+
+test("a fetched bangumi playurl with nothing to rewrite is handed back as it came, its table built once", async () => {
+  const dash = bangumiDash("587174019", EPISODE_VIDEO, EPISODE_AUDIO);
+  const { sandbox, original, built } = loadPageAnswering(playview(dash));
+
+  // The same endpoint is also requested with GET and its parameters in the query.
+  const response = await sandbox.fetch("//api.bilibili.com/ogv/player/playview?ep_id=416235&season_id=39308&qn=0");
+  assert.equal(response, original);
+  await response.json();
+  assert.deepEqual(built, ["587174019"]);
+
+  const session = sessionAfterRequest(sandbox, dash.video[0].base_url);
+  assert.equal(session.requiredMbps, 0.6);
+  assert.deepEqual(session.issued, { "video 32 avc1": [COSOV, AKAM], "audio 30280 mp4a": [COSOV, AKAM] });
+});
+
+// The bangumi page's DRM check asks /ogv/player/pre/check/drm for a playurl in
+// the same shape. It is for a Widevine test clip, the same one on every page,
+// with a cid of its own, so it lands in a session of its own.
+test("the DRM check's test clip leaves the episode's table as it was", () => {
+  const sandbox = loadPage({ setInterval: () => 1 });
+  const episode = bangumiDash("587175541", EPISODE_VIDEO, EPISODE_AUDIO);
+  sandbox.JSON.parse(JSON.stringify({ result: { video_info: { dash: episode } } }));
+  const clip = bangumiDash("32091867755",
+    { id: 16, file: 100001, bandwidth: 22750, codecs: "avc1.64001E" },
+    { id: 100009, file: 100009, bandwidth: 17593, codecs: "mp4a.40.2" });
+  sandbox.JSON.parse(JSON.stringify({
+    code: 0,
+    data: { video_info: { quality: 16, dash: clip, drm_type: "widevine", drm_tech_type: 2 } }
+  }));
+
+  const session = sessionAfterRequest(sandbox, episode.video[0].base_url);
+  assert.equal(session.requiredMbps, 0.6);
+  assert.deepEqual(session.issued, { "video 32 avc1": [COSOV, AKAM], "audio 30280 mp4a": [COSOV, AKAM] });
+});

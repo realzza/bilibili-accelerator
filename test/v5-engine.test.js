@@ -80,6 +80,11 @@ function loadEngine(opts) {
   const fetches = [];
   const race = o.race || {};
   function fakeFetch(url, init) {
+    if (o.playview && String(url).includes("/ogv/player/playview")) {
+      return Promise.resolve(new Response(JSON.stringify(o.playview), {
+        headers: { "content-type": "application/json; charset=utf-8" }
+      }));
+    }
     const host = new URL(url).host;
     const spec = race[host] || { ms: 3500, status: 206 };
     const range = /bytes=(\d+)-(\d+)/.exec((init && init.headers && init.headers.Range) || "");
@@ -479,6 +484,43 @@ test("a retry is never ended early, so the player keeps its own retries", async 
   assert.equal(diag.counters.switches, 2, "the engine still moves on");
   assert.equal(diag.synthetic.used, 1, "but only first attempts are ever ended early");
   assert.equal(retry.timeoutCalls, undefined);
+});
+
+// A bangumi page fetches the next episode's playurl on an episode change and
+// reads it with response.json(), so the engine's table for that episode comes
+// from the fetch hook.
+test("an episode a bangumi page changes to is raced like the one it opened on", async () => {
+  const env = loadEngine({
+    path: "/bangumi/play/ep416234",
+    playview: { code: 0, data: { play_video_type: "whole", video_info: playurl().data } },
+    race: { [ALI]: { ms: 900, status: 206 }, [AKAM]: { ms: 1000, status: 206 } }
+  });
+  const response = await env.sandbox.fetch("//api.bilibili.com/ogv/player/playview?wts=1", { method: "POST", body: "{}" });
+  await response.json();
+
+  await slowStart(env);
+  assert.deepEqual(env.fetches.map((f) => f.host), [AKAM, ALI]);
+  await env.advance(1000);
+  const diag = env.api.getDiagnostics();
+  assert.equal(diag.session.requiredMbps, 3.8);
+  assert.equal(diag.session.activeHost, ALI);
+});
+
+// The bangumi page's DRM check gets a playurl in the same shape for a Widevine
+// test clip, and reads the index of one video and one audio file from it. The
+// clip has a table like any video, and an index request is too small to be
+// judged stuck.
+test("a hung index request for the DRM check's test clip starts no race", async () => {
+  const env = loadEngine({ path: "/bangumi/play/ep416234", race: { [ALI]: { ms: 900, status: 206 } } });
+  const clip = "/upgcxcode/55/77/32091867755/32091867755-1-100001.m4s";
+  env.parse({ code: 0, data: { video_info: { drm_type: "widevine", drm_tech_type: 2, dash: {
+    video: [{ id: 16, bandwidth: 22750, codecs: "avc1.64001E", base_url: akamUrl(clip), backup_url: [cosovUrl(clip)] }]
+  } } } });
+  env.playerRequest(akamUrl(clip), "0-4601");
+  await env.advance(8000);
+  assert.deepEqual(Object.keys(env.api.getDiagnostics().session.issued), ["video 16 avc1"]);
+  assert.equal(env.fetches.length, 0);
+  assert.equal(env.api.getDiagnostics().synthetic.used, 0);
 });
 
 test("no race while the tab is hidden", async () => {
