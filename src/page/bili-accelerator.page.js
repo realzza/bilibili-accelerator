@@ -545,9 +545,12 @@
     };
   }
 
-  // XHR was the biggest coverage gap in v0.1.x: quality switches and some
-  // playurl paths use it. Rewrite the request URL on open() and the JSON body
-  // on load() via a responseText/response shim.
+  // The VOD player loads every fragment by XHR: open() rewrites the request
+  // URL, and send() reports the transfer to the speed graph and the routing
+  // engine. Response bodies are left alone. A playurl that arrives by XHR is
+  // read as text by the player's HTTP client (a bundled axios) and handed to
+  // JSON.parse, where patchJsonParse() rewrites it. Nothing on the site reads
+  // one with responseType "json"; a read like that is not covered.
   function patchXHR() {
     if (!NativeXHR) {
       return;
@@ -583,10 +586,6 @@
       const xhr = this;
       const meta = xhr.__baAccel || {};
       const isMedia = typeof meta.url === "string" && core.hasMediaSignal(meta.url);
-      const interesting = typeof meta.url === "string" &&
-        (meta.url.includes("playurl") || meta.url.includes("/x/player") ||
-          meta.url.includes("/pgc/player") || meta.url.includes("getRoomPlayInfo") ||
-          isMedia);
 
       // Count downloaded bytes for media segments (free via loadend.loaded) and
       // time send→loadend as the transfer duration for the throughput window.
@@ -618,45 +617,6 @@
         }
       }
 
-      if (config.enabled && interesting) {
-        xhr.addEventListener("load", function onLoad() {
-          try {
-            const ct = xhr.getResponseHeader && xhr.getResponseHeader("content-type");
-            if (ct && !ct.includes("json") && !ct.includes("text")) {
-              return;
-            }
-            const text = xhr.responseText;
-            if (!bodyHasSignal(text)) {
-              return;
-            }
-            const parsed = nativeJsonParse(text);
-            const tracker = { changed: false, rewrites: [] };
-            rewritePlayurl(parsed, tracker);
-            const live = core.filterLiveUrlInfo(parsed, config);
-            if (!tracker.changed && !live.changed) {
-              return;
-            }
-            const rewrittenText = JSON.stringify(parsed);
-            const shim = {
-              configurable: true,
-              get: function () { return rewrittenText; }
-            };
-            try { Object.defineProperty(xhr, "responseText", shim); } catch (_) {}
-            try {
-              Object.defineProperty(xhr, "response", {
-                configurable: true,
-                get: function () {
-                  return xhr.responseType === "json" ? parsed : rewrittenText;
-                }
-              });
-            } catch (_) {}
-            record(tracker.rewrites, "xhr");
-            record(live.rewrites, "xhr");
-          } catch (_) {
-            // leave the original response intact on any failure.
-          }
-        });
-      }
       return send.apply(this, arguments);
     };
   }

@@ -1,7 +1,9 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const pkg = require("../package.json");
-const { test, expect, PCDN, PCDN_VIDEO, ISSUED_VIDEO, SEGMENT_BYTES } = require("./site");
+const {
+  test, expect, COSOV, AKAM, PCDN, PCDN_VIDEO, ISSUED_VIDEO, NEXT_PLAYURL, NEXT_ISSUED_VIDEO, SEGMENT_BYTES
+} = require("./site");
 
 // What the unit tests can't see, because they run the page script against a
 // stub DOM: that the built userscript installs in a real browser, that its
@@ -27,8 +29,8 @@ test("the userscript installs and the panel opens from the badge", async ({ page
   await expect(panel(page)).toBeHidden();
 });
 
-// An XHR response is covered where the page parses its text, which goes
-// through the JSON.parse hook.
+// An XHR's body is left as the server sent it. It is rewritten where the
+// page parses its text, which goes through the JSON.parse hook.
 test("a playurl is rewritten when the page reads it inline, by fetch, or by XHR", async ({ page }) => {
   const read = await page.evaluate(async () => ({
     inline: window.__playinfo__,
@@ -39,6 +41,21 @@ test("a playurl is rewritten when the page reads it inline, by fetch, or by XHR"
     expect(read[how].data.dash.video[0].baseUrl, how).toBe(ISSUED_VIDEO);
     expect(JSON.stringify(read[how]), how).not.toContain(PCDN);
   }
+});
+
+// Past the video a page opens on, the player fetches each playurl itself, and
+// that response is all the engine has to build the video's table from. It
+// reaches the script in one place, JSON.parse, so it is read and counted once.
+test("a playurl the player fetches by XHR is rewritten once and gives the engine its table", async ({ page }) => {
+  const info = await page.evaluate((url) => window.fixture.xhrPlayurl(url), NEXT_PLAYURL);
+  const video = info.data.dash.video[0];
+  expect(video.baseUrl).toBe(NEXT_ISSUED_VIDEO);
+  await page.evaluate((url) => window.fixture.loadSegment(url), video.baseUrl);
+  const diag = await page.evaluate(() => window.BiliAccelerator.getDiagnostics());
+  expect(diag.session.requiredMbps).toBe(2.4);
+  expect(diag.session.issued).toEqual({ "video 80 avc1": [COSOV, AKAM], "audio 30280 mp4a": [COSOV, AKAM] });
+  // One rewrite for the page's inline playurl, one for this one.
+  expect(diag.recentRewrites.map((rewrite) => rewrite.source)).toEqual(["__playinfo__", "JSON.parse"]);
 });
 
 test("a fragment the player downloads shows up in the panel", async ({ page, site }) => {

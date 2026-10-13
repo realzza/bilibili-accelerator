@@ -16,12 +16,18 @@ window.fixture = {
     return fetch("{{playurl}}").then(function (response) { return response.json(); });
   },
 
-  // Parsed on the page, as an XHR loader with a text response does.
-  xhrPlayurl: function () {
+  // A playurl the player fetches itself, the way its HTTP client (a bundled
+  // axios) does: an XHR with no responseType and its handlers set as
+  // properties, the body read as text in onloadend and parsed on the page.
+  xhrPlayurl: function (url) {
     return new Promise(function (resolve, reject) {
       const xhr = new XMLHttpRequest();
-      xhr.open("GET", "{{playurl}}");
-      xhr.onload = function () { resolve(JSON.parse(xhr.responseText)); };
+      xhr.open("GET", url || "{{playurl}}");
+      xhr.onloadend = function () {
+        if (xhr.status === 200) {
+          resolve(JSON.parse(xhr.responseText));
+        }
+      };
       xhr.onerror = function () { reject(new Error("playurl request failed")); };
       xhr.send();
     });
