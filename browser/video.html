@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Fixture video page</title>
+<link rel="icon" href="data:,">
+<!-- A server-rendered video page ships its first playurl inline, like this. -->
+<script>window.__playinfo__ = {{playinfo}};</script>
+</head>
+<body>
+<div class="bpx-player-container" data-screen="normal"><video></video></div>
+<script>
+// What the player does with the network, reduced to the calls the tests need.
+window.fixture = {
+  fetchPlayurl: function () {
+    return fetch("{{playurl}}").then(function (response) { return response.json(); });
+  },
+
+  // Parsed on the page, as an XHR loader with a text response does.
+  xhrPlayurl: function () {
+    return new Promise(function (resolve, reject) {
+      const xhr = new XMLHttpRequest();
+      xhr.open("GET", "{{playurl}}");
+      xhr.onload = function () { resolve(JSON.parse(xhr.responseText)); };
+      xhr.onerror = function () { reject(new Error("playurl request failed")); };
+      xhr.send();
+    });
+  },
+
+  // One fragment, requested the way the player's loader does: XHR, a byte
+  // range, an ArrayBuffer back. Resolves with the number of bytes received.
+  loadSegment: function (url) {
+    return new Promise(function (resolve, reject) {
+      const xhr = new XMLHttpRequest();
+      xhr.open("GET", url);
+      xhr.responseType = "arraybuffer";
+      xhr.setRequestHeader("Range", "bytes=0-{{lastByte}}");
+      xhr.onload = function () { resolve(xhr.response.byteLength); };
+      xhr.onerror = function () { reject(new Error("segment request failed")); };
+      xhr.send();
+    });
+  }
+};
+</script>
+</body>
+</html>
