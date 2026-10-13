@@ -89,6 +89,31 @@ test("the session table reads a bangumi episode's playurl from data.video_info",
   assert.equal(table.reps["42231991605-1-30102.m4s"].bandwidth, 3753786);
 });
 
+// /ogv/player/pre/check/drm, which a bangumi page requests on every load. Its
+// answer is a test clip, and video_info is the only thing in it.
+test("the DRM check's playurl is told from an episode's by coming alone", () => {
+  const info = Object.assign({ drm_type: "widevine", drm_tech_type: 2 }, playurl().data);
+  const check = { code: 0, message: "0", ttl: 1, data: { video_info: info } };
+  assert.equal(routing.isDrmCheck(check), true);
+  assert.ok(routing.buildTable(check), "it still builds a table like any playurl");
+
+  const arc = { biz_type: 2, aid: 331253392, cid: 42231991605 };
+  assert.equal(routing.isDrmCheck({ code: 0, data: { video_info: info, arc } }), false,
+    "a protected episode fetched on an episode change");
+  assert.equal(routing.isDrmCheck({ code: 0, result: { video_info: info, arc } }), false,
+    "a protected episode inline in the page");
+  assert.equal(routing.isDrmCheck({ code: 0, result: { video_info: info } }), false);
+  assert.equal(routing.isDrmCheck({ code: 0, data: { video_info: playurl().data } }), false,
+    "nothing in it says DRM");
+  assert.equal(routing.isDrmCheck({ code: 0, data: { video_info: info, play_video_type: "whole" } }), false,
+    "anything beside video_info and it is treated as a video");
+  assert.equal(routing.isDrmCheck(playurl()), false, "a video page's playurl");
+  assert.equal(routing.isDrmCheck({ data: { drm_tech_type: 2 } }), false);
+  assert.equal(routing.isDrmCheck({ data: [info] }), false);
+  assert.equal(routing.isDrmCheck({ data: null }), false);
+  assert.equal(routing.isDrmCheck(null), false);
+});
+
 test("urlFor uses an issued URL as is and swaps hosts only onto UPOS mirrors", () => {
   const rep = routing.buildTable(playurl()).reps["42231991605-1-30102.m4s"];
   assert.equal(routing.urlFor(rep, AKAM), rep.urls[AKAM], "Akamai only through its issued URL");

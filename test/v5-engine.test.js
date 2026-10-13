@@ -506,21 +506,140 @@ test("an episode a bangumi page changes to is raced like the one it opened on", 
   assert.equal(diag.session.activeHost, ALI);
 });
 
-// The bangumi page's DRM check gets a playurl in the same shape for a Widevine
-// test clip, and reads the index of one video and one audio file from it. The
-// clip has a table like any video, and an index request is too small to be
-// judged stuck.
-test("a hung index request for the DRM check's test clip starts no race", async () => {
-  const env = loadEngine({ path: "/bangumi/play/ep416234", race: { [ALI]: { ms: 900, status: 206 } } });
-  const clip = "/upgcxcode/55/77/32091867755/32091867755-1-100001.m4s";
-  env.parse({ code: 0, data: { video_info: { drm_type: "widevine", drm_tech_type: 2, dash: {
-    video: [{ id: 16, bandwidth: 22750, codecs: "avc1.64001E", base_url: akamUrl(clip), backup_url: [cosovUrl(clip)] }]
-  } } } });
-  env.playerRequest(akamUrl(clip), "0-4601");
+// The bangumi page tests Widevine before it plays anything. Its drm-pre-detect
+// script asks /ogv/player/pre/check/drm for a playurl, gets a fixed test clip
+// back in an episode's shape, and reads the head of one video and one audio
+// file of it. The answer holds video_info and nothing beside it.
+const CLIP = "/upgcxcode/55/77/32091867755/32091867755-1-100001.m4s";
+const CLIP_AUDIO = "/upgcxcode/55/77/32091867755/32091867755-1-100009.m4s";
+
+function drmCheck(video, audio) {
+  return { code: 0, message: "0", ttl: 1, data: { video_info: { quality: 16, drm_type: "widevine", drm_tech_type: 2, dash: {
+    video: [{ id: 16, bandwidth: 22750, codecs: "avc1.64001E", base_url: cosovUrl(video || CLIP), backup_url: [akamUrl(video || CLIP)] }],
+    audio: [{ id: 100009, bandwidth: 17593, codecs: "mp4a.40.2", base_url: cosovUrl(audio || CLIP_AUDIO), backup_url: [akamUrl(audio || CLIP_AUDIO)] }]
+  } } } };
+}
+
+// The episode the page opened on, as it is inline in the page.
+function episode() {
+  return { code: 0, result: { arc: { aid: 331253392, cid: 42231991605 }, play_video_type: "whole", video_info: playurl().data } };
+}
+
+test("the DRM check's reads of its test clip leave the episode as the page's video", async () => {
+  const env = loadEngine({ path: "/bangumi/play/ep416234" });
+  env.parse(episode());
+  const x = env.playerRequest(cosovUrl(FILE), "1265-1500000");
+  await env.advance(300);
+  x.finish(206, 1498736);
+  const before = env.api.getDiagnostics().session;
+
+  env.parse(drmCheck());
+  const video = env.playerRequest(cosovUrl(CLIP), "0-4601");
+  const audio = env.playerRequest(akamUrl(CLIP_AUDIO), "0-4497");
+  assert.equal(hostOf(video.url), COSOV, "the check's requests go where it sent them");
+  assert.equal(hostOf(audio.url), AKAM);
+  assert.deepEqual(env.api.getDiagnostics().session, before, "with the reads in flight");
+  await env.advance(60);
+  video.finish(206, 4602);
+  audio.finish(206, 4498);
+  assert.deepEqual(env.api.getDiagnostics().session, before, "and after them");
+  assert.deepEqual(Object.keys(before.issued), ["video 112 hvc1", "audio 30280 mp4a"]);
+  assert.deepEqual(Object.keys(before.hosts), [COSOV], "the read sent to Akamai is nobody's measurement");
+});
+
+// A season the viewer can't play still runs the check, and nothing follows it.
+test("on a page with nothing to play, the DRM check's test clip is not a video", async () => {
+  const env = loadEngine({ path: "/bangumi/play/ss33802", race: { [ALI]: { ms: 900, status: 206 } } });
+  env.parse(drmCheck());
+  env.playerRequest(cosovUrl(CLIP), "0-4601");   // never answered
+  const audio = env.playerRequest(akamUrl(CLIP_AUDIO), "0-4497");
+  await env.advance(60);
+  audio.finish(206, 4498);
+  // WebKit sometimes reads the two init segments again.
+  env.playerRequest(cosovUrl(CLIP), "0-1113").finish(206, 1114);
+  env.playerRequest(akamUrl(CLIP_AUDIO), "0-997").finish(206, 998);
   await env.advance(8000);
-  assert.deepEqual(Object.keys(env.api.getDiagnostics().session.issued), ["video 16 avc1"]);
-  assert.equal(env.fetches.length, 0);
-  assert.equal(env.api.getDiagnostics().synthetic.used, 0);
+  const diag = env.api.getDiagnostics();
+  assert.equal(diag.session, null);
+  assert.equal(diag.status, "idle");
+  assert.equal(env.fetches.length, 0, "no race");
+  assert.equal(diag.synthetic.used, 0);
+});
+
+test("a read the DRM check loses is not held against the host", async () => {
+  const env = loadEngine({
+    path: "/bangumi/play/ep416234",
+    race: { [ALI]: { ms: 900, status: 206 }, [AKAM]: { ms: 1000, status: 206 } }
+  });
+  env.parse(episode());
+  env.parse(drmCheck());
+  env.playerRequest(akamUrl(CLIP), "0-4601").fail();
+  // The episode's first fragment is slow, and the race it starts saves the
+  // host history.
+  await slowStart(env);
+  await env.advance(1000);
+  assert.equal(env.api.getDiagnostics().session.activeHost, ALI);
+  const saved = Array.from(env.store.entries()).find(([k]) => k.startsWith("biliAccelerator.hosts.v1."))[1];
+  const akamai = JSON.parse(saved).hosts[AKAM];
+  assert.ok(akamai.mbps > 0, "Akamai is on record from the race");
+  assert.equal(akamai.lastFailAt, undefined, "with no failure");
+});
+
+// A protected episode's playurl may name its DRM too. It also says which
+// episode it is, and that makes it an episode.
+test("an episode's playurl with DRM fields in it is an episode's", async () => {
+  const env = loadEngine({ path: "/bangumi/play/ep416234" });
+  const playview = { code: 0, data: {
+    arc: { aid: 331253392, cid: 42231991605 },
+    play_video_type: "whole",
+    video_info: Object.assign({ drm_type: "widevine", drm_tech_type: 2 }, playurl().data)
+  } };
+  env.parse(playview);
+  const head = env.playerRequest(cosovUrl(FILE), "0-1264");
+  await env.advance(40);
+  head.finish(206, 1265);
+  const session = env.api.getDiagnostics().session;
+  assert.equal(session.assignedHost, COSOV);
+  assert.equal(session.requiredMbps, 3.8);
+  assert.equal(session.hosts[COSOV].requests, 1);
+});
+
+// The mark covers reads from the start of a file and nothing else, so a video
+// can't go untracked because its playurl looked like the check's.
+test("a video that is played is tracked from its first fragment, whatever its playurl looked like", async () => {
+  const env = loadEngine({
+    path: "/bangumi/play/ep416234",
+    race: { [ALI]: { ms: 900, status: 206 }, [AKAM]: { ms: 1000, status: 206 } }
+  });
+  const lookalike = drmCheck(FILE, AUDIO);
+  lookalike.data.video_info.dash.video[0].bandwidth = 3750000;
+  env.parse(lookalike);
+  const head = env.playerRequest(cosovUrl(FILE), "0-1264");
+  await env.advance(40);
+  head.finish(206, 1265);
+  assert.equal(env.api.getDiagnostics().session, null, "its header read is taken for the check's");
+
+  await slowStart(env);
+  assert.deepEqual(env.fetches.map((f) => f.host), [AKAM, ALI], "the first fragment is raced like any other");
+  await env.advance(1000);
+  const diag = env.api.getDiagnostics();
+  assert.equal(diag.session.requiredMbps, 3.8);
+  assert.equal(diag.session.activeHost, ALI);
+
+  const again = env.playerRequest(cosovUrl(FILE), "0-1264");
+  await env.advance(40);
+  again.finish(206, 1265);
+  assert.equal(env.api.getDiagnostics().session.hosts[ALI].requests, 1, "and later header reads count");
+});
+
+test("an ordinary playurl for the same video lifts the mark", async () => {
+  const env = loadEngine({ path: "/bangumi/play/ep416234" });
+  env.parse(drmCheck(FILE, AUDIO));
+  env.parse(episode());
+  const head = env.playerRequest(cosovUrl(FILE), "0-1264");
+  await env.advance(40);
+  head.finish(206, 1265);
+  assert.equal(env.api.getDiagnostics().session.hosts[COSOV].requests, 1);
 });
 
 test("no race while the tab is hidden", async () => {
