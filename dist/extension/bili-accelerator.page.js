@@ -782,6 +782,23 @@
       .map(function (c) { return c.dash; });
   }
 
+  // The bangumi page tests Widevine before it plays anything: a script asks
+  // /ogv/player/pre/check/drm for a playurl and reads the head of two of its
+  // files. The answer has an episode's shape, but it is a fixed test clip that
+  // nothing on the page plays. It is told apart by coming alone: `data` holds
+  // `video_info` and nothing else, where an episode's playurl also says which
+  // episode it is (`arc`). The DRM field is required as well and would not do
+  // alone, since a protected episode's playurl may carry it too.
+  function isDrmCheck(payload) {
+    const data = payload && typeof payload === "object" ? payload.data : null;
+    if (!data || typeof data !== "object") {
+      return false;
+    }
+    const info = data.video_info;
+    return Object.keys(data).length === 1 && !!info && typeof info === "object" &&
+      info.drm_tech_type != null;
+  }
+
   // For every representation in a DASH playurl: its bitrate and the URL each
   // issued host was given for it, signature included. isUsable() lets the
   // caller keep PCDN and MCDN entries out; the table only ever routes toward
@@ -1193,6 +1210,7 @@
     repIdOf,
     parseRange,
     dashContainers,
+    isDrmCheck,
     buildTable,
     urlFor,
     candidatesFor,
@@ -1993,6 +2011,7 @@
     return {
       cid,
       table: { cid, reps: {} },
+      drmCheck: false,       // the bangumi page's DRM test clip; see beginRequest
       requiredBps: 0,
       assigned: null,        // the host the player used first
       lastHost: null,        // the host of the latest video request
@@ -2051,6 +2070,7 @@
       return;
     }
     const session = sessionFor(table.cid);
+    session.drmCheck = routing.isDrmCheck(payload);
     // A refresh of the same video brings fresh signatures; take them.
     Object.keys(table.reps).forEach(function (key) {
       session.table.reps[key] = table.reps[key];
@@ -2086,6 +2106,15 @@
     const kind = rep ? rep.kind : (routing.AUDIO_ID_RE.test(routing.repIdOf(key) || "") ? "audio" : "video");
     const range = routing.parseRange(meta.range);
     const start = range ? range.start : 0;
+    // The DRM check reads the head of its clip's files and plays nothing, so
+    // those reads stay out of the engine the way live segments do. A request
+    // further into a file is playback, whatever its playurl looked like.
+    if (session.drmCheck) {
+      if (start === 0) {
+        return null;
+      }
+      session.drmCheck = false;
+    }
     const slot = key + "|" + start;
     const req = {
       xhr,

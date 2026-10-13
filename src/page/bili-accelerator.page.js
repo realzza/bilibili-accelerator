@@ -779,6 +779,7 @@
     return {
       cid,
       table: { cid, reps: {} },
+      drmCheck: false,       // the bangumi page's DRM test clip; see beginRequest
       requiredBps: 0,
       assigned: null,        // the host the player used first
       lastHost: null,        // the host of the latest video request
@@ -837,6 +838,7 @@
       return;
     }
     const session = sessionFor(table.cid);
+    session.drmCheck = routing.isDrmCheck(payload);
     // A refresh of the same video brings fresh signatures; take them.
     Object.keys(table.reps).forEach(function (key) {
       session.table.reps[key] = table.reps[key];
@@ -872,6 +874,15 @@
     const kind = rep ? rep.kind : (routing.AUDIO_ID_RE.test(routing.repIdOf(key) || "") ? "audio" : "video");
     const range = routing.parseRange(meta.range);
     const start = range ? range.start : 0;
+    // The DRM check reads the head of its clip's files and plays nothing, so
+    // those reads stay out of the engine the way live segments do. A request
+    // further into a file is playback, whatever its playurl looked like.
+    if (session.drmCheck) {
+      if (start === 0) {
+        return null;
+      }
+      session.drmCheck = false;
+    }
     const slot = key + "|" + start;
     const req = {
       xhr,
