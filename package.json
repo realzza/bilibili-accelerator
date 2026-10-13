@@ -6,6 +6,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "test": "node --test",
+    "test:browser": "playwright test",
     "prepare": "npm run build"
   },
   "keywords": [
@@ -15,5 +16,8 @@
     "userscript",
     "webextension"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "devDependencies": {
+    "@playwright/test": "^1.64.0"
+  }
 }

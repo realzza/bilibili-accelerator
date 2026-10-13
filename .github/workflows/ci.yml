@@ -19,3 +19,30 @@ jobs:
         run: node scripts/build.mjs
       - name: dist/ is committed in sync with src/
         run: git diff --exit-code -- dist
+
+  browser:
+    # macOS, so the panel is measured in the system font its copy was written
+    # for, and WebKit is the build closest to Safari.
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      # Also rebuilds dist/ (the prepare script), so the tests run what src/
+      # builds to even when the committed dist/ is stale.
+      - name: Install dependencies
+        run: npm ci
+      - name: Install browsers
+        run: npx playwright install --only-shell chromium webkit
+      - name: Browser tests
+        run: npm run test:browser
+      - name: Keep traces of failed tests
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces
+          path: test-results/
+          retention-days: 7

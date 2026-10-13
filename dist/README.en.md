@@ -93,6 +93,14 @@ npm test
 npm run build
 ```
 
+`npm test` runs the unit tests and needs nothing installed. A second set of tests loads the built userscript into a local stand-in for a video page and runs it in Chromium and WebKit, without touching Bilibili:
+
+```sh
+npm install
+npx playwright install chromium webkit
+npm run test:browser
+```
+
 Build outputs:
 
 ```text

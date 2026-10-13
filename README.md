@@ -93,6 +93,14 @@ npm test
 npm run build
 ```
 
+`npm test` 是单元测试，不用装任何依赖。面板和页面钩子另有一组浏览器测试：把构建好的用户脚本注入一个本地伪造的视频页，在 Chromium 和 WebKit 里跑，不访问 B 站。
+
+```sh
+npm install
+npx playwright install chromium webkit
+npm run test:browser
+```
+
 构建产物：
 
 ```text
