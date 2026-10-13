@@ -131,6 +131,7 @@ The VOD player (`core.ba67b466.js`) builds a DASH manifest from the playurl, and
 - **Retry.** Up to 3 retries per fragment, the dash.js default, not overridden. The retry goes out immediately unless the failure came within 50 ms of the request, which the loader reads as being offline and answers with a delay.
 - **Buffer.** It fills to 70–80 s ahead (`bufferAheadToKeep`), which takes seconds on a warm host.
 - **Requests.** One `XMLHttpRequest` per fragment, `Range` in a header, and every handler (`onload`, `onloadend`, `ontimeout`, `onerror`, `onabort`, `onprogress`) assigned as a property before `send()`.
+- **Playurl.** A page that ships `window.__playinfo__` hands it to the player. Every other playurl the player requests itself, through one class (`HttpPlayUrl`) and its bundled axios: an `XMLHttpRequest` with no `responseType`, `responseText` read in `onloadend`, then `JSON.parse`. Seen on a video page that had no inline playurl, on moving to another video without a page load, and for the home page's hover preview, in Chromium and WebKit. Changing quality among the representations a playurl already lists requests nothing. So a playurl that arrives by XHR reaches the extension where the player parses it, and the XHR hook leaves response bodies alone.
 
 A host that answers quickly and then trickles trips none of these. A cold `mirroraliov` answers a warm connection in 30 ms and then sends the body at 1–2 Mbps. With auto quality, dash.js lowers the quality. With a fixed quality, the buffer drains until the video stops.
 

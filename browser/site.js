@@ -10,33 +10,44 @@ const { test: base, expect } = require("@playwright/test");
 
 const USERSCRIPT = path.join(__dirname, "../dist/bilibili-accelerator.user.js");
 const PAGE_URL = "https://www.bilibili.com/video/BV1xx411c7mD/";
-const PLAYURL = "https://api.bilibili.com/x/player/wbi/playurl?bvid=BV1xx411c7mD&cid=42231991605&fnval=4048";
+// The part of the video the page opens on, and its next part, which a viewer
+// moves to without a page load. Nothing inline covers the second one: its
+// playurl is only ever the one the player fetches.
+const CID = "42231991605";
+const NEXT_CID = "42231991606";
 
 const COSOV = "upos-sz-mirrorcosov.bilivideo.com";
 const AKAM = "upos-hz-mirrorakam.akamaized.net";
 const PCDN = "xy203x0x113x7xy.mcdn.bilivideo.cn:4483";
-const VIDEO = "/upgcxcode/05/16/42231991605/42231991605-1-100026.m4s";
-const AUDIO = "/upgcxcode/05/16/42231991605/42231991605-1-30280.m4s";
-const PCDN_VIDEO = "https://" + PCDN + VIDEO + "?os=mcdn&upsig=aa";
-const ISSUED_VIDEO = "https://" + COSOV + VIDEO + "?os=cosovbv&upsig=bb";
 const SEGMENT_BYTES = 256 * 1024;
+
+const playurlFor = (cid) => "https://api.bilibili.com/x/player/wbi/playurl?bvid=BV1xx411c7mD&cid=" + cid + "&fnval=4048";
+const media = (cid, rep) => "/upgcxcode/05/16/" + cid + "/" + cid + "-1-" + rep + ".m4s";
+const pcdnVideo = (cid) => "https://" + PCDN + media(cid, 100026) + "?os=mcdn&upsig=aa";
+const issuedVideo = (cid) => "https://" + COSOV + media(cid, 100026) + "?os=cosovbv&upsig=bb";
+
+const PLAYURL = playurlFor(CID);
+const NEXT_PLAYURL = playurlFor(NEXT_CID);
+const PCDN_VIDEO = pcdnVideo(CID);
+const ISSUED_VIDEO = issuedVideo(CID);
+const NEXT_ISSUED_VIDEO = issuedVideo(NEXT_CID);
 
 // A playurl as a viewer gets it when Bilibili assigns a PCDN node: the node
 // as the base URL, the proper CDN URLs as backups.
-function playurl() {
+function playurl(cid) {
   return {
     code: 0,
     data: {
       dash: {
         video: [{
           id: 80, bandwidth: 2400000, codecs: "avc1.640032",
-          baseUrl: PCDN_VIDEO,
-          backupUrl: [ISSUED_VIDEO, "https://" + AKAM + VIDEO + "?os=akam&hdnts=cc"]
+          baseUrl: pcdnVideo(cid),
+          backupUrl: [issuedVideo(cid), "https://" + AKAM + media(cid, 100026) + "?os=akam&hdnts=cc"]
         }],
         audio: [{
           id: 30280, bandwidth: 319173, codecs: "mp4a.40.2",
-          baseUrl: "https://" + COSOV + AUDIO + "?os=cosovbv&upsig=dd",
-          backupUrl: ["https://" + AKAM + AUDIO + "?os=akam&hdnts=ee"]
+          baseUrl: "https://" + COSOV + media(cid, 30280) + "?os=cosovbv&upsig=dd",
+          backupUrl: ["https://" + AKAM + media(cid, 30280) + "?os=akam&hdnts=ee"]
         }]
       }
     }
@@ -45,7 +56,7 @@ function playurl() {
 
 function pageHtml() {
   const values = {
-    playinfo: JSON.stringify(playurl()).replace(/</g, "\\u003c"),
+    playinfo: JSON.stringify(playurl(CID)).replace(/</g, "\\u003c"),
     playurl: PLAYURL,
     lastByte: SEGMENT_BYTES - 1
   };
@@ -65,8 +76,9 @@ function answer(route, site) {
   if (request.url() === PAGE_URL) {
     return route.fulfill({ contentType: "text/html; charset=utf-8", body: pageHtml() });
   }
-  if (request.url() === PLAYURL) {
-    return route.fulfill({ contentType: "application/json", headers: cors, body: JSON.stringify(playurl()) });
+  const cid = [CID, NEXT_CID].find((id) => request.url() === playurlFor(id));
+  if (cid) {
+    return route.fulfill({ contentType: "application/json", headers: cors, body: JSON.stringify(playurl(cid)) });
   }
   if (isCdnHost(url.hostname)) {
     if (request.method() === "OPTIONS") {
@@ -109,4 +121,6 @@ const test = base.extend({
   }, { auto: true }]
 });
 
-module.exports = { test, expect, PCDN, PCDN_VIDEO, ISSUED_VIDEO, SEGMENT_BYTES };
+module.exports = {
+  test, expect, COSOV, AKAM, PCDN, PCDN_VIDEO, ISSUED_VIDEO, NEXT_PLAYURL, NEXT_ISSUED_VIDEO, SEGMENT_BYTES
+};
