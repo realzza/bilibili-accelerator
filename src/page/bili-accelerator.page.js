@@ -2709,15 +2709,18 @@
       ":host(.ba-lifted){bottom:84px}",
       "*{box-sizing:border-box}",
       "button,input,select{font:inherit}",
-      ".ba-toggle{position:relative;display:grid;place-items:center;width:40px;height:40px;border:1px solid rgba(255,255,255,.4);border-radius:50%;background:linear-gradient(135deg,var(--ba-grad-a),var(--ba-grad-b));color:#fff;box-shadow:0 8px 22px var(--ba-accent-shadow),0 1px 0 rgba(255,255,255,.45) inset;cursor:pointer;padding:0;transition:transform .16s ease,box-shadow .16s ease}",
-      ".ba-toggle:hover{transform:translateY(-1px);box-shadow:0 10px 28px var(--ba-accent-shadow),0 1px 0 rgba(255,255,255,.45) inset}",
+      // The rim is an inset shadow of one width all the way round. It used to
+      // be a translucent border plus a highlight along the top edge only, which
+      // left the ring bright and thick on top and faint at the bottom.
+      ".ba-toggle{position:relative;display:grid;place-items:center;width:40px;height:40px;border:none;border-radius:50%;background:linear-gradient(135deg,var(--ba-grad-a),var(--ba-grad-b));color:#fff;box-shadow:0 8px 22px var(--ba-accent-shadow),0 0 0 1px rgba(255,255,255,.34) inset;cursor:pointer;padding:0;transition:transform .16s ease,box-shadow .16s ease}",
+      ".ba-toggle:hover{transform:translateY(-1px);box-shadow:0 10px 28px var(--ba-accent-shadow),0 0 0 1px rgba(255,255,255,.34) inset}",
       ".ba-toggle:active{transform:scale(.93)}",
       ".ba-toggle svg{width:20px;height:20px;display:block}",
       // The badge sits beside the video on every page, so it never loops. The
       // bolt flickers once on hover, and once with a ring when zapBadge() marks
       // a server switch.
       ".ba-toggle:hover svg,.ba-toggle.ba-zap svg{animation:ba-strike .5s ease-out}",
-      ".ba-toggle.ba-zap:after{content:'';position:absolute;inset:-1px;border-radius:50%;border:2px solid var(--ba-accent);opacity:0;pointer-events:none;animation:ba-burst .8s cubic-bezier(.2,.6,.35,1)}",
+      ".ba-toggle.ba-zap:after{content:'';position:absolute;inset:0;border-radius:50%;border:2px solid var(--ba-accent);opacity:0;pointer-events:none;animation:ba-burst .8s cubic-bezier(.2,.6,.35,1)}",
       "@keyframes ba-strike{0%,100%{transform:scale(1);opacity:1}18%{transform:scale(1.22) rotate(-6deg);opacity:.5}32%{opacity:1}46%{transform:scale(1.12) rotate(3deg);opacity:.65}62%{opacity:1}}",
       // 1.8 keeps the ring inside the 18px between the badge and the viewport edge.
       "@keyframes ba-burst{0%{opacity:.75;transform:scale(1)}100%{opacity:0;transform:scale(1.8)}}",
