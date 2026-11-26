@@ -1,6 +1,6 @@
 # <img src="docs/assets/logo.svg" alt="" width="40" align="top">&nbsp;Bilibili Accelerator
 
-[中文](./README.md) · [Greasy Fork](https://greasyfork.org/en/scripts/582026-bilibili-accelerator) · v0.5.1
+[中文](./README.md) · [Greasy Fork](https://greasyfork.org/en/scripts/582026-bilibili-accelerator) · v0.5.2
 
 Watching Bilibili from outside mainland China, popular videos are usually fine. Everything else tends to stutter — smooth one moment, buffering the next.
 
@@ -61,7 +61,8 @@ Full notes live in [Releases](https://github.com/realzza/bilibili-accelerator/re
 
 | Version | What changed |
 | --- | --- |
-| v0.5.1 | The panel now moves with playback. While a video plays smoothly, the status dot sends out rings, a highlight runs along the speed curve and the curve's endpoint pulses. A server test shows an arc circling the dot, and buffering shows a ring closing in on it; Slow network, Ready and Off stay still. The ⚡ badge never loops: the bolt flickers once on hover, the badge shrinks while pressed, and when the video moves to another server the bolt flickers and one ring leaves the badge. Its rim is now the same width and brightness all the way round. With the panel open the speed curve is redrawn every frame, so it advances continuously between the one-second samples and the readout counts to each new value. The endpoint dot is no longer cut off by the edge of the chart. Nothing animates while the panel is closed, the tab is in the background, or the system asks for reduced motion. Server selection is unchanged |
+| v0.5.2 | The ⚡ badge can be dragged anywhere, docks half-hidden at a side edge, and can be reset or hidden from Advanced settings; Alt+B shows or hides it. New experimental "Multi-server download", off by default. The extension reads the video servers' cache status, so it judges sooner whether a server relaying from origin is fast enough. Backup servers are compared on their history for the current time of day in Beijing (night, day, evening peak). Fixed server selection doing nothing on pages Bilibili redirects to a language-prefixed address such as /zh-Hans/video/. Panel fixes: the last accent swatch no longer drops to a second line when Advanced is open; the scrollbar is thin and follows the panel's light or dark theme; "Copy report" says copied only once the clipboard has the report; changing the language with `BiliAccelerator.setConfig()` re-translates the whole panel |
+| [v0.5.1](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.5.1) | Panel motion: the status dot, speed curve and ⚡ badge animate with playback state, and the speed curve advances smoothly frame by frame |
 | [v0.5.0](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.5.0) | Servers are chosen by measurement: each video starts on its native server and moves to a clearly faster one when that falls short; the page-load probe, six-hour ranking and step-by-step rotation are gone; **Test other servers** replaces **Still buffering? Boost harder** |
 | [v0.4.1](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.4.1) | Fixed server is now a dropdown with a Custom… option, and no longer offers Akamai |
 | [v0.4.0](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.4.0) | Fixes background playback stalls; candidate servers span both tiers and are ranked by measured throughput; the ⚡ badge auto-hides on live pages |

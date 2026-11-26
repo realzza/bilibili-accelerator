@@ -1,6 +1,6 @@
 # <img src="docs/assets/logo.svg" alt="" width="40" align="top">&nbsp;Bilibili Accelerator
 
-[English](./README.en.md) · [Greasy Fork](https://greasyfork.org/en/scripts/582026-bilibili-accelerator) · 当前版本 v0.5.1
+[English](./README.en.md) · [Greasy Fork](https://greasyfork.org/en/scripts/582026-bilibili-accelerator) · 当前版本 v0.5.2
 
 海外看 B 站，热门视频一般没什么问题，冷门视频经常一会儿流畅、一会儿卡死。
 
@@ -61,7 +61,8 @@ npm run build
 
 | 版本 | 主要变化 |
 | --- | --- |
-| v0.5.1 | 面板加入状态动效。播放流畅时，状态点向外扩散光圈，速度曲线上有高光流过，曲线末端发出脉冲；测试线路时状态点外有弧线环绕，缓冲时光圈向内收拢；网络较慢、就绪和关闭三种状态保持静止。⚡ 按钮不循环播放动画：悬停时闪电闪动一次，按下时略微缩小，视频切换线路时闪电闪动并向外扩散一圈光环；按钮外圈的描边改为粗细、明暗一致。面板打开期间速度曲线逐帧重绘，在每秒一次的采样之间连续推进，读数过渡到新值，曲线末端的圆点不再被图表边缘裁切。面板关闭、标签页位于后台或系统开启「减弱动态效果」时不运行动画。线路选择逻辑未改动 |
+| v0.5.2 | ⚡ 按钮可以拖动：按住拖到任意位置，拖到左右边缘贴边半隐藏，高级设置里可复位或隐藏，Alt+B 切换显示。新增实验功能「多线路并行下载」，默认关闭。扩展版能读到视频服务器的缓存状态，节点需要从源站转发时更早判断线路够不够快。比较备选线路时按北京时间的时段（夜间、白天、晚高峰）参考历史速度。修复 B 站把页面跳转到 /zh-Hans/video/ 这类带语言前缀的地址后，线路选择完全不工作的问题。面板修复：展开高级设置后最后一个主题色不再折到第二行；滚动条改为细的、跟随面板明暗的样式；「复制诊断报告」只有真正写入剪贴板后才提示已复制；用 `BiliAccelerator.setConfig()` 切换语言后面板完整重新翻译 |
+| [v0.5.1](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.5.1) | 面板加入状态动效：状态点、速度曲线和 ⚡ 按钮随播放状态变化，速度曲线逐帧平滑推进 |
 | [v0.5.0](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.5.0) | 线路改为按实测决定：每个视频先使用原生线路，速度不足时比较备选线路并切换到明显更快的一条；取消加载时测速、排序缓存和逐个轮换；「测试其他线路」取代「还在卡？再加把劲」 |
 | [v0.4.1](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.4.1) | 固定服务器改为下拉选择，可填写自定义地址，不再提供 Akamai |
 | [v0.4.0](https://github.com/realzza/bilibili-accelerator/releases/tag/v0.4.0) | 修复后台播放卡住；候选服务器覆盖境内外两档并按实测吞吐排序；直播页 ⚡ 自动隐藏 |
