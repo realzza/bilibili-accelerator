@@ -232,6 +232,8 @@ Per region (by time zone), in `localStorage` under `biliAccelerator.hosts.v1.`: 
 
 History only orders challengers. It never picks the active host without a race, and a host with no history still gets tried (see [Choosing](#choosing-the-next-host)).
 
+Each host record also keeps one average per Beijing time band: night (00–08), day (08–18) and peak (18–24), with a seven-day half-life because a band sees about a third of the samples. Challengers are scored for the band the race falls in: the band's average, weighted by its sample count, blended with the all-hours average counted as one sample. A host that is fast in the small hours and slow at the evening peak is then ranked low at peak after a few evenings of samples. Records saved before bands existed score as before.
+
 ### Settings
 
 - **Selection: auto** runs the engine above. `mode` has no effect in auto and its row (适用范围, was 何时) is hidden, the same treatment PR #35 gave the fixed-host picker. A saved `mode: "force"` stays in storage and applies again if the viewer picks fixed.

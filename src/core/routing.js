@@ -60,6 +60,14 @@
   const LOST_RACE_REST_MS = 60000;
 
   const HISTORY_HALF_LIFE_MS = 3 * 24 * 60 * 60 * 1000;
+  // Host speed follows the hour in China: the same overseas edge moved one
+  // file at 1.1 Mbps at 18:40 Beijing and 10-19 Mbps at 03:50. History also
+  // keeps a record per Beijing time band. A band sees about a third of the
+  // samples, so it decays more slowly, and until it holds a few samples it is
+  // blended with the all-hours record, which counts as BAND_PRIOR samples.
+  const BAND_HALF_LIFE_MS = 7 * 24 * 60 * 60 * 1000;
+  const BAND_PRIOR = 1;
+  const BEIJING_UTC_OFFSET_H = 8;
   const RECENT_FAILURE_MS = 60 * 60 * 1000;
   const EXPLORE_RATE = 0.2;
   const UNKNOWN_HOST_MBPS = 10;
@@ -354,9 +362,28 @@
 
   // ---- choosing -------------------------------------------------------------
 
-  function historyScore(history, host) {
+  // night 00-08, day 08-18, peak 18-24, Beijing time, for a wall-clock time.
+  function beijingBand(epochMs) {
+    if (typeof epochMs !== "number" || !isFinite(epochMs)) {
+      return null;
+    }
+    const hour = ((Math.floor(epochMs / 3600000) + BEIJING_UTC_OFFSET_H) % 24 + 24) % 24;
+    return hour >= 18 ? "peak" : (hour >= 8 ? "day" : "night");
+  }
+
+  // A host's expected rate. Given a band, the band's own record pulls the
+  // all-hours one toward it as it gathers samples.
+  function historyScore(history, host, band) {
     const rec = history && history.hosts && history.hosts[host];
-    return rec && rec.n > 0 ? rec.mbps : null;
+    const all = rec && rec.n > 0 ? rec.mbps : null;
+    const b = band && rec && rec.bands && rec.bands[band];
+    if (!b || !(b.n > 0)) {
+      return all;
+    }
+    if (all == null) {
+      return b.mbps;
+    }
+    return (b.mbps * b.n + all * BAND_PRIOR) / (b.n + BAND_PRIOR);
   }
 
   function recentlyFailed(history, host, now) {
@@ -390,15 +417,16 @@
     if (!pool.length) {
       return [];
     }
+    const band = beijingBand(i.now);
     const failedLately = function (h) { return recentlyFailed(i.history, h, now) ? 1 : 0; };
     // An unknown host counts as the lower median of the measured ones, so it
     // never outranks a host already measured as good.
     const known = pool.filter(function (h) { return !failedLately(h); })
-      .map(function (h) { return historyScore(i.history, h); })
+      .map(function (h) { return historyScore(i.history, h, band); })
       .filter(function (s) { return s != null; }).sort(function (a, b) { return a - b; });
     const typical = known.length ? known[Math.floor((known.length - 1) / 2)] : UNKNOWN_HOST_MBPS;
     const score = function (h) {
-      const s = historyScore(i.history, h);
+      const s = historyScore(i.history, h, band);
       return s == null ? typical : s;
     };
     const overseas = function (h) { return describeHost(h).region === "overseas" ? 1 : 0; };
@@ -476,15 +504,25 @@
 
   // ---- history --------------------------------------------------------------
 
-  function recordSample(history, host, mbps, now) {
-    const h = history && typeof history === "object" ? history : {};
-    h.hosts = h.hosts || {};
-    const rec = h.hosts[host] || { mbps: 0, n: 0, at: now };
+  // Folds one sample into a decaying average { mbps, n, at }.
+  function decayedAverage(rec, mbps, now, halfLifeMs) {
     const age = Math.max(0, now - (rec.at || now));
-    const nEff = rec.n * Math.pow(0.5, age / HISTORY_HALF_LIFE_MS);
+    const nEff = rec.n * Math.pow(0.5, age / halfLifeMs);
     rec.mbps = (rec.mbps * nEff + mbps) / (nEff + 1);
     rec.n = nEff + 1;
     rec.at = now;
+    return rec;
+  }
+
+  function recordSample(history, host, mbps, now) {
+    const h = history && typeof history === "object" ? history : {};
+    h.hosts = h.hosts || {};
+    const rec = decayedAverage(h.hosts[host] || { mbps: 0, n: 0, at: now }, mbps, now, HISTORY_HALF_LIFE_MS);
+    const band = beijingBand(now);
+    if (band) {
+      rec.bands = rec.bands && typeof rec.bands === "object" ? rec.bands : {};
+      rec.bands[band] = decayedAverage(rec.bands[band] || { mbps: 0, n: 0, at: now }, mbps, now, BAND_HALF_LIFE_MS);
+    }
     h.hosts[host] = rec;
     return h;
   }
@@ -544,6 +582,7 @@
     stuckRaceVerdict,
     nextCooldown,
     historyScore,
+    beijingBand,
     recentlyFailed,
     recordSample,
     recordFailure,
