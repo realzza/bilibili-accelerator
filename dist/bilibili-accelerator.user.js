@@ -2202,7 +2202,10 @@
     } catch (_) {
       path = "";
     }
-    return /^\/(?:video|bangumi\/play|list|medialist\/play|festival|cheese\/play)\//.test(path || "");
+    // Bilibili now serves pages under a language prefix too (/zh-Hans/video/...,
+    // /zh-Hant/...); without it here the engine stood aside on every such page.
+    return /^\/(?:[a-z]{2,3}(?:-[A-Za-z0-9]{2,8})?\/)?(?:video|bangumi\/play|list|medialist\/play|festival|cheese\/play)\//
+      .test(path || "");
   }
 
   function newSession(cid) {

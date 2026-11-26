@@ -505,6 +505,20 @@ test("no race off a player page, where playurls come from hover previews", async
   assert.equal(env.fetches.length, 0);
 });
 
+test("a player page under a language prefix is still a player page", async () => {
+  for (const path of ["/zh-Hans/video/BV1asxS68EmA/", "/zh-Hant/bangumi/play/ep1/", "/en/video/BV1asxS68EmA/"]) {
+    const env = loadEngine({ path, race: { [ALI]: { ms: 900, status: 206 }, [AKAM]: { ms: 1000, status: 206 } } });
+    env.parse(playurl());
+    await slowStart(env);
+    assert.ok(env.fetches.length > 0, path + " should race a stuck fragment");
+  }
+  const home = loadEngine({ path: "/zh-Hans/", race: { [ALI]: { ms: 900, status: 206 } } });
+  home.parse(playurl());
+  await slowStart(home);
+  await home.advance(3000);
+  assert.equal(home.fetches.length, 0, "the prefixed home page is still not a player page");
+});
+
 test("fixed selection keeps its own rewrite and never races", async () => {
   const env = loadEngine({ config: { selection: "fixed", mode: "force", pcdnHost: HW }, race: { [ALI]: { ms: 500, status: 206 } } });
   env.parse(playurl());
