@@ -37,6 +37,15 @@
   const STUCK_RATE_FACTOR = 1.3;
   const STUCK_MIN_REMAINING_MS = 1000;
   const STUCK_MARGIN_MS = 2000;
+  // On a cache miss the edge relays the fragment from origin, which on an
+  // overseas edge is where cold-video delivery runs at 1-8 Mbps. A miss is no
+  // proof of slowness (that can still carry a 3.75 Mbps stream), so it starts
+  // nothing by itself: it only lets the rate check below judge sooner. Only
+  // the extension can see cache status; the CDN exposes no such header to
+  // page scripts.
+  const MISS_MIN_TRANSFER_MS = 200;
+  const MISS_MIN_FRAGMENT_BYTES = 32 * 1024;
+  const MISS_NO_FIRST_BYTE_MS = 500;
 
   // Sustained shortfall: measured goodput can't grow the buffer, and the
   // buffer is low enough that it matters.
@@ -309,21 +318,25 @@
   // ---- when to act ----------------------------------------------------------
 
   // A fragment request in flight, judged against the buffer it has to beat.
-  //   req: { total, loaded, startedAt, firstByteAt, rateBps }
+  //   req: { total, loaded, startedAt, firstByteAt, rateBps, cache }
+  //   cache: "hit" | "miss" | undefined, as the extension read it off the response
   function stuckVerdict(req, now, requiredBps, bufferAheadS) {
     if (!req || !(req.total >= STUCK_MIN_FRAGMENT_BYTES) || !(requiredBps > 0)) {
       return null;
     }
+    const miss = req.cache === "miss";
     const bufferMs = Math.max(0, bufferAheadS || 0) * 1000;
     if (!req.firstByteAt) {
       const waited = now - req.startedAt;
-      if (waited >= STUCK_NO_FIRST_BYTE_MS && bufferAheadS < STUCK_URGENT_BUFFER_S) {
+      if (waited >= (miss ? MISS_NO_FIRST_BYTE_MS : STUCK_NO_FIRST_BYTE_MS) &&
+          bufferAheadS < STUCK_URGENT_BUFFER_S) {
         return { reason: "no-first-byte", waitedMs: waited };
       }
       return null;
     }
     const transferMs = now - req.firstByteAt;
-    if (transferMs < STUCK_MIN_TRANSFER_MS && req.loaded < STUCK_MIN_FRAGMENT_BYTES) {
+    if (transferMs < (miss ? MISS_MIN_TRANSFER_MS : STUCK_MIN_TRANSFER_MS) &&
+        req.loaded < (miss ? MISS_MIN_FRAGMENT_BYTES : STUCK_MIN_FRAGMENT_BYTES)) {
       return null;
     }
     const rate = req.rateBps > 0 ? req.rateBps : (transferMs > 0 ? 8000 * req.loaded / transferMs : 0);
@@ -356,6 +369,47 @@
     if (enough && i.estimateBps != null && i.estimateBps < SHORTFALL_RATE_FACTOR * i.requiredBps &&
         i.bufferAheadS < SHORTFALL_BUFFER_S) {
       return { trigger: "shortfall" };
+    }
+    return null;
+  }
+
+  // Whether a CDN response came from the edge's cache, read from the headers
+  // each vendor uses. Seen on Bilibili's hosts: EdgeOne (mirrorcosov) sends
+  // eo-cache-status: HIT; Alibaba sends x-cache: HIT TCP_MEM_HIT ...; Huawei
+  // marks each cache hop in via: ...CACHE20[33,TCP_MISS,37]... and sends
+  // nginx-hit: 1 on a hit.
+  //   headers: [{ name, value }] (webRequest's shape) or { name: value }
+  //   returns "hit" | "miss" | null when the response doesn't say
+  function cacheVerdict(headers) {
+    const map = {};
+    if (Array.isArray(headers)) {
+      headers.forEach(function (h) {
+        if (h && h.name) {
+          map[String(h.name).toLowerCase()] = String(h.value == null ? "" : h.value);
+        }
+      });
+    } else if (headers && typeof headers === "object") {
+      Object.keys(headers).forEach(function (k) { map[k.toLowerCase()] = String(headers[k]); });
+    }
+    const status = map["eo-cache-status"] || map["x-cache"] || map["x-cache-status"] || map["cf-cache-status"];
+    if (status) {
+      const token = status.trim().split(/[\s,;]+/)[0].toUpperCase();
+      if (/MISS|EXPIRED|BYPASS|DYNAMIC/.test(token)) {
+        return "miss";
+      }
+      if (/HIT|STALE|REVALIDATED|UPDATING/.test(token)) {
+        return "hit";
+      }
+    }
+    const via = (map.via || "").toUpperCase();
+    if (/TCP_[A-Z_]*HIT/.test(via)) {
+      return "hit";
+    }
+    if (/TCP_[A-Z_]*MISS/.test(via)) {
+      return "miss";
+    }
+    if (map["nginx-hit"] === "1") {
+      return "hit";
     }
     return null;
   }
@@ -576,6 +630,7 @@
     createEstimator,
     recentRate,
     stuckVerdict,
+    cacheVerdict,
     evaluate,
     pickChallengers,
     raceVerdict,

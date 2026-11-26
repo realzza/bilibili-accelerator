@@ -798,6 +798,15 @@
   const STUCK_RATE_FACTOR = 1.3;
   const STUCK_MIN_REMAINING_MS = 1000;
   const STUCK_MARGIN_MS = 2000;
+  // On a cache miss the edge relays the fragment from origin, which on an
+  // overseas edge is where cold-video delivery runs at 1-8 Mbps. A miss is no
+  // proof of slowness (that can still carry a 3.75 Mbps stream), so it starts
+  // nothing by itself: it only lets the rate check below judge sooner. Only
+  // the extension can see cache status; the CDN exposes no such header to
+  // page scripts.
+  const MISS_MIN_TRANSFER_MS = 200;
+  const MISS_MIN_FRAGMENT_BYTES = 32 * 1024;
+  const MISS_NO_FIRST_BYTE_MS = 500;
 
   // Sustained shortfall: measured goodput can't grow the buffer, and the
   // buffer is low enough that it matters.
@@ -1070,21 +1079,25 @@
   // ---- when to act ----------------------------------------------------------
 
   // A fragment request in flight, judged against the buffer it has to beat.
-  //   req: { total, loaded, startedAt, firstByteAt, rateBps }
+  //   req: { total, loaded, startedAt, firstByteAt, rateBps, cache }
+  //   cache: "hit" | "miss" | undefined, as the extension read it off the response
   function stuckVerdict(req, now, requiredBps, bufferAheadS) {
     if (!req || !(req.total >= STUCK_MIN_FRAGMENT_BYTES) || !(requiredBps > 0)) {
       return null;
     }
+    const miss = req.cache === "miss";
     const bufferMs = Math.max(0, bufferAheadS || 0) * 1000;
     if (!req.firstByteAt) {
       const waited = now - req.startedAt;
-      if (waited >= STUCK_NO_FIRST_BYTE_MS && bufferAheadS < STUCK_URGENT_BUFFER_S) {
+      if (waited >= (miss ? MISS_NO_FIRST_BYTE_MS : STUCK_NO_FIRST_BYTE_MS) &&
+          bufferAheadS < STUCK_URGENT_BUFFER_S) {
         return { reason: "no-first-byte", waitedMs: waited };
       }
       return null;
     }
     const transferMs = now - req.firstByteAt;
-    if (transferMs < STUCK_MIN_TRANSFER_MS && req.loaded < STUCK_MIN_FRAGMENT_BYTES) {
+    if (transferMs < (miss ? MISS_MIN_TRANSFER_MS : STUCK_MIN_TRANSFER_MS) &&
+        req.loaded < (miss ? MISS_MIN_FRAGMENT_BYTES : STUCK_MIN_FRAGMENT_BYTES)) {
       return null;
     }
     const rate = req.rateBps > 0 ? req.rateBps : (transferMs > 0 ? 8000 * req.loaded / transferMs : 0);
@@ -1117,6 +1130,47 @@
     if (enough && i.estimateBps != null && i.estimateBps < SHORTFALL_RATE_FACTOR * i.requiredBps &&
         i.bufferAheadS < SHORTFALL_BUFFER_S) {
       return { trigger: "shortfall" };
+    }
+    return null;
+  }
+
+  // Whether a CDN response came from the edge's cache, read from the headers
+  // each vendor uses. Seen on Bilibili's hosts: EdgeOne (mirrorcosov) sends
+  // eo-cache-status: HIT; Alibaba sends x-cache: HIT TCP_MEM_HIT ...; Huawei
+  // marks each cache hop in via: ...CACHE20[33,TCP_MISS,37]... and sends
+  // nginx-hit: 1 on a hit.
+  //   headers: [{ name, value }] (webRequest's shape) or { name: value }
+  //   returns "hit" | "miss" | null when the response doesn't say
+  function cacheVerdict(headers) {
+    const map = {};
+    if (Array.isArray(headers)) {
+      headers.forEach(function (h) {
+        if (h && h.name) {
+          map[String(h.name).toLowerCase()] = String(h.value == null ? "" : h.value);
+        }
+      });
+    } else if (headers && typeof headers === "object") {
+      Object.keys(headers).forEach(function (k) { map[k.toLowerCase()] = String(headers[k]); });
+    }
+    const status = map["eo-cache-status"] || map["x-cache"] || map["x-cache-status"] || map["cf-cache-status"];
+    if (status) {
+      const token = status.trim().split(/[\s,;]+/)[0].toUpperCase();
+      if (/MISS|EXPIRED|BYPASS|DYNAMIC/.test(token)) {
+        return "miss";
+      }
+      if (/HIT|STALE|REVALIDATED|UPDATING/.test(token)) {
+        return "hit";
+      }
+    }
+    const via = (map.via || "").toUpperCase();
+    if (/TCP_[A-Z_]*HIT/.test(via)) {
+      return "hit";
+    }
+    if (/TCP_[A-Z_]*MISS/.test(via)) {
+      return "miss";
+    }
+    if (map["nginx-hit"] === "1") {
+      return "hit";
     }
     return null;
   }
@@ -1337,6 +1391,7 @@
     createEstimator,
     recentRate,
     stuckVerdict,
+    cacheVerdict,
     evaluate,
     pickChallengers,
     raceVerdict,
@@ -2203,7 +2258,8 @@
   function hostStats(session, host) {
     if (!session.hosts[host]) {
       session.hosts[host] = {
-        est: routing.createEstimator(), requests: 0, bytes: 0, errors: [], ttfbs: []
+        est: routing.createEstimator(), requests: 0, bytes: 0, errors: [], ttfbs: [],
+        cache: { hit: 0, miss: 0 }
       };
     }
     return session.hosts[host];
@@ -2215,6 +2271,44 @@
     } catch (_) {
       return "";
     }
+  }
+
+  function absoluteUrl(value) {
+    try {
+      return new URL(value, root.location.href).href;
+    } catch (_) {
+      return String(value);
+    }
+  }
+
+  // The extension's background worker reads the CDN's cache status, which
+  // page scripts can't (the CDN exposes only Content-Length and
+  // Content-Range), and relays it per response. It goes on the oldest video
+  // request in flight for that URL that has no verdict yet.
+  function noteCacheVerdict(url, verdict) {
+    if (verdict !== "hit" && verdict !== "miss") {
+      return false;
+    }
+    const href = absoluteUrl(url);
+    let found = null;
+    engine.sessions.forEach(function (session) {
+      if (found) {
+        return;
+      }
+      for (let i = 0; i < session.inflight.length; i += 1) {
+        const req = session.inflight[i];
+        if (!req.cache && req.href === href) {
+          found = req;
+          return;
+        }
+      }
+    });
+    if (!found) {
+      return false;
+    }
+    found.cache = verdict;
+    hostStats(found.session, found.host).cache[verdict] += 1;
+    return true;
   }
 
   function beginRequest(xhr, meta) {
@@ -2233,6 +2327,8 @@
     const req = {
       xhr,
       session,
+      href: absoluteUrl(url),
+      cache: null,
       key,
       kind,
       host: hostOfUrl(url),
@@ -2420,7 +2516,7 @@
             .map(function (r) {
               return {
                 total: r.total, loaded: r.loaded, startedAt: r.startedAt, firstByteAt: r.firstByteAt,
-                rateBps: routing.recentRate(r.samples, now, 1000), ref: r
+                rateBps: routing.recentRate(r.samples, now, 1000), cache: r.cache, ref: r
               };
             }),
           estimateBps: stats.est.estimate(),
@@ -2944,7 +3040,10 @@
         mb: round1(s.bytes / 1e6),
         mbps: est === null ? null : round1(est / 1e6),
         firstByteMs: median(s.ttfbs),
-        errors: s.errors.length
+        errors: s.errors.length,
+        // Video fragments the CDN said it served from cache or relayed from
+        // origin; only the extension sees this.
+        cache: s.cache.hit + s.cache.miss > 0 ? { hit: s.cache.hit, miss: s.cache.miss } : undefined
       };
     });
     const issued = {};
@@ -4778,6 +4877,8 @@
         saveConfig(Object.assign({}, config, data.config));
         applyLang();
         applyTheme();
+      } else if (data && data.__biliAccel === "cache" && typeof data.url === "string") {
+        noteCacheVerdict(data.url, data.verdict);
       }
     });
   }

@@ -850,7 +850,8 @@
   function hostStats(session, host) {
     if (!session.hosts[host]) {
       session.hosts[host] = {
-        est: routing.createEstimator(), requests: 0, bytes: 0, errors: [], ttfbs: []
+        est: routing.createEstimator(), requests: 0, bytes: 0, errors: [], ttfbs: [],
+        cache: { hit: 0, miss: 0 }
       };
     }
     return session.hosts[host];
@@ -862,6 +863,44 @@
     } catch (_) {
       return "";
     }
+  }
+
+  function absoluteUrl(value) {
+    try {
+      return new URL(value, root.location.href).href;
+    } catch (_) {
+      return String(value);
+    }
+  }
+
+  // The extension's background worker reads the CDN's cache status, which
+  // page scripts can't (the CDN exposes only Content-Length and
+  // Content-Range), and relays it per response. It goes on the oldest video
+  // request in flight for that URL that has no verdict yet.
+  function noteCacheVerdict(url, verdict) {
+    if (verdict !== "hit" && verdict !== "miss") {
+      return false;
+    }
+    const href = absoluteUrl(url);
+    let found = null;
+    engine.sessions.forEach(function (session) {
+      if (found) {
+        return;
+      }
+      for (let i = 0; i < session.inflight.length; i += 1) {
+        const req = session.inflight[i];
+        if (!req.cache && req.href === href) {
+          found = req;
+          return;
+        }
+      }
+    });
+    if (!found) {
+      return false;
+    }
+    found.cache = verdict;
+    hostStats(found.session, found.host).cache[verdict] += 1;
+    return true;
   }
 
   function beginRequest(xhr, meta) {
@@ -880,6 +919,8 @@
     const req = {
       xhr,
       session,
+      href: absoluteUrl(url),
+      cache: null,
       key,
       kind,
       host: hostOfUrl(url),
@@ -1067,7 +1108,7 @@
             .map(function (r) {
               return {
                 total: r.total, loaded: r.loaded, startedAt: r.startedAt, firstByteAt: r.firstByteAt,
-                rateBps: routing.recentRate(r.samples, now, 1000), ref: r
+                rateBps: routing.recentRate(r.samples, now, 1000), cache: r.cache, ref: r
               };
             }),
           estimateBps: stats.est.estimate(),
@@ -1591,7 +1632,10 @@
         mb: round1(s.bytes / 1e6),
         mbps: est === null ? null : round1(est / 1e6),
         firstByteMs: median(s.ttfbs),
-        errors: s.errors.length
+        errors: s.errors.length,
+        // Video fragments the CDN said it served from cache or relayed from
+        // origin; only the extension sees this.
+        cache: s.cache.hit + s.cache.miss > 0 ? { hit: s.cache.hit, miss: s.cache.miss } : undefined
       };
     });
     const issued = {};
@@ -3425,6 +3469,8 @@
         saveConfig(Object.assign({}, config, data.config));
         applyLang();
         applyTheme();
+      } else if (data && data.__biliAccel === "cache" && typeof data.url === "string") {
+        noteCacheVerdict(data.url, data.verdict);
       }
     });
   }

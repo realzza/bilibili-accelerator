@@ -163,8 +163,14 @@ function loadEngine(opts) {
   };
   sandbox.globalThis = sandbox;
   sandbox.window = sandbox;
-  sandbox.addEventListener = () => {};
+  // Window listeners, so a test can post what the extension's content script would.
+  const windowListeners = {};
+  sandbox.addEventListener = (type, fn) => { (windowListeners[type] = windowListeners[type] || []).push(fn); };
   vm.runInNewContext(src, sandbox);
+  // The page checks event.source against its own global, which in a vm
+  // context is not the sandbox object itself.
+  const pageGlobal = vm.runInContext("globalThis", sandbox);
+  const post = (data) => (windowListeners.message || []).forEach((fn) => fn({ source: pageGlobal, data }));
   if (o.config) {
     sandbox.BiliAccelerator.setConfig(o.config);
   }
@@ -212,7 +218,7 @@ function loadEngine(opts) {
   }
 
   return {
-    sandbox, api: sandbox.BiliAccelerator, xhrs, fetches, video, document, store, advance, playerRequest,
+    sandbox, api: sandbox.BiliAccelerator, xhrs, fetches, video, document, store, advance, playerRequest, post,
     parse: (payload) => sandbox.JSON.parse(JSON.stringify(payload))
   };
 }
@@ -599,4 +605,62 @@ test("a manual test switches when the current host is 1.5x slower on the same by
   const incumbent = race.contenders.find((c) => c.incumbent);
   assert.equal(incumbent.host, COSOV);
   assert.ok(incumbent.ms >= 600 && incumbent.ms < 1000, "its time is the margin it failed to beat: " + incumbent.ms);
+});
+
+// A fragment that answers in 100 ms and then trickles at ~0.4 Mbps, with or
+// without the extension saying the edge is relaying it from origin.
+async function trickle(env, cache) {
+  const x = env.playerRequest(cosovUrl(FILE), "5000000-6499999");
+  if (cache) {
+    env.post({ __biliAccel: "cache", url: x.url, verdict: cache });
+  }
+  await env.advance(100);
+  x.progress(5000);
+  await env.advance(300);
+  x.progress(20000);
+  await env.advance(100);   // the engine's first tick, 400 ms into the transfer
+  return x;
+}
+
+test("a cache miss the extension relays lets a slow fragment be judged sooner", async () => {
+  const missed = loadEngine();
+  missed.parse(playurl());
+  await trickle(missed, "miss");
+  assert.ok(missed.fetches.length > 0, "a relayed fragment trickling at 0.4 Mbps is raced at the first tick");
+  assert.equal(JSON.stringify(missed.api.getDiagnostics().session.hosts[COSOV].cache), JSON.stringify({ hit: 0, miss: 1 }));
+
+  const plain = loadEngine();
+  plain.parse(playurl());
+  await trickle(plain, null);
+  assert.equal(plain.fetches.length, 0, "without it the same fragment waits for 500 ms of transfer");
+  await plain.advance(500);
+  assert.ok(plain.fetches.length > 0, "and is raced on the next tick");
+
+  const hit = loadEngine();
+  hit.parse(playurl());
+  await trickle(hit, "hit");
+  assert.equal(hit.fetches.length, 0, "a cache hit changes nothing");
+});
+
+test("a cache miss on a fragment that keeps up starts nothing", async () => {
+  const env = loadEngine();
+  env.parse(playurl());
+  const x = env.playerRequest(cosovUrl(FILE), "5000000-6499999");
+  env.post({ __biliAccel: "cache", url: x.url, verdict: "miss" });
+  await env.advance(100);
+  x.progress(100000);
+  await env.advance(300);
+  x.progress(600000);   // ~13 Mbps against 3.75 needed
+  await env.advance(100);
+  assert.equal(env.fetches.length, 0);
+});
+
+test("a cache status for a URL with nothing in flight is ignored", async () => {
+  const env = loadEngine();
+  env.parse(playurl());
+  env.post({ __biliAccel: "cache", url: cosovUrl(FILE), verdict: "miss" });
+  env.post({ __biliAccel: "cache", url: cosovUrl(FILE), verdict: "bogus" });
+  await trickle(env, null);
+  assert.equal(env.fetches.length, 0);
+  assert.equal(env.api.getDiagnostics().session.hosts[COSOV].cache, undefined);
 });

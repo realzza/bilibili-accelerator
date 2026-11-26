@@ -40,6 +40,8 @@ npm run build
 
 Open `chrome://extensions`, turn on Developer mode, and load `dist/extension`.
 
+The extension can do one thing the userscript can't. Bilibili's video servers say in each response whether the bytes came from the edge's cache, but don't let page scripts read it; an extension can. When an edge has to relay a fragment from origin, the extension judges sooner whether that server keeps up. For that it needs access to `bilivideo.com` and `akamaized.net`. What it reads stays in the page on your machine and is neither stored nor sent anywhere.
+
 ## Panel and settings
 
 - The top of the panel shows current status; below it is a live download-speed graph. When speed data isn't available, it falls back to how many seconds are buffered ahead.

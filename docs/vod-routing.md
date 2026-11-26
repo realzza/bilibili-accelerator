@@ -176,6 +176,14 @@ A session is one video on one page: a playurl payload for one `cid`, plus any la
 
 **Race**, only when a trigger fires. Fetch the first 768 KB of the fragment in flight (all of it if shorter), or of the bytes right after the last completed fragment if nothing is in flight, from two challengers in parallel, with the page's native `fetch` so the request carries the page's `Referer`. The race is decided as soon as its outcome is known: when the first challenger finishes. Contenders still running get another second so their numbers reach history, then are cancelled; one that finishes in that second becomes the fallback. Each race costs at most 1.5 MB. The requests use `credentials: "omit"`, like the player's own, which should let the browser reuse the connection for the player's retry; the winner's edge will also hold the start of the range by then. The race is timed from request start to completion, which is what the player pays, not from the headers.
 
+### Cache status (extension only)
+
+Every UPOS host says in its response whether the edge served the bytes from cache: EdgeOne (`mirrorcosov`) sends `eo-cache-status`, Alibaba sends `x-cache`, Huawei marks each cache hop with `TCP_HIT` or `TCP_MISS` in `via`. None of it reaches a page script: the hosts send `Access-Control-Expose-Headers: Content-Length,Content-Range` (Huawei adds `x-service-module`), so the userscript can't see it.
+
+The extension can. A background worker reads it with `webRequest.onHeadersReceived` for each `.m4s` response on a Bilibili tab (`routing.cacheVerdict`) and passes `hit` or `miss` through the content script into the page, where it is attached to the video request in flight for that URL. A miss is no proof of slowness, since a relaying edge can still carry the stream, so it starts nothing by itself. It shortens how long the stuck-fragment check waits before judging the rate: 200 ms of transfer or 32 KB instead of 500 ms or 128 KB, and 0.5 s instead of 1 s without a first byte. The rate still has to fall short as before. The report counts hits and misses per host (`session.hosts[host].cache`).
+
+The gain is bounded. On a cold edge the headers themselves often arrive late, after the 1 s no-first-byte trigger has fired, so the miss helps mainly when an edge answers at once and then relays slowly; there it saves up to about 300 ms. On 2026-11-26 the relay was checked end to end in headless Edge on real pages: verdicts arrived for the player's fragments, and on a fresh upload random 256 KB ranges took 0.9–2.1 s on misses against 0.6–0.7 s on hits. Akamai sends no cache status and gets no verdict.
+
 ### Initial selection
 
 A session starts native: requests go wherever the player sends them, with nothing rewritten. The one exception is a PCDN or MCDN base URL: if Bilibili issued a proper CDN URL as its backup, that URL is used as issued; otherwise `classify()` rewrites it as before (PCDN to the default target, MCDN by `mcdnStrategy`).
