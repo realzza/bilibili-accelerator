@@ -2275,8 +2275,15 @@
     }
   }
 
+  // The box position:fixed offsets are measured in: the window less its
+  // scrollbars. innerWidth counts the scrollbar, and measuring `right` from it
+  // shifted a badge dropped on the right half by the scrollbar's width.
   function viewportSize() {
-    return { w: root.innerWidth || 0, h: root.innerHeight || 0 };
+    const el = document.documentElement;
+    return {
+      w: (el && el.clientWidth) || root.innerWidth || 0,
+      h: (el && el.clientHeight) || root.innerHeight || 0
+    };
   }
 
   // Inline offsets on the host beat the stylesheet's :host rules, so a badge
