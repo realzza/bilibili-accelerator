@@ -1637,10 +1637,14 @@
       return;
     }
     const accent = ACCENT_PRESETS[config.accent] || ACCENT_PRESETS.bili;
-    const surface = SURFACES[resolveTheme()] || SURFACES.light;
+    const theme = resolveTheme() === "dark" ? "dark" : "light";
+    const surface = SURFACES[theme];
     Object.keys(surface).forEach(function (name) {
       host.style.setProperty(name, surface[name]);
     });
+    // Native parts the panel doesn't draw itself (a scrollbar, a <select>'s
+    // open list) follow the panel's theme rather than the page's.
+    host.style.setProperty("color-scheme", theme);
     const rgb = hexToRgb(accent.hex);
     host.style.setProperty("--ba-accent", accent.hex);
     host.style.setProperty("--ba-accent-strong", accent.strong);
@@ -4969,7 +4973,13 @@
       "@keyframes ba-burst{0%{opacity:.75;transform:scale(1)}100%{opacity:0;transform:scale(1.8)}}",
       ".ba-panel{display:none;flex-direction:column;position:absolute;right:0;bottom:48px;width:min(340px,calc(100vw - 36px));max-height:calc(100vh - 96px);padding:16px;border:1px solid var(--ba-border);border-radius:14px;background:var(--ba-surface);box-shadow:0 18px 46px var(--ba-panel-shadow);backdrop-filter:saturate(180%) blur(18px);-webkit-backdrop-filter:saturate(180%) blur(18px)}",
       ".ba-panel.open{display:flex}",
-      ".ba-body{overflow-y:auto;min-height:0}",
+      // A thin scrollbar in the panel's own colours. The body reaches 12px into
+      // the panel's right padding and pads it back, so the scrollbar (Advanced
+      // open) sits near the panel's edge instead of against the cards.
+      ".ba-body{overflow-y:auto;min-height:0;margin-right:-12px;padding-right:12px;scrollbar-width:thin;scrollbar-color:var(--ba-border-in) transparent}",
+      ".ba-body::-webkit-scrollbar{width:8px}",
+      ".ba-body::-webkit-scrollbar-track{background:transparent}",
+      ".ba-body::-webkit-scrollbar-thumb{background:var(--ba-border-in);border-radius:4px}",
       ".ba-head{display:flex;align-items:center;gap:8px;margin-bottom:14px}",
       ".ba-head>svg{width:18px;height:18px;color:var(--ba-accent);flex:0 0 auto}",
       ".ba-seg{position:relative;display:inline-grid;grid-template-columns:32px 32px;height:24px;border:1px solid var(--ba-border-in);border-radius:8px;background:var(--ba-dot-bg);overflow:hidden;flex:0 0 auto}",
@@ -5044,8 +5054,11 @@
       // Chromium, 8px in WebKit), so its text never lined up with a text input.
       // Dropping the native appearance removes the inset; the chevron is ours.
       ".ba-field select{-webkit-appearance:none;appearance:none;padding-right:26px;background-image:var(--ba-chevron);background-repeat:no-repeat;background-position:right 8px center;background-size:8px 5px}",
+      // Seven swatches take 182px, which fits beside the 96px caption even
+      // when a classic 17px scrollbar narrows the panel; at 22px the last one
+      // wrapped to a line of its own whenever Advanced was open.
       ".ba-swatches{display:flex;align-items:center;gap:7px;min-height:32px;flex-wrap:wrap}",
-      ".ba-sw{width:22px;height:22px;border-radius:50%;padding:0;border:none;cursor:pointer;box-shadow:0 0 0 1px var(--ba-border-in) inset;transition:transform .12s ease}",
+      ".ba-sw{width:20px;height:20px;border-radius:50%;padding:0;border:none;cursor:pointer;box-shadow:0 0 0 1px var(--ba-border-in) inset;transition:transform .12s ease}",
       ".ba-sw:hover{transform:scale(1.12)}",
       ".ba-sw[aria-pressed=\"true\"]{box-shadow:0 0 0 2px var(--ba-card),0 0 0 4px var(--ba-accent)}",
       ".ba-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}",
@@ -5379,16 +5392,28 @@
     diag.type = "button";
     diag.dataset.i18n = "diag";
     diag.textContent = t("diag");
+    let diagTimer = null;
+    function showDiagResult(key, ms) {
+      diag.textContent = t(key);
+      clearTimeout(diagTimer);
+      diagTimer = setTimeout(function () { diag.textContent = t("diag"); }, ms);
+    }
     diag.addEventListener("click", function () {
       const text = JSON.stringify(buildDiagnostics(), null, 2);
+      // writeText() reports failure by rejecting (permission denied, page not
+      // focused), not by throwing, so "Copied" waits until it has resolved.
+      let copying;
       try {
-        root.navigator.clipboard.writeText(text);
-        diag.textContent = t("diagCopied");
-        setTimeout(function () { diag.textContent = t("diag"); }, 1500);
-      } catch (_) {
-        console.info("[BiliAccelerator] diagnostics", text);
-        diag.textContent = t("diagConsole");
+        copying = Promise.resolve(root.navigator.clipboard.writeText(text));
+      } catch (error) {
+        copying = Promise.reject(error);
       }
+      copying.then(function () {
+        showDiagResult("diagCopied", 1500);
+      }, function () {
+        console.info("[BiliAccelerator] diagnostics", text);
+        showDiagResult("diagConsole", 4000);
+      });
     });
 
     const reload = document.createElement("button");
@@ -5536,7 +5561,10 @@
 
   root.BiliAccelerator = {
     getConfig: function () { return Object.assign({}, config); },
-    setConfig: function (next) { saveConfig(Object.assign({}, config, next || {})); renderStatus(); applyTheme(); return this.getConfig(); },
+    // applyLang() re-renders the status too, and re-translates the panel when
+    // `lang` changed; the panel's own 中/EN toggle would otherwise see the
+    // language already set and leave it half translated.
+    setConfig: function (next) { saveConfig(Object.assign({}, config, next || {})); applyLang(); applyTheme(); return this.getConfig(); },
     getStats: function () { return JSON.parse(JSON.stringify(state)); },
     getDiagnostics: function () { return buildDiagnostics(); },
     rewriteUrl: function (url) { return core.rewriteUrl(url, rewriteConfig()); },
