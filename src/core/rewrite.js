@@ -81,6 +81,7 @@
     portHeuristic: true,                           // non-default port ⇒ PCDN
     stallRecovery: true,                           // auto mode: switch servers on evidence
     p2pGuard: false,                               // opt-in WebRTC/PCDN neutralizer
+    multiSource: false,                            // experimental: fetch fragments from several hosts at once
     maxDepth: 20,
     schemaVersion: SCHEMA_VERSION
   });
@@ -161,6 +162,7 @@
     if (THEME_MODES.indexOf(merged.theme) === -1) {
       merged.theme = DEFAULT_CONFIG.theme;
     }
+    merged.multiSource = merged.multiSource === true;
     merged.schemaVersion = SCHEMA_VERSION;
     return merged;
   }

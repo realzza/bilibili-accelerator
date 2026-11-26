@@ -57,7 +57,20 @@ function loadEngine(opts) {
     setRequestHeader(k, v) { this.headers[String(k).toLowerCase()] = v; }
     send() { this.sentAt = now; }
     addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); }
-    getResponseHeader() { return "video/mp4"; }
+    getResponseHeader(name) {
+      if (String(name).toLowerCase() === "content-range") {
+        const m = /bytes=(\d+)-(\d+)/.exec(this.headers.range || "");
+        return m && this.status === 206 ? "bytes " + m[1] + "-" + m[2] + "/78081346" : null;
+      }
+      return "video/mp4";
+    }
+    // As in a browser: listeners, then the on* property.
+    dispatchEvent(ev) {
+      (this.listeners[ev.type] || []).slice().forEach((fn) => fn.call(this, ev));
+      const handler = this["on" + ev.type];
+      if (typeof handler === "function") handler.call(this, ev);
+      return true;
+    }
     emit(type, loaded) {
       const ev = { type, loaded: loaded || 0 };
       (this.listeners[type] || []).slice().forEach((fn) => fn.call(this, ev));
@@ -83,18 +96,31 @@ function loadEngine(opts) {
     const host = new URL(url).host;
     const spec = race[host] || { ms: 3500, status: 206 };
     const range = /bytes=(\d+)-(\d+)/.exec((init && init.headers && init.headers.Range) || "");
-    const bytes = range ? Number(range[2]) - Number(range[1]) + 1 : 0;
-    const call = { url, host, init, aborted: false };
+    const from = range ? Number(range[1]) : 0;
+    const bytes = range ? Number(range[2]) - from + 1 : 0;
+    const call = { url, host, init, aborted: false, from, bytes };
     fetches.push(call);
+    // Each byte carries its offset in the file, so a test can check the
+    // assembled fragment byte for byte.
+    const body = () => {
+      const value = new Uint8Array(spec.status === 206 ? bytes : 200);
+      for (let i = 0; i < value.length; i += 1) value[i] = (from + i) % 251;
+      return value;
+    };
     return new Promise((resolve, reject) => {
-      const id = setTimeoutF(() => {
+      // spec.stall: the headers never come.
+      const id = spec.stall ? null : setTimeoutF(() => {
         let sent = false;
         resolve({
           status: spec.status,
-          headers: { get: () => "video/mp4" },
+          headers: {
+            get: (name) => String(name).toLowerCase() === "content-range"
+              ? (spec.status === 206 ? "bytes " + from + "-" + (from + bytes - 1) + "/" + (spec.total || 78081346) : null)
+              : "video/mp4"
+          },
           body: {
             getReader: () => ({
-              read: () => Promise.resolve(sent ? { done: true } : (sent = true, { done: false, value: new Uint8Array(spec.status === 206 ? bytes : 200) })),
+              read: () => Promise.resolve(sent ? { done: true } : (sent = true, { done: false, value: body() })),
               cancel() {}
             })
           }
@@ -147,6 +173,8 @@ function loadEngine(opts) {
   const sandbox = {
     JSON: { parse: JSON.parse, stringify: JSON.stringify },
     URL, Date, WeakSet, Map, Headers, Response, Request, Promise, Intl, Uint8Array, AbortController,
+    Event: class { constructor(type) { this.type = type; } },
+    ProgressEvent: class { constructor(type, init) { this.type = type; Object.assign(this, init || {}); } },
     Math: math,
     performance: { now: () => now },
     XMLHttpRequest: FakeXHR,
@@ -677,4 +705,159 @@ test("a cache status for a URL with nothing in flight is ignored", async () => {
   await trickle(env, null);
   assert.equal(env.fetches.length, 0);
   assert.equal(env.api.getDiagnostics().session.hosts[COSOV].cache, undefined);
+});
+
+// ---- multi-source fragments ---------------------------------------------------
+
+const TFHW = "upos-tf-all-hw.bilivideo.com";
+const TWO_MB = 2 * 1024 * 1024;
+
+function multiEnv(race, opts) {
+  const env = loadEngine({ config: { multiSource: true }, race });
+  env.parse(playurl());
+  if (!(opts && opts.sizeUnknown)) {
+    // The player's own init request reports the file size, as on a real page.
+    const init = env.playerRequest(cosovUrl(FILE), "0-999");
+    init.finish(206, 1000);
+  }
+  return env;
+}
+
+function bytesMatch(buffer, from) {
+  const view = new Uint8Array(buffer);
+  for (let i = 0; i < view.length; i += 1) {
+    if (view[i] !== (from + i) % 251) return "byte " + i + " is " + view[i];
+  }
+  return true;
+}
+
+const slowFirst = (extra) => Object.assign({
+  [COSOV]: { ms: 2500, status: 206 },
+  [AKAM]: { ms: 100, status: 206 },
+  [ALI]: { ms: 150, status: 206 },
+  [TFHW]: { ms: 150, status: 206 }
+}, extra || {});
+
+test("multi-source: a host that keeps up does the whole fragment alone, as one request", async () => {
+  const env = multiEnv({ [COSOV]: { ms: 100, status: 206 }, [AKAM]: { ms: 100, status: 206 }, [ALI]: { ms: 100, status: 206 } });
+  const x = env.playerRequest(cosovUrl(FILE), "5000000-" + (5000000 + TWO_MB - 1));
+  assert.equal(x.sentAt, undefined, "the player's own XHR is never sent");
+  await env.advance(300);
+  assert.equal(x.loadCalls, 1);
+  assert.equal(x.endCalls, 1);
+  assert.equal(x.readyState, 4);
+  assert.equal(x.status, 206);
+  assert.equal(x.response.byteLength, TWO_MB);
+  assert.equal(bytesMatch(x.response, 5000000), true);
+  assert.match(x.getResponseHeader("Content-Range"), /^bytes 5000000-7097151\/78081346$/);
+  assert.deepEqual(env.fetches.map((f) => f.host), [COSOV]);
+  const multi = env.api.getDiagnostics().session.multi;
+  assert.equal(multi.fragments, 1);
+  assert.equal(multi.helped, 0);
+});
+
+test("multi-source: when the first host falls behind, more hosts take over the range", async () => {
+  const env = multiEnv(slowFirst());
+  const x = env.playerRequest(cosovUrl(FILE), "5000000-" + (5000000 + TWO_MB - 1));
+  await env.advance(2000);
+  assert.equal(x.loadCalls, 1, "done before the first host's 2.5 s");
+  assert.equal(bytesMatch(x.response, 5000000), true);
+  const hosts = new Set(env.fetches.map((f) => f.host));
+  assert.ok(hosts.size >= 3, "helpers joined: " + [...hosts]);
+  const multi = env.api.getDiagnostics().session.multi;
+  assert.equal(multi.helped, 1);
+  assert.ok(multi.splits >= 2);
+});
+
+test("multi-source: a host that ignores the range is dropped, and the others finish", async () => {
+  const env = multiEnv(slowFirst({ [AKAM]: { ms: 80, status: 200 } }));
+  const x = env.playerRequest(cosovUrl(FILE), "0-" + (TWO_MB - 1));
+  await env.advance(2200);   // helpers join after 1 s with no first byte
+  assert.equal(x.loadCalls, 1);
+  assert.equal(bytesMatch(x.response, 0), true);
+  assert.equal(env.fetches.filter((f) => f.host === AKAM).length, 1, "no more pieces go to it");
+});
+
+test("multi-source: a host serving a file of another size is dropped", async () => {
+  const env = multiEnv(slowFirst({ [AKAM]: { ms: 80, status: 206, total: 123 } }));
+  const x = env.playerRequest(cosovUrl(FILE), "0-" + (TWO_MB - 1));
+  await env.advance(2200);
+  assert.equal(x.loadCalls, 1);
+  assert.equal(bytesMatch(x.response, 0), true);
+  assert.equal(env.api.getDiagnostics().session.multi.mbByHost[AKAM], undefined, "none of its bytes were used");
+});
+
+test("multi-source: with no file size known yet, no helper joins", async () => {
+  const env = multiEnv(slowFirst(), { sizeUnknown: true });
+  const x = env.playerRequest(cosovUrl(FILE), "0-" + (TWO_MB - 1));
+  await env.advance(3000);
+  assert.equal(x.loadCalls, 1);
+  assert.deepEqual([...new Set(env.fetches.map((f) => f.host))], [COSOV]);
+});
+
+test("multi-source: a helper that sends nothing loses its piece to another", async () => {
+  const env = multiEnv(slowFirst({ [AKAM]: { stall: true } }));
+  const x = env.playerRequest(cosovUrl(FILE), "0-" + (TWO_MB - 1));
+  await env.advance(2450);
+  assert.equal(x.loadCalls, 1, "done before the first host's 2.5 s");
+  assert.equal(bytesMatch(x.response, 0), true);
+  assert.ok(env.api.getDiagnostics().session.multi.stalls >= 1);
+});
+
+test("multi-source: when every host fails, the request errors and the player's retry goes out as itself", async () => {
+  const env = multiEnv({ [COSOV]: { ms: 50, status: 503 }, [AKAM]: { ms: 50, status: 503 }, [ALI]: { ms: 50, status: 503 }, [TFHW]: { ms: 50, status: 503 } });
+  let errors = 0;
+  const x = env.playerRequest(cosovUrl(FILE), "0-" + (TWO_MB - 1));
+  x.onerror = () => { errors += 1; };
+  await env.advance(600);
+  assert.equal(errors, 1);
+  assert.equal(x.status, 0);
+  assert.equal(x.endCalls, 1);
+  const retry = env.playerRequest(cosovUrl(FILE), "0-" + (TWO_MB - 1));
+  assert.ok(retry.sentAt !== undefined, "the retry is a normal request");
+  assert.equal(env.api.getDiagnostics().session.multi.fallbacks, 1);
+});
+
+test("multi-source: the player's own timeout still applies", async () => {
+  const env = multiEnv({ [COSOV]: { stall: true }, [AKAM]: { stall: true }, [ALI]: { stall: true }, [TFHW]: { stall: true } });
+  const x = env.playerRequest(cosovUrl(FILE), "0-" + (TWO_MB - 1));
+  await env.advance(10500);
+  assert.equal(x.timeoutCalls, 1);
+  assert.equal(x.endCalls, 1);
+});
+
+test("multi-source: the player aborting the request cancels every piece", async () => {
+  const env = multiEnv(slowFirst({ [AKAM]: { ms: 3000, status: 206 }, [ALI]: { ms: 3000, status: 206 }, [TFHW]: { ms: 3000, status: 206 } }));
+  const x = env.playerRequest(cosovUrl(FILE), "0-" + (TWO_MB - 1));
+  await env.advance(1300);
+  x.abort();
+  assert.equal(x.abortHandlerCalls, 1);
+  assert.equal(x.endCalls, 1);
+  const pieces = env.fetches.filter((f) => f.from >= 0 && f.bytes > 1000);
+  assert.ok(pieces.length >= 2 && pieces.every((f) => f.aborted), "all piece requests cancelled");
+  await env.advance(3000);
+  assert.equal(x.loadCalls, undefined, "nothing completes after an abort");
+});
+
+test("multi-source: small fragments, audio and the default setting go out as normal requests", async () => {
+  const env = multiEnv({});
+  const small = env.playerRequest(cosovUrl(FILE), "0-300000");
+  assert.ok(small.sentAt !== undefined, "under 512 KB");
+  const audio = env.playerRequest(cosovUrl(AUDIO), "0-" + (TWO_MB - 1));
+  assert.ok(audio.sentAt !== undefined, "audio");
+  const off = loadEngine();
+  off.parse(playurl());
+  const big = off.playerRequest(cosovUrl(FILE), "0-" + (TWO_MB - 1));
+  assert.ok(big.sentAt !== undefined, "off unless the viewer turns it on");
+});
+
+test("multi-source: a host still between request and first byte is not taken for slow", async () => {
+  // First byte at 0.6 s, then the whole range at once: a mainland mirror's
+  // round trip, not a host falling behind.
+  const env = multiEnv({ [COSOV]: { ms: 600, status: 206 }, [AKAM]: { ms: 100, status: 206 }, [ALI]: { ms: 100, status: 206 } });
+  const x = env.playerRequest(cosovUrl(FILE), "0-" + (TWO_MB - 1));
+  await env.advance(900);
+  assert.equal(x.loadCalls, 1);
+  assert.deepEqual(env.fetches.map((f) => f.host), [COSOV]);
+  assert.equal(env.api.getDiagnostics().session.multi.helped, 0);
 });

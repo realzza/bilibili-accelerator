@@ -292,6 +292,27 @@ Hosts are named by region and cloud, not by hostname, and the host Bilibili assi
 | every path is congested | the race finds nothing clearly faster, and nothing changes |
 | background tab | no races or switches while hidden; samples that overlap a hidden period are dropped |
 
+## Multi-source fragments (experimental, off by default)
+
+**多线路并行下载 / Multi-server download** in the advanced settings. With it on, a video fragment of 512 KB or more is not sent as the player's own XHR. The page fetches the range itself and completes the player's XHR with the bytes: `readyState`, `status`, `response` and the response headers are set on the instance, and `loadstart`, `progress`, `load` and `loadend` are dispatched on it, so the player sees one 206.
+
+- **The assigned host first, alone.** The whole range goes to the host the player asked, as one request. Helpers (up to two more hosts, picked like race challengers) join only when that host is on course to need more than 1.5 s for the rest of the range, judged after 250 ms of transfer, or when it has sent no first byte after 1 s.
+- **Splitting.** A helper takes the back half of the largest unfinished piece (`routing.pickSplit`). A piece whose host has sent nothing for 0.8 s is taken over by a host that has delivered bytes in this fragment.
+- **Checks.** Every response must be a 206 whose `Content-Range` starts at the byte asked for, out of a file of the size the player's own responses reported (init and index requests are below the threshold and go out normally). Helpers don't join until that size is known. A host that fails a check is out for the fragment.
+- **Failure.** Every host failing, or the player's own `xhr.timeout` running out, ends the request as a network error or timeout would; the player's retry of that range then goes out as a normal request. The player aborting the request cancels every piece.
+- The routing engine keeps running; a fragment its helpers rescued doesn't stop it from moving the video to a faster host.
+
+What was measured, 2026-11-26, headless Edge on a real video page, logged out, 2 MB ranges at random offsets of one file, the same XHR through the page with the setting on and off in alternating order:
+
+| run | single host, median | multi-source, median | single-host requests that hung (20 s) | multi-source requests that failed |
+| --- | --- | --- | --- | --- |
+| helpers from the start, 3 hosts × 2 chunks | 9.4 Mbps | 7.3 Mbps | 0 / 6 | 0 / 6 |
+| helpers from the start, 1 chunk per host | 25.4 | 8.9 | 0 / 10 | 0 / 10 |
+| assigned host first, help judged at 0.4 s | 21.6 | 15.3 | 2 / 10 | 0 / 10 |
+| as shipped | 58.8 | 54.2 | 1 / 14 | 0 / 14 |
+
+Splitting from the start lost because every chunk on a mainland mirror at an uncached offset waited 1–2 s for its first byte, while the assigned edge, once warm, delivered 20–90 Mbps on its own. Judging the host at 0.4 s called helpers onto hosts that were only between request and first byte. As shipped, throughput is within the run-to-run noise of a single host, and each request that hung on a single host completed through the others. The logged-out player only plays low-quality preview streams with fragments of about 100 KB, so the real player was checked accepting assembled responses with the thresholds lowered in a local copy: six fragments from four hosts, no player error, playback and buffer advancing normally. Not yet checked: logged-in playback at high quality, Safari, and Firefox.
+
 ## Not doing
 
 - **Racing every fragment on two hosts.** It would follow the fastest host fragment by fragment, and double both the viewer's traffic and Bilibili's origin pulls.

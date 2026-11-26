@@ -556,6 +556,47 @@
     return Math.min(MAX_COOLDOWN_MS, previousMs ? previousMs * 2 : NO_SWITCH_COOLDOWN_MS);
   }
 
+  // ---- multi-source fragments ------------------------------------------------
+  //
+  // One fragment fetched from several hosts at once (the page's multiSend).
+  // Each UPOS host speaks HTTP/2, so a browser keeps one connection per host
+  // and splitting a range on a single host gains nothing; spreading it across
+  // hosts adds connections. A host that joins takes the back half of the
+  // largest unfinished piece, so it takes over the tail of a slow host's work
+  // instead of waiting for it.
+
+  const MULTI_MIN_SPLIT_BYTES = 128 * 1024;
+
+  // "bytes 0-1023/78081346" -> { start, end, total }.
+  function parseContentRange(value) {
+    const m = /^\s*bytes\s+(\d+)-(\d+)\/(\d+|\*)\s*$/i.exec(String(value || ""));
+    if (!m) {
+      return null;
+    }
+    return { start: Number(m[1]), end: Number(m[2]), total: m[3] === "*" ? NaN : Number(m[3]) };
+  }
+
+  // The chunk an idle host should take half of: the in-progress chunk with
+  // the most bytes still to come, if halving it leaves both halves worth a
+  // request. chunks: [{ pos, end, busy, done }]; returns { chunk, at } or null,
+  // where `at` is the first byte of the half that moves.
+  function pickSplit(chunks) {
+    let best = null;
+    (chunks || []).forEach(function (c) {
+      if (!c || c.done || !c.busy) {
+        return;
+      }
+      const remaining = c.end - c.pos + 1;
+      if (remaining >= 2 * MULTI_MIN_SPLIT_BYTES && (!best || remaining > best.end - best.pos + 1)) {
+        best = c;
+      }
+    });
+    if (!best) {
+      return null;
+    }
+    return { chunk: best, at: best.pos + Math.floor((best.end - best.pos + 1) / 2) };
+  }
+
   // ---- history --------------------------------------------------------------
 
   // Folds one sample into a decaying average { mbps, n, at }.
@@ -638,6 +679,8 @@
     nextCooldown,
     historyScore,
     beijingBand,
+    parseContentRange,
+    pickSplit,
     recentlyFailed,
     recordSample,
     recordFailure,

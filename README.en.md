@@ -50,6 +50,7 @@ The extension can do one thing the userscript can't. Bilibili's video servers sa
 - The status line names the server in use: the native server (the one Bilibili assigned to this video) or the one it switched to. The live rate appears only in the download-speed card below it.
 - If the video has stalled or the server is short, **Test other servers** compares a few servers right away and switches only to one that is clearly faster. It saves nothing and doesn't reload the page.
 - The bandwidth guard is off by default. Turning it on limits the page's use of your upload bandwidth; reload the page afterwards.
+- **Multi-server download** in the advanced settings is experimental and off by default. Each part of the video still starts on the current server; when that server can't keep up, one or two more servers take over the rest. In testing, average speed matched a single server, and requests that hung on one server were completed by the others.
 - In web fullscreen the ⚡ badge fades out. Move the pointer near it to bring it back.
 - Press and drag ⚡ to put it anywhere; the spot is remembered. Drop it against the left or right edge and it tucks half away, sliding back out under the pointer. Advanced settings → ⚡ button → Reset puts it back in the corner.
 - Advanced settings → Hide removes ⚡ entirely. Alt+B (Option+B on a Mac) toggles it, and `BiliAccelerator.showBadge()` in the console brings it back too.

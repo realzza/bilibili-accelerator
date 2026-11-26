@@ -81,6 +81,7 @@
     portHeuristic: true,                           // non-default port ⇒ PCDN
     stallRecovery: true,                           // auto mode: switch servers on evidence
     p2pGuard: false,                               // opt-in WebRTC/PCDN neutralizer
+    multiSource: false,                            // experimental: fetch fragments from several hosts at once
     maxDepth: 20,
     schemaVersion: SCHEMA_VERSION
   });
@@ -161,6 +162,7 @@
     if (THEME_MODES.indexOf(merged.theme) === -1) {
       merged.theme = DEFAULT_CONFIG.theme;
     }
+    merged.multiSource = merged.multiSource === true;
     merged.schemaVersion = SCHEMA_VERSION;
     return merged;
   }
@@ -1317,6 +1319,47 @@
     return Math.min(MAX_COOLDOWN_MS, previousMs ? previousMs * 2 : NO_SWITCH_COOLDOWN_MS);
   }
 
+  // ---- multi-source fragments ------------------------------------------------
+  //
+  // One fragment fetched from several hosts at once (the page's multiSend).
+  // Each UPOS host speaks HTTP/2, so a browser keeps one connection per host
+  // and splitting a range on a single host gains nothing; spreading it across
+  // hosts adds connections. A host that joins takes the back half of the
+  // largest unfinished piece, so it takes over the tail of a slow host's work
+  // instead of waiting for it.
+
+  const MULTI_MIN_SPLIT_BYTES = 128 * 1024;
+
+  // "bytes 0-1023/78081346" -> { start, end, total }.
+  function parseContentRange(value) {
+    const m = /^\s*bytes\s+(\d+)-(\d+)\/(\d+|\*)\s*$/i.exec(String(value || ""));
+    if (!m) {
+      return null;
+    }
+    return { start: Number(m[1]), end: Number(m[2]), total: m[3] === "*" ? NaN : Number(m[3]) };
+  }
+
+  // The chunk an idle host should take half of: the in-progress chunk with
+  // the most bytes still to come, if halving it leaves both halves worth a
+  // request. chunks: [{ pos, end, busy, done }]; returns { chunk, at } or null,
+  // where `at` is the first byte of the half that moves.
+  function pickSplit(chunks) {
+    let best = null;
+    (chunks || []).forEach(function (c) {
+      if (!c || c.done || !c.busy) {
+        return;
+      }
+      const remaining = c.end - c.pos + 1;
+      if (remaining >= 2 * MULTI_MIN_SPLIT_BYTES && (!best || remaining > best.end - best.pos + 1)) {
+        best = c;
+      }
+    });
+    if (!best) {
+      return null;
+    }
+    return { chunk: best, at: best.pos + Math.floor((best.end - best.pos + 1) / 2) };
+  }
+
   // ---- history --------------------------------------------------------------
 
   // Folds one sample into a decaying average { mbps, n, at }.
@@ -1399,6 +1442,8 @@
     nextCooldown,
     historyScore,
     beijingBand,
+    parseContentRange,
+    pickSplit,
     recentlyFailed,
     recordSample,
     recordFailure,
@@ -2007,6 +2052,27 @@
 
       // Count downloaded bytes for media segments (free via loadend.loaded) and
       // time send→loadend as the transfer duration for the throughput window.
+      // A large video fragment fetched from several hosts at once completes
+      // this XHR without it ever being sent (see multiSend).
+      let multi = null;
+      if (config.enabled && isMedia) {
+        try {
+          multi = multiPlan(xhr, meta);
+        } catch (_) {
+          multi = null;
+        }
+      }
+      if (multi) {
+        const multiStart = nowMs();
+        xhr.addEventListener("loadend", function onMultiEnd(event) {
+          if (event && typeof event.loaded === "number") {
+            recordTransfer(multiStart, nowMs(), event.loaded);
+          }
+        });
+        multiSend(xhr, multi);
+        return undefined;
+      }
+
       if (config.enabled && isMedia) {
         const startTs = nowMs();
         xhr.addEventListener("loadend", function onLoadEnd(event) {
@@ -2216,7 +2282,13 @@
       races: [],
       switches: [],
       stalls: 0,
-      verdict: null
+      verdict: null,
+      multiFailed: {},       // "file|start" -> a multi-source attempt failed; the retry goes out as itself
+      sizes: {},             // file -> total size, from the Content-Range of its responses
+      multi: {
+        active: false, sources: [], fragments: 0, helped: 0, fallbacks: 0, splits: 0, stalls: 0, bytes: {},
+        est: routing.createEstimator()
+      }
     };
   }
 
@@ -2385,6 +2457,14 @@
   function endRequest(req, status, loaded) {
     const session = req.session;
     req.ended = true;
+    if (status === 206 && !session.sizes[req.key]) {
+      try {
+        const got = routing.parseContentRange(req.xhr.getResponseHeader("Content-Range"));
+        if (got && got.total > 0) {
+          session.sizes[req.key] = got.total;
+        }
+      } catch (_) {}
+    }
     const index = session.inflight.indexOf(req);
     if (index !== -1) {
       session.inflight.splice(index, 1);
@@ -2698,6 +2778,524 @@
         });
       });
     });
+  }
+
+  // ---- multi-source fragments (experimental) ------------------------------
+  //
+  // With multiSource on, a large video fragment the player asks for is not
+  // sent as its own XHR. The page fetches it itself and completes the
+  // player's XHR with the bytes: readyState, status and response are set on
+  // the instance, and loadstart, progress, load and loadend are dispatched on
+  // it, so the player sees one 206.
+  //
+  // The whole range first goes to the host the player asked, as one request,
+  // so a host that keeps up costs nothing extra. Splitting from the start
+  // lost on 2026-11-26: the assigned edge delivered 2 MB at a median 25 Mbps
+  // on its own, while every chunk on a mainland mirror at an uncached offset
+  // waited 1-2 s for a first byte, which held a three-way split to 9 Mbps.
+  // Only when the host falls behind (MULTI_HELP_MS) do up to two more hosts
+  // join, each taking the back half of the largest unfinished piece
+  // (routing.pickSplit), until the range is done.
+  //
+  // Every response must carry exactly the bytes asked for, out of a file of
+  // the size the player's own requests reported. Anything off (a host that
+  // ignores the range, a size that disagrees, every host failing, the
+  // player's own timeout) fails the request as a network error would, and
+  // the player's retry of that range goes out as a normal request.
+
+  const MULTI_MIN_BYTES = 512 * 1024;
+  const MULTI_SOURCES = 3;
+  // One request per host at a time: every request on a host that doesn't hold
+  // the bytes pays a first byte of 1-2 s, so fewer, larger pieces win.
+  const MULTI_PER_HOST = 1;
+  // Helpers join when the first host is on course to need more than
+  // MULTI_HELP_MS for the rest of the range, judged once it has been sending
+  // for MULTI_HELP_SAMPLE_MS, or when it has sent nothing for
+  // MULTI_HELP_NO_BYTE_MS (the engine's own no-first-byte wait). Judging any
+  // sooner called helpers onto hosts that were merely between request and
+  // first byte, and their own 1-2 s first byte slowed the fragment down.
+  const MULTI_HELP_MS = 1500;
+  const MULTI_HELP_SAMPLE_MS = 250;
+  const MULTI_HELP_NO_BYTE_MS = 1000;
+  // Measured on 2026-11-26: a mainland mirror took 1.4-2.1 s to a first byte
+  // at an uncached offset. A connection that delivered nothing for this long
+  // after asking, or stopped for MULTI_STALL_MS once bytes flowed, gives its
+  // chunk back.
+  const MULTI_FIRST_BYTE_MS = 3000;
+  const MULTI_STALL_MS = 1500;
+  const MULTI_STALLS_TO_DROP = 3;
+  // An idle helper takes over a piece that has had no first byte this long.
+  const MULTI_TAKEOVER_MS = 800;
+  const MULTI_TICK_MS = 200;
+  const MULTI_PROGRESS_MS = 100;
+
+  const UPOS_HOST_RE = /^upos-[a-z0-9-]+\.bilivideo\.com$/;
+
+  function swapHost(url, host) {
+    try {
+      const u = new URL(url);
+      u.host = host;
+      return u.href;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function multiActive(session) {
+    return !!(config.multiSource && session && session.multi.active);
+  }
+
+  function multiPlan(xhr, meta) {
+    if (!config.multiSource || !autoRouting() || !isPlayerPage() ||
+        typeof nativeFetch !== "function" || typeof AbortController !== "function") {
+      return null;
+    }
+    if (xhr.responseType !== "arraybuffer") {
+      return null;
+    }
+    const url = meta.finalUrl || meta.url;
+    if (String(url).indexOf("/live-bvc/") !== -1) {
+      return null;
+    }
+    const key = routing.fileKey(url);
+    const cid = key ? routing.cidOf(key) : null;
+    const session = cid ? engine.sessions.get(cid) : null;
+    if (!session) {
+      return null;
+    }
+    const rep = session.table.reps[key] || null;
+    if (rep ? rep.kind !== "video" : routing.AUDIO_ID_RE.test(routing.repIdOf(key) || "")) {
+      return null;
+    }
+    const primary = hostOfUrl(url);
+    // A representation the page saw no playurl for (the logged-out preview
+    // streams arrive that way) has no table entry. A UPOS URL still carries to
+    // any pool mirror with only the host swapped, as urlFor does.
+    if (!rep && !UPOS_HOST_RE.test(primary)) {
+      return null;
+    }
+    const range = routing.parseRange(meta.range);
+    if (!range || isNaN(range.end) || !(range.length >= MULTI_MIN_BYTES)) {
+      return null;
+    }
+    const slot = key + "|" + range.start;
+    if (session.multiFailed[slot]) {
+      return null;
+    }
+    const others = routing.pickChallengers({
+      candidates: rep ? routing.candidatesFor(rep, config.candidatePool) : [primary].concat(config.candidatePool),
+      current: primary,
+      issued: rep ? rep.issued : [primary],
+      measured: session.measured,
+      failed: session.failed,
+      lost: {},
+      history: engine.history,
+      now: Date.now()
+    });
+    const sources = [{ host: primary, url }].concat(others.map(function (host) {
+      return { host, url: rep ? routing.urlFor(rep, host) : swapHost(url, host) };
+    })).filter(function (s) { return s.url; }).slice(0, MULTI_SOURCES);
+    if (sources.length < 2) {
+      return null;
+    }
+    return { session, rep, key, slot, range, url, primary, sources };
+  }
+
+  function multiSend(xhr, plan) {
+    const session = plan.session;
+    const rangeStart = plan.range.start;
+    const rangeEnd = plan.range.end;
+    const size = rangeEnd - rangeStart + 1;
+    const buf = new Uint8Array(size);
+    const startedAt = nowMs();
+    const timeoutMs = xhr.timeout > 0 ? xhr.timeout : 0;
+    const sources = plan.sources.map(function (s) {
+      return { host: s.host, url: s.url, busy: 0, dead: false, errors: 0, stalls: 0, bytes: 0 };
+    });
+    const first = sources[0];
+    const chunks = [{ start: rangeStart, end: rangeEnd, pos: rangeStart, busy: false, done: false, attempt: null }];
+    const attempts = [];
+    // The file size the player's own requests reported; every host must agree.
+    let total = session.sizes[plan.key] || NaN;
+    let helping = false;
+    let readyState = 1;
+    let status = 0;
+    let finished = false;
+    let lastProgressAt = 0;
+    let ticker = null;
+
+    // What the player reads off the request, now answered here.
+    const define = function (name, get) {
+      try { Object.defineProperty(xhr, name, { configurable: true, get }); } catch (_) {}
+    };
+    define("readyState", function () { return readyState; });
+    define("status", function () { return status; });
+    define("statusText", function () { return status === 206 ? "Partial Content" : ""; });
+    define("response", function () { return readyState === 4 && status === 206 ? buf.buffer : null; });
+    define("responseURL", function () { return readyState >= 2 ? plan.url : ""; });
+    const responseHeaders = function () {
+      return {
+        "content-type": "video/mp4",
+        "content-length": String(size),
+        "content-range": "bytes " + rangeStart + "-" + rangeEnd + "/" + (isNaN(total) ? "*" : total)
+      };
+    };
+    xhr.getResponseHeader = function (name) {
+      const value = readyState >= 2 ? responseHeaders()[String(name).toLowerCase()] : undefined;
+      return value === undefined ? null : value;
+    };
+    xhr.getAllResponseHeaders = function () {
+      if (readyState < 2) {
+        return "";
+      }
+      const h = responseHeaders();
+      return Object.keys(h).map(function (k) { return k + ": " + h[k] + "\r\n"; }).join("");
+    };
+    xhr.abort = function () { finish("abort"); };
+
+    function loadedBytes() {
+      let n = 0;
+      chunks.forEach(function (c) { n += c.pos - c.start; });
+      return n;
+    }
+
+    // Events go through dispatchEvent, which runs both the player's on*
+    // properties and every listener, the page's own measurement included.
+    function fire(type, plain) {
+      if (typeof xhr.dispatchEvent !== "function") {
+        return;
+      }
+      let event;
+      try {
+        event = plain || typeof ProgressEvent !== "function"
+          ? new Event(type)
+          : new ProgressEvent(type, { lengthComputable: true, loaded: loadedBytes(), total: size });
+      } catch (_) {
+        return;
+      }
+      try { xhr.dispatchEvent(event); } catch (_) {}
+    }
+
+    function setState(next) {
+      if (readyState < next) {
+        readyState = next;
+        fire("readystatechange", true);
+      }
+    }
+
+    function release(a) {
+      if (a.ended) {
+        return false;
+      }
+      a.ended = true;
+      a.src.busy -= 1;
+      a.chunk.busy = false;
+      a.chunk.attempt = null;
+      const i = attempts.indexOf(a);
+      if (i !== -1) {
+        attempts.splice(i, 1);
+      }
+      // Stops the rest of a body that ran past a chunk shortened by a split.
+      try { a.ctl.abort(); } catch (_) {}
+      return true;
+    }
+
+    function measure(a) {
+      if (!(a.bytes > 0)) {
+        return;
+      }
+      const stats = hostStats(session, a.src.host);
+      stats.requests += 1;
+      stats.bytes += a.bytes;
+      stats.est.sample(nowMs() - a.startedAt, a.bytes);
+      session.multi.bytes[a.src.host] = (session.multi.bytes[a.src.host] || 0) + a.bytes;
+      if (a.bytes >= 128 * 1024) {
+        session.measured[a.src.host] = true;
+      }
+    }
+
+    function settle(a) {
+      if (!release(a)) {
+        return;
+      }
+      measure(a);
+      if (!a.chunk.done) {
+        // The body ended before the chunk did: the host cut it short.
+        a.src.errors += 1;
+        if (a.src.errors >= 2) {
+          a.src.dead = true;
+        }
+      }
+      schedule();
+    }
+
+    function fail(a, permanent) {
+      if (!release(a)) {
+        return;
+      }
+      measure(a);
+      const host = a.src.host;
+      a.src.errors += 1;
+      if (permanent || a.src.errors >= 2) {
+        a.src.dead = true;
+      }
+      if (a.src === first) {
+        startHelping();
+      }
+      hostStats(session, host).errors.push(nowMs());
+      session.failed[host] = (session.failed[host] || 0) + 1;
+      engine.history = routing.recordFailure(engine.history, host, Date.now());
+      schedule();
+    }
+
+    function take(a, bytes) {
+      const c = a.chunk;
+      const n = Math.min(bytes.length, Math.max(0, c.end - c.pos + 1));
+      if (n > 0) {
+        buf.set(n === bytes.length ? bytes : bytes.subarray(0, n), c.pos - rangeStart);
+        c.pos += n;
+        a.bytes += n;
+        a.src.bytes += n;
+        a.lastByteAt = nowMs();
+        if (!a.firstByteAt) {
+          a.firstByteAt = a.lastByteAt;
+        }
+      }
+      setState(3);
+      const now = nowMs();
+      if (now - lastProgressAt >= MULTI_PROGRESS_MS) {
+        lastProgressAt = now;
+        fire("progress");
+      }
+      if (c.pos > c.end) {
+        c.done = true;
+        settle(a);
+      }
+    }
+
+    function launch(src, chunk) {
+      const ctl = new AbortController();
+      const a = { src, chunk, ctl, from: chunk.pos, startedAt: nowMs(), lastByteAt: nowMs(), firstByteAt: 0, bytes: 0, ended: false };
+      attempts.push(a);
+      src.busy += 1;
+      chunk.busy = true;
+      chunk.attempt = a;
+      nativeFetch.call(root, src.url, {
+        method: "GET",
+        mode: "cors",
+        credentials: "omit",
+        cache: "no-store",
+        headers: { Range: "bytes=" + chunk.pos + "-" + chunk.end },
+        signal: ctl.signal
+      }).then(function (response) {
+        if (a.ended) {
+          return null;
+        }
+        const got = routing.parseContentRange(response.headers && typeof response.headers.get === "function"
+          ? response.headers.get("content-range") : null);
+        // Every host must hand back exactly the bytes asked for, out of a file
+        // of the same size. One that doesn't is out for this fragment.
+        if (response.status !== 206 || !got || got.start !== a.from ||
+            (!isNaN(total) && got.total !== total)) {
+          fail(a, true);
+          return null;
+        }
+        if (isNaN(total) && a.src === first && got.total > rangeEnd) {
+          total = got.total;
+          session.sizes[plan.key] = total;
+        }
+        status = 206;
+        setState(2);
+        const body = response.body;
+        if (!body || typeof body.getReader !== "function") {
+          return response.arrayBuffer().then(function (b) {
+            if (!a.ended) {
+              take(a, new Uint8Array(b));
+              settle(a);
+            }
+          });
+        }
+        const reader = body.getReader();
+        const pump = function () {
+          return reader.read().then(function (r) {
+            if (a.ended) {
+              try { reader.cancel(); } catch (_) {}
+              return null;
+            }
+            if (r.done) {
+              settle(a);
+              return null;
+            }
+            take(a, r.value);
+            return a.ended ? null : pump();
+          });
+        };
+        return pump();
+      }).catch(function () {
+        if (!a.ended) {
+          fail(a, false);
+        }
+      });
+    }
+
+    function schedule() {
+      if (finished) {
+        return;
+      }
+      if (chunks.every(function (c) { return c.done; })) {
+        finish("load");
+        return;
+      }
+      sources.forEach(function (src) {
+        // Helpers wait for a reason to join, and for a file size to hold them to.
+        if (src !== first && !(helping && !isNaN(total))) {
+          return;
+        }
+        while (!finished && !src.dead && src.busy < MULTI_PER_HOST) {
+          const next = chunks.filter(function (c) { return !c.done && !c.busy; })[0];
+          if (next) {
+            launch(src, next);
+            continue;
+          }
+          // Nothing left to hand out: take half of the largest chunk another
+          // host is still working on.
+          const split = routing.pickSplit(chunks.filter(function (c) {
+            return c.attempt && c.attempt.src !== src;
+          }));
+          if (!split) {
+            // Nothing worth halving, but a piece whose host has sent nothing
+            // yet is taken over by one that has: on a cold edge that first
+            // byte can be seconds away, and the rest of the range waits on it.
+            const now = nowMs();
+            const silent = !(src.bytes > 0) ? null : chunks.filter(function (c) {
+              const a = c.attempt;
+              return a && a.src !== src && a.bytes === 0 && now - a.startedAt >= MULTI_TAKEOVER_MS;
+            })[0];
+            if (!silent) {
+              break;
+            }
+            const loser = silent.attempt;
+            release(loser);
+            session.multi.stalls += 1;
+            loser.src.stalls += 1;
+            if (loser.src.stalls >= MULTI_STALLS_TO_DROP) {
+              loser.src.dead = true;
+            }
+            launch(src, silent);
+            continue;
+          }
+          const piece = { start: split.at, end: split.chunk.end, pos: split.at, busy: false, done: false, attempt: null };
+          split.chunk.end = split.at - 1;
+          chunks.push(piece);
+          session.multi.splits += 1;
+          launch(src, piece);
+        }
+      });
+      if (!finished && !attempts.length) {
+        finish("error");
+      }
+    }
+
+    function tick() {
+      if (finished) {
+        return;
+      }
+      const now = nowMs();
+      if (timeoutMs && now - startedAt > timeoutMs) {
+        finish("timeout");
+        return;
+      }
+      if (!helping) {
+        const a = attempts.filter(function (x) { return x.src === first; })[0];
+        if (a && !a.firstByteAt) {
+          if (now - a.startedAt >= MULTI_HELP_NO_BYTE_MS) {
+            startHelping();
+          }
+        } else if (a && now - a.firstByteAt >= MULTI_HELP_SAMPLE_MS) {
+          const rate = a.bytes * 8000 / (now - a.firstByteAt);
+          const remaining = a.chunk.end - a.chunk.pos + 1;
+          if (remaining * 8000 / rate > MULTI_HELP_MS) {
+            startHelping();
+          }
+        }
+      }
+      // A connection that stops delivering gives its chunk back, keeping the
+      // bytes it brought, as long as another host is in play.
+      attempts.slice().forEach(function (a) {
+        const othersAlive = helping && sources.some(function (s) { return s !== a.src && !s.dead; });
+        const silent = now - a.lastByteAt > (a.bytes > 0 ? MULTI_STALL_MS : MULTI_FIRST_BYTE_MS);
+        if (othersAlive && silent && release(a)) {
+          measure(a);
+          session.multi.stalls += 1;
+          a.src.stalls += 1;
+          if (a.src.stalls >= MULTI_STALLS_TO_DROP) {
+            a.src.dead = true;
+          }
+        }
+      });
+      schedule();
+    }
+
+    function startHelping() {
+      if (!helping) {
+        helping = true;
+        session.multi.helped += 1;
+      }
+    }
+
+    function finish(kind) {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      if (ticker) {
+        clearInterval(ticker);
+      }
+      attempts.slice().forEach(release);
+      if (kind === "load") {
+        session.multi.fragments += 1;
+        session.multi.est.sample(nowMs() - startedAt, size);
+        session.ends[plan.key] = Math.max(session.ends[plan.key] == null ? -1 : session.ends[plan.key], rangeEnd);
+        status = 206;
+        setState(4);
+        fire("progress");
+        fire("load");
+        fire("loadend");
+        return;
+      }
+      if (kind !== "abort") {
+        // The player retries this range; that retry goes out as itself.
+        session.multiFailed[plan.slot] = true;
+        session.multi.fallbacks += 1;
+      }
+      status = 0;
+      setState(4);
+      fire(kind === "abort" ? "abort" : (kind === "timeout" ? "timeout" : "error"));
+      fire("loadend");
+      if (kind === "abort") {
+        readyState = 0;
+      }
+    }
+
+    // What the routing engine records for a video request, minus the in-flight
+    // tracking it uses for races.
+    startEngine();
+    engine.current = session;
+    session.lastVideoKey = plan.key;
+    session.lastHost = plan.primary;
+    if (!session.assigned) {
+      session.assigned = plan.primary;
+    }
+    if (plan.rep && plan.rep.bandwidth > session.requiredBps) {
+      session.requiredBps = plan.rep.bandwidth;
+    }
+    session.requested[plan.slot] = true;
+    session.multi.active = true;
+    session.multi.sources = sources.map(function (s) { return s.host; });
+
+    fire("loadstart");
+    ticker = setInterval(tick, MULTI_TICK_MS);
+    schedule();
   }
 
   function fetchRange(url, start, end, ctl, onBytes) {
@@ -3063,7 +3661,20 @@
       hosts,
       issued,
       races: session.races.slice(),
-      switches: session.switches.slice()
+      switches: session.switches.slice(),
+      multi: session.multi.active ? {
+        sources: session.multi.sources.slice(),
+        fragments: session.multi.fragments,
+        helped: session.multi.helped,
+        mbps: session.multi.est.estimate() === null ? null : round1(session.multi.est.estimate() / 1e6),
+        mbByHost: Object.keys(session.multi.bytes).reduce(function (o, h) {
+          o[h] = round1(session.multi.bytes[h] / 1e6);
+          return o;
+        }, {}),
+        splits: session.multi.splits,
+        stalls: session.multi.stalls,
+        fallbacks: session.multi.fallbacks
+      } : undefined
     };
   }
 
@@ -3850,6 +4461,7 @@
       },
       notes: {
         native: function (server) { return "Native server · " + server; },
+        multi: function (n) { return "Downloading from " + n + " servers at once"; },
         switched: function (server) { return "Switched to " + server; },
         fixed: function (server) { return "Fixed server · " + server; },
         short: "The current server is too slow for this video",
@@ -3892,6 +4504,7 @@
       mcdnAll: "Proxy all MCDN", mcdnV1: "Proxy /v1 only", mcdnReplace: "Replace host",
       portTitle: "Catch hidden PCDN", portNote: "Treat odd ports as slow (recommended)",
       stallTitle: "Auto-switch servers", stallNote: "Switch when a server can't keep up",
+      multiTitle: "Multi-server download", multiNote: "Experimental: fetch from several servers at once",
       akamaiTitle: "Rewrite Akamai", akamaiNote: "Only if Akamai is slow on your network",
       p2pTitle: "Stop bandwidth sharing", p2pNote: "Block Bilibili's P2P upload (reload to apply)",
       diag: "Copy report", diagCopied: "Copied ✓", diagConsole: "See console",
@@ -3909,6 +4522,7 @@
       },
       notes: {
         native: function (server) { return "原生线路 · " + server; },
+        multi: function (n) { return "多线路并行下载 · " + n + " 条线路"; },
         switched: function (server) { return "已切换到 " + server; },
         fixed: function (server) { return "固定线路 · " + server; },
         short: "当前线路速度不足",
@@ -3951,6 +4565,7 @@
       mcdnAll: "代理所有 MCDN", mcdnV1: "仅代理 /v1", mcdnReplace: "替换域名",
       portTitle: "抓取隐藏 PCDN", portNote: "把奇怪端口的服务器当作慢节点（推荐）",
       stallTitle: "自动切换线路", stallNote: "线路速度不足时，自动切换到更快的线路",
+      multiTitle: "多线路并行下载", multiNote: "实验功能：同时从几条线路分段下载",
       akamaiTitle: "改写 Akamai", akamaiNote: "仅当 Akamai 在你的网络上很慢时使用",
       p2pTitle: "停止带宽共享", p2pNote: "阻止 B 站的 P2P 上传（刷新后生效）",
       diag: "复制诊断报告", diagCopied: "已复制 ✓", diagConsole: "见控制台",
@@ -3983,11 +4598,14 @@
     }
     const host = session.active || session.lastHost;
     const stats = host ? session.hosts[host] : null;
-    const rateBps = stats ? stats.est.estimate() : null;
+    const multi = multiActive(session);
+    // Several hosts share each fragment, so the rate that matters is theirs together.
+    const rateBps = multi ? session.multi.est.estimate() : (stats ? stats.est.estimate() : null);
     const info = {
       key: "smooth",
       session,
       host,
+      multi,
       rateBps,
       // Below what the stream needs, by the same margin a shortfall race uses.
       short: rateBps !== null && session.requiredBps > 0 &&
@@ -4053,6 +4671,9 @@
     }
     if (config.selection !== "auto") {
       return n.fixed(server);
+    }
+    if (info.multi) {
+      return n.multi(info.session.multi.sources.length);
     }
     return info.switched ? n.switched(server) : n.native(server);
   }
@@ -4674,6 +5295,13 @@
 
     // Show the host in use. Only fixed mode displays these rows, and in fixed
     // mode nothing but these two controls changes pcdnHost.
+    const multiRow = createSwitchRow("multiTitle", "multiNote",
+      config.multiSource, function (checked) {
+        saveConfig(Object.assign({}, config, { multiSource: checked }));
+        renderStatus();
+      });
+    multiRow.querySelector("input").id = "ba-multi";
+
     function syncHostControls() {
       const fixed = config.selection === "fixed";
       const listed = core.CANDIDATE_POOL.indexOf(config.pcdnHost) !== -1;
@@ -4683,6 +5311,7 @@
       customHostField.hidden = !fixed || listed;
       modeField.hidden = !fixed;
       akamaiRow.hidden = !fixed;
+      multiRow.hidden = fixed;
     }
     syncHostControls();
 
@@ -4788,6 +5417,7 @@
     adv.appendChild(createField("fMcdn", mcdn));
     adv.appendChild(portRow);
     adv.appendChild(stallRow);
+    adv.appendChild(multiRow);
     adv.appendChild(akamaiRow);
     adv.appendChild(p2pRow);
     adv.appendChild(actions);
