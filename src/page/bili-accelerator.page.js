@@ -20,6 +20,15 @@
   const PANEL_ID = "bili-accelerator-panel";
   const IMMERSED_CLASS = "ba-immersed";
   const LIFTED_CLASS = "ba-lifted";
+  // Where the viewer dragged the badge, and whether they hid it (core.normalizeBadge).
+  const BADGE_KEY = "biliAccelerator.badge.v1";
+  const OPEN_CLASS = "ba-open";
+  const DRAGGING_CLASS = "ba-dragging";
+  const DOCK_LEFT_CLASS = "ba-dock-left";
+  const DOCK_RIGHT_CLASS = "ba-dock-right";
+  const USER_HIDDEN_CLASS = "ba-user-hidden";
+  // A press that travels less than this is a click, not a drag.
+  const DRAG_THRESHOLD = 5;
   const REVEAL_HOTZONE = 150;
   const REVEAL_TIMEOUT = 2600;
   const STALL_GRACE_MS = 2500;
@@ -2224,15 +2233,135 @@
     watchVideo();
   }
 
+  // The badge can be dragged anywhere, so the hot zone that brings it back is
+  // measured from wherever it is rather than from the bottom-right corner.
   function handlePointerMove(event) {
-    if (!immersive) {
+    if (!immersive || badge.hidden) {
       return;
     }
-    const nearRight = (root.innerWidth - event.clientX) < REVEAL_HOTZONE;
-    const nearBottom = (root.innerHeight - event.clientY) < REVEAL_HOTZONE;
-    if (nearRight && nearBottom) {
+    const host = document.getElementById(BUTTON_ID);
+    if (!host || typeof host.getBoundingClientRect !== "function") {
+      return;
+    }
+    const r = host.getBoundingClientRect();
+    const dx = Math.max(r.left - event.clientX, 0, event.clientX - r.right);
+    const dy = Math.max(r.top - event.clientY, 0, event.clientY - r.bottom);
+    if (dx < REVEAL_HOTZONE && dy < REVEAL_HOTZONE) {
       revealBadge();
     }
+  }
+
+  // ---- badge position, docking and hiding --------------------------------
+
+  function loadBadge() {
+    try {
+      const stored = root.localStorage.getItem(BADGE_KEY);
+      return core.normalizeBadge(stored ? JSON.parse(stored) : null);
+    } catch (_) {
+      return core.normalizeBadge();
+    }
+  }
+
+  let badge = loadBadge();
+  // installUi() points this at the panel's own close.
+  let closeBadgePanel = function () {};
+
+  function saveBadge(next) {
+    badge = core.normalizeBadge(next);
+    try {
+      root.localStorage.setItem(BADGE_KEY, JSON.stringify(badge));
+    } catch (_) {
+      // storage may be unavailable; the position still holds for this page.
+    }
+  }
+
+  function viewportSize() {
+    return { w: root.innerWidth || 0, h: root.innerHeight || 0 };
+  }
+
+  // Inline offsets on the host beat the stylesheet's :host rules, so a badge
+  // the viewer placed stays put in every screen mode; one they never moved is
+  // left to the stylesheet, which lifts it clear of the player controls.
+  function applyBadgePosition() {
+    const host = document.getElementById(BUTTON_ID);
+    if (!host || !host.style) {
+      return;
+    }
+    const vp = viewportSize();
+    const b = core.clampBadge(badge, vp.w, vp.h);
+    host.classList.toggle(USER_HIDDEN_CLASS, b.hidden);
+    host.classList.toggle(DOCK_LEFT_CLASS, b.docked && b.side === "left");
+    host.classList.toggle(DOCK_RIGHT_CLASS, b.docked && b.side === "right");
+    if (!b.custom) {
+      host.style.left = "";
+      host.style.right = "";
+      host.style.top = "";
+      host.style.bottom = "";
+      return;
+    }
+    host.style.top = "auto";
+    host.style.bottom = b.y + "px";
+    host.style.left = b.side === "left" ? b.x + "px" : "auto";
+    host.style.right = b.side === "right" ? b.x + "px" : "auto";
+  }
+
+  function placePanel(panel, host) {
+    const vp = viewportSize();
+    if (!vp.w || !vp.h || !panel.style || typeof host.getBoundingClientRect !== "function") {
+      return;
+    }
+    const place = core.panelPlacement(host.getBoundingClientRect(), vp.w, vp.h,
+      Math.min(340, vp.w - 36));
+    panel.style.left = place.offsetX + "px";
+    panel.style.right = "auto";
+    panel.style.top = place.up ? "auto" : "48px";
+    panel.style.bottom = place.up ? "48px" : "auto";
+    panel.style.maxHeight = place.maxHeight + "px";
+  }
+
+  function setBadgeUserHidden(hidden) {
+    if (hidden) {
+      closeBadgePanel();
+    }
+    saveBadge(Object.assign({}, badge, { hidden: !!hidden }));
+    applyBadgePosition();
+    if (!hidden) {
+      if (immersive) {
+        revealBadge();
+      }
+      zapBadge();
+    }
+  }
+
+  // Alt+B (Option+B) brings a hidden badge back, and hides a shown one. Read
+  // off event.code because Option+B types a symbol on a Mac keyboard.
+  function handleBadgeHotkey(event) {
+    if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey ||
+        event.code !== "KeyB" || event.repeat) {
+      return;
+    }
+    const target = event.target;
+    if (target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName || ""))) {
+      return;
+    }
+    event.preventDefault();
+    setBadgeUserHidden(!badge.hidden);
+  }
+
+  function installBadgeWatch() {
+    if (typeof root.addEventListener !== "function") {
+      return;
+    }
+    // Capture, so a player that swallows key events can't keep it hidden.
+    root.addEventListener("keydown", handleBadgeHotkey, true);
+    root.addEventListener("resize", function () {
+      applyBadgePosition();
+      const host = document.getElementById(BUTTON_ID);
+      const panel = host && host.shadowRoot && host.shadowRoot.querySelector(".ba-panel.open");
+      if (panel) {
+        placePanel(panel, host);
+      }
+    });
   }
 
   function installImmersiveWatch() {
@@ -2286,6 +2415,9 @@
       advShow: "Advanced settings",
       advHide: "Hide advanced",
       fAccent: "Accent",
+      fBadge: "⚡ button",
+      badgeReset: "Reset position",
+      badgeHide: "Hide (Alt+B shows)",
       themeLight: "Light theme", themeDark: "Dark theme",
       accents: {
         bili: "Bilibili Blue", teal: "Teal", emerald: "Emerald", violet: "Violet",
@@ -2342,6 +2474,9 @@
       advShow: "高级设置",
       advHide: "收起高级设置",
       fAccent: "主题色",
+      fBadge: "悬浮球",
+      badgeReset: "复位",
+      badgeHide: "隐藏（Alt+B 唤回）",
       themeLight: "浅色", themeDark: "深色",
       accents: {
         bili: "哔哩蓝", teal: "青碧", emerald: "翠绿", violet: "星紫",
@@ -2707,14 +2842,21 @@
       ":host{position:fixed;right:18px;bottom:18px;z-index:2147483647;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:var(--ba-ink);transition:opacity .25s ease}",
       ":host(.ba-immersed){opacity:0;pointer-events:none}",
       ":host(.ba-lifted){bottom:84px}",
+      ":host(.ba-user-hidden){display:none}",
       "*{box-sizing:border-box}",
       "button,input,select{font:inherit}",
       // The rim is an inset shadow of one width all the way round. It used to
       // be a translucent border plus a highlight along the top edge only, which
       // left the ring bright and thick on top and faint at the bottom.
-      ".ba-toggle{position:relative;display:grid;place-items:center;width:40px;height:40px;border:none;border-radius:50%;background:linear-gradient(135deg,var(--ba-grad-a),var(--ba-grad-b));color:#fff;box-shadow:0 8px 22px var(--ba-accent-shadow),0 0 0 1px rgba(255,255,255,.34) inset;cursor:pointer;padding:0;transition:transform .16s ease,box-shadow .16s ease}",
+      ".ba-toggle{position:relative;display:grid;place-items:center;width:40px;height:40px;border:none;border-radius:50%;background:linear-gradient(135deg,var(--ba-grad-a),var(--ba-grad-b));color:#fff;box-shadow:0 8px 22px var(--ba-accent-shadow),0 0 0 1px rgba(255,255,255,.34) inset;cursor:pointer;padding:0;touch-action:none;transition:transform .22s ease,box-shadow .16s ease,opacity .22s ease}",
       ".ba-toggle:hover{transform:translateY(-1px);box-shadow:0 10px 28px var(--ba-accent-shadow),0 0 0 1px rgba(255,255,255,.34) inset}",
       ".ba-toggle:active{transform:scale(.93)}",
+      // Docked against a side edge, half the badge waits past it, faded, and
+      // slides back out under the pointer or while the panel is open.
+      ":host(.ba-dock-left:not(.ba-open)) .ba-toggle:not(:hover):not(:focus-visible){transform:translateX(-22px);opacity:.55}",
+      ":host(.ba-dock-right:not(.ba-open)) .ba-toggle:not(:hover):not(:focus-visible){transform:translateX(22px);opacity:.55}",
+      ":host(.ba-dragging) .ba-toggle{cursor:grabbing;transition:none;transform:scale(1.06)}",
+      ":host(.ba-dragging) .ba-toggle svg{animation:none}",
       ".ba-toggle svg{width:20px;height:20px;display:block}",
       // The badge sits beside the video on every page, so it never loops. The
       // bolt flickers once on hover, and once with a ring when zapBadge() marks
@@ -2807,6 +2949,7 @@
       ".ba-sw[aria-pressed=\"true\"]{box-shadow:0 0 0 2px var(--ba-card),0 0 0 4px var(--ba-accent)}",
       ".ba-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}",
       ".ba-actions button{height:32px;border:1px solid var(--ba-border-in);border-radius:8px;background:var(--ba-card);color:var(--ba-ink);padding:0 11px;cursor:pointer;font-size:12px;font-weight:700}",
+      ".ba-badge-actions{justify-content:flex-start;margin-top:0}",
       ".ba-actions button.primary{border-color:var(--ba-accent);background:var(--ba-accent);color:#fff}",
       ".ba-mini{font-size:11px;color:var(--ba-ink-soft);margin:8px 0 0;line-height:1.4}"
     ].join("");
@@ -2823,6 +2966,68 @@
         toggle.classList.remove("ba-zap");
       }
     });
+
+    // Press and drag moves the badge; a press that barely moves is a click and
+    // opens the panel as before. The drop decides where it stays (core.badgeDrop).
+    let drag = null;
+    let swallowClick = false;
+    toggle.addEventListener("pointerdown", function (event) {
+      swallowClick = false;
+      if (event.button !== 0 || !event.isPrimary || typeof host.getBoundingClientRect !== "function") {
+        return;
+      }
+      const rect = host.getBoundingClientRect();
+      drag = {
+        id: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        grabX: event.clientX - rect.left,
+        grabY: event.clientY - rect.top,
+        left: rect.left,
+        top: rect.top,
+        moved: false
+      };
+      try { toggle.setPointerCapture(event.pointerId); } catch (_) { /* not supported */ }
+    });
+    toggle.addEventListener("pointermove", function (event) {
+      if (!drag || event.pointerId !== drag.id) {
+        return;
+      }
+      if (!drag.moved) {
+        if (Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < DRAG_THRESHOLD) {
+          return;
+        }
+        drag.moved = true;
+        closePanel();
+        host.classList.add(DRAGGING_CLASS);
+        host.classList.remove(DOCK_LEFT_CLASS);
+        host.classList.remove(DOCK_RIGHT_CLASS);
+      }
+      const vp = viewportSize();
+      drag.left = Math.max(0, Math.min(event.clientX - drag.grabX, vp.w - core.BADGE_SIZE));
+      drag.top = Math.max(0, Math.min(event.clientY - drag.grabY, vp.h - core.BADGE_SIZE));
+      host.style.left = drag.left + "px";
+      host.style.top = drag.top + "px";
+      host.style.right = "auto";
+      host.style.bottom = "auto";
+    });
+    function endDrag(event) {
+      if (!drag || event.pointerId !== drag.id) {
+        return;
+      }
+      const done = drag;
+      drag = null;
+      if (!done.moved) {
+        return;
+      }
+      host.classList.remove(DRAGGING_CLASS);
+      swallowClick = true;
+      const vp = viewportSize();
+      saveBadge(core.badgeDrop(done.left, done.top, vp.w, vp.h));
+      applyBadgePosition();
+    }
+    toggle.addEventListener("pointerup", endDrag);
+    toggle.addEventListener("pointercancel", endDrag);
 
     const panel = document.createElement("section");
     panel.className = "ba-panel";
@@ -3088,7 +3293,31 @@
     actions.appendChild(diag);
     actions.appendChild(reload);
 
+    const badgeReset = document.createElement("button");
+    badgeReset.type = "button";
+    badgeReset.id = "ba-badge-reset";
+    badgeReset.dataset.i18n = "badgeReset";
+    badgeReset.textContent = t("badgeReset");
+    badgeReset.addEventListener("click", function () {
+      saveBadge(Object.assign({}, badge, { custom: false, docked: false }));
+      applyBadgePosition();
+      placePanel(panel, host);
+    });
+
+    const badgeHide = document.createElement("button");
+    badgeHide.type = "button";
+    badgeHide.id = "ba-badge-hide";
+    badgeHide.dataset.i18n = "badgeHide";
+    badgeHide.textContent = t("badgeHide");
+    badgeHide.addEventListener("click", function () { setBadgeUserHidden(true); });
+
+    const badgeActions = document.createElement("div");
+    badgeActions.className = "ba-actions ba-badge-actions";
+    badgeActions.appendChild(badgeReset);
+    badgeActions.appendChild(badgeHide);
+
     adv.appendChild(createSwatchField("fAccent", createAccentPicker()));
+    adv.appendChild(createSwatchField("fBadge", badgeActions));
     adv.appendChild(createField("fServer", selection));
     adv.appendChild(fixedHostField);
     adv.appendChild(customHostField);
@@ -3119,15 +3348,22 @@
         return;
       }
       panel.classList.remove("open");
+      host.classList.remove(OPEN_CLASS);
       if (immersive) {
         revealBadge();
       }
     }
+    closeBadgePanel = closePanel;
 
     toggle.addEventListener("click", function () {
-      panel.classList.toggle("open");
+      if (swallowClick) {
+        swallowClick = false;
+        return;
+      }
+      host.classList.toggle(OPEN_CLASS, panel.classList.toggle("open"));
       renderStatus();
       if (panel.classList.contains("open")) {
+        placePanel(panel, host);
         drawSpeed();
         updateSpeedReadouts();
       }
@@ -3160,6 +3396,7 @@
     shadow.appendChild(panel);
     shadow.appendChild(toggle);
     document.documentElement.appendChild(host);
+    applyBadgePosition();
     applyLang();
     applyTheme();
     watchSystemTheme();
@@ -3190,7 +3427,11 @@
     getStats: function () { return JSON.parse(JSON.stringify(state)); },
     getDiagnostics: function () { return buildDiagnostics(); },
     rewriteUrl: function (url) { return core.rewriteUrl(url, rewriteConfig()); },
-    retest: function () { return retest(); }
+    retest: function () { return retest(); },
+    // A way back for a viewer who hid the badge and forgot Alt+B.
+    showBadge: function () { setBadgeUserHidden(false); },
+    hideBadge: function () { setBadgeUserHidden(true); },
+    resetBadge: function () { saveBadge(core.DEFAULT_BADGE); applyBadgePosition(); }
   };
 
   dropLegacyRankings();
@@ -3205,6 +3446,7 @@
 
   function bootstrapUi() {
     installUi();
+    installBadgeWatch();
     installImmersiveWatch();
     installSpeedMeter();
   }
