@@ -81,6 +81,7 @@
     portHeuristic: true,                           // non-default port ⇒ PCDN
     stallRecovery: true,                           // auto mode: switch servers on evidence
     p2pGuard: false,                               // opt-in WebRTC/PCDN neutralizer
+    multiSource: false,                            // experimental: fetch fragments from several hosts at once
     maxDepth: 20,
     schemaVersion: SCHEMA_VERSION
   });
@@ -161,6 +162,7 @@
     if (THEME_MODES.indexOf(merged.theme) === -1) {
       merged.theme = DEFAULT_CONFIG.theme;
     }
+    merged.multiSource = merged.multiSource === true;
     merged.schemaVersion = SCHEMA_VERSION;
     return merged;
   }
@@ -629,8 +631,113 @@
     };
   }
 
+  // ---- floating badge geometry ---------------------------------------------
+  //
+  // Where the ⚡ badge sits is per-device layout, not a routing setting, so the
+  // page keeps it under its own storage key rather than in the config. `side`
+  // names the viewport edge `x` is measured from, which keeps a badge parked
+  // on the left on the left when the window is resized; `y` is measured from
+  // the bottom. `docked` tucks half of it past that edge, and `hidden` takes it
+  // off the page until Alt+B. `custom` false means the stock corner, which the
+  // stylesheet places (and lifts clear of the player controls).
+
+  const BADGE_SIZE = 40;
+  // A drop this close to a side edge docks the badge there.
+  const BADGE_DOCK_SNAP = 16;
+  // The panel's near edge sits this far from the badge's far edge (the
+  // stylesheet's bottom:48px), and stays this far inside the viewport.
+  const PANEL_GAP = 48;
+  const PANEL_MARGIN = 18;
+  const PANEL_MIN_HEIGHT = 160;
+
+  const DEFAULT_BADGE = Object.freeze({
+    custom: false,
+    side: "right",
+    x: 18,
+    y: 18,
+    docked: false,
+    hidden: false
+  });
+
+  function finiteOr(value, fallback) {
+    return typeof value === "number" && isFinite(value) ? value : fallback;
+  }
+
+  function normalizeBadge(raw) {
+    const b = Object.assign({}, DEFAULT_BADGE, raw && typeof raw === "object" ? raw : {});
+    const custom = b.custom === true;
+    return {
+      custom,
+      side: b.side === "left" ? "left" : "right",
+      x: Math.max(0, finiteOr(b.x, DEFAULT_BADGE.x)),
+      y: Math.max(0, finiteOr(b.y, DEFAULT_BADGE.y)),
+      docked: custom && b.docked === true,
+      hidden: b.hidden === true
+    };
+  }
+
+  // The same badge, kept whole inside a viewport of vw × vh. A viewport that
+  // reports no size leaves it as stored.
+  function clampBadge(badge, vw, vh) {
+    const b = normalizeBadge(badge);
+    if (vw > 0) {
+      b.x = Math.min(b.x, Math.max(0, vw - BADGE_SIZE));
+    }
+    if (vh > 0) {
+      b.y = Math.min(b.y, Math.max(0, vh - BADGE_SIZE));
+    }
+    if (b.docked) {
+      b.x = 0;
+    }
+    return b;
+  }
+
+  // Where a badge dropped with its top-left corner at (left, top) ends up: on
+  // the edge it was dropped against, docked, or else measured from whichever
+  // side its centre is nearer.
+  function badgeDrop(left, top, vw, vh) {
+    const right = vw - left - BADGE_SIZE;
+    const placed = { custom: true, hidden: false, y: vh - top - BADGE_SIZE };
+    if (left <= BADGE_DOCK_SNAP) {
+      Object.assign(placed, { side: "left", x: 0, docked: true });
+    } else if (right <= BADGE_DOCK_SNAP) {
+      Object.assign(placed, { side: "right", x: 0, docked: true });
+    } else if (left + BADGE_SIZE / 2 < vw / 2) {
+      Object.assign(placed, { side: "left", x: left, docked: false });
+    } else {
+      Object.assign(placed, { side: "right", x: right, docked: false });
+    }
+    return clampBadge(placed, vw, vh);
+  }
+
+  // Where the panel opens for a badge at `rect` (viewport coordinates): toward
+  // the middle of the screen on both axes, shifted to stay inside it. offsetX
+  // is the panel's left edge relative to the badge's; maxHeight is the room
+  // left between the badge and the far viewport edge.
+  function panelPlacement(rect, vw, vh, panelWidth) {
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+    const wanted = centerX < vw / 2 ? rect.left : rect.left + rect.width - panelWidth;
+    const left = Math.max(PANEL_MARGIN, Math.min(wanted, vw - panelWidth - PANEL_MARGIN));
+    const up = centerY >= vh / 2;
+    const room = up
+      ? rect.top + rect.height - PANEL_GAP - PANEL_MARGIN
+      : vh - rect.top - PANEL_GAP - PANEL_MARGIN;
+    return {
+      offsetX: Math.round(left - rect.left),
+      up,
+      maxHeight: Math.max(PANEL_MIN_HEIGHT, Math.floor(room))
+    };
+  }
+
   return {
     SCHEMA_VERSION,
+    BADGE_SIZE,
+    DEFAULT_BADGE,
+    normalizeBadge,
+    clampBadge,
+    badgeDrop,
+    panelPlacement,
     CDN_HOSTS,
     CANDIDATE_POOL,
     ACCENT_KEYS,

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Bilibili Accelerator",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Smoother Bilibili playback for overseas viewers.",
   "icons": {
     "16": "icons/icon-16.png",
@@ -10,8 +10,12 @@
     "128": "icons/icon-128.png"
   },
   "permissions": [
-    "storage"
+    "storage",
+    "webRequest"
   ],
+  "background": {
+    "service_worker": "background.js"
+  },
   "action": {
     "default_title": "Bilibili Accelerator",
     "default_popup": "popup.html",
@@ -34,7 +38,9 @@
   ],
   "host_permissions": [
     "https://*.bilibili.com/*",
-    "https://*.bilibili.tv/*"
+    "https://*.bilibili.tv/*",
+    "https://*.bilivideo.com/*",
+    "https://*.akamaized.net/*"
   ],
   "web_accessible_resources": [
     {

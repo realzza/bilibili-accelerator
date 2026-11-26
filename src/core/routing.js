@@ -37,6 +37,15 @@
   const STUCK_RATE_FACTOR = 1.3;
   const STUCK_MIN_REMAINING_MS = 1000;
   const STUCK_MARGIN_MS = 2000;
+  // On a cache miss the edge relays the fragment from origin, which on an
+  // overseas edge is where cold-video delivery runs at 1-8 Mbps. A miss is no
+  // proof of slowness (that can still carry a 3.75 Mbps stream), so it starts
+  // nothing by itself: it only lets the rate check below judge sooner. Only
+  // the extension can see cache status; the CDN exposes no such header to
+  // page scripts.
+  const MISS_MIN_TRANSFER_MS = 200;
+  const MISS_MIN_FRAGMENT_BYTES = 32 * 1024;
+  const MISS_NO_FIRST_BYTE_MS = 500;
 
   // Sustained shortfall: measured goodput can't grow the buffer, and the
   // buffer is low enough that it matters.
@@ -60,6 +69,14 @@
   const LOST_RACE_REST_MS = 60000;
 
   const HISTORY_HALF_LIFE_MS = 3 * 24 * 60 * 60 * 1000;
+  // Host speed follows the hour in China: the same overseas edge moved one
+  // file at 1.1 Mbps at 18:40 Beijing and 10-19 Mbps at 03:50. History also
+  // keeps a record per Beijing time band. A band sees about a third of the
+  // samples, so it decays more slowly, and until it holds a few samples it is
+  // blended with the all-hours record, which counts as BAND_PRIOR samples.
+  const BAND_HALF_LIFE_MS = 7 * 24 * 60 * 60 * 1000;
+  const BAND_PRIOR = 1;
+  const BEIJING_UTC_OFFSET_H = 8;
   const RECENT_FAILURE_MS = 60 * 60 * 1000;
   const EXPLORE_RATE = 0.2;
   const UNKNOWN_HOST_MBPS = 10;
@@ -301,21 +318,25 @@
   // ---- when to act ----------------------------------------------------------
 
   // A fragment request in flight, judged against the buffer it has to beat.
-  //   req: { total, loaded, startedAt, firstByteAt, rateBps }
+  //   req: { total, loaded, startedAt, firstByteAt, rateBps, cache }
+  //   cache: "hit" | "miss" | undefined, as the extension read it off the response
   function stuckVerdict(req, now, requiredBps, bufferAheadS) {
     if (!req || !(req.total >= STUCK_MIN_FRAGMENT_BYTES) || !(requiredBps > 0)) {
       return null;
     }
+    const miss = req.cache === "miss";
     const bufferMs = Math.max(0, bufferAheadS || 0) * 1000;
     if (!req.firstByteAt) {
       const waited = now - req.startedAt;
-      if (waited >= STUCK_NO_FIRST_BYTE_MS && bufferAheadS < STUCK_URGENT_BUFFER_S) {
+      if (waited >= (miss ? MISS_NO_FIRST_BYTE_MS : STUCK_NO_FIRST_BYTE_MS) &&
+          bufferAheadS < STUCK_URGENT_BUFFER_S) {
         return { reason: "no-first-byte", waitedMs: waited };
       }
       return null;
     }
     const transferMs = now - req.firstByteAt;
-    if (transferMs < STUCK_MIN_TRANSFER_MS && req.loaded < STUCK_MIN_FRAGMENT_BYTES) {
+    if (transferMs < (miss ? MISS_MIN_TRANSFER_MS : STUCK_MIN_TRANSFER_MS) &&
+        req.loaded < (miss ? MISS_MIN_FRAGMENT_BYTES : STUCK_MIN_FRAGMENT_BYTES)) {
       return null;
     }
     const rate = req.rateBps > 0 ? req.rateBps : (transferMs > 0 ? 8000 * req.loaded / transferMs : 0);
@@ -352,11 +373,71 @@
     return null;
   }
 
+  // Whether a CDN response came from the edge's cache, read from the headers
+  // each vendor uses. Seen on Bilibili's hosts: EdgeOne (mirrorcosov) sends
+  // eo-cache-status: HIT; Alibaba sends x-cache: HIT TCP_MEM_HIT ...; Huawei
+  // marks each cache hop in via: ...CACHE20[33,TCP_MISS,37]... and sends
+  // nginx-hit: 1 on a hit.
+  //   headers: [{ name, value }] (webRequest's shape) or { name: value }
+  //   returns "hit" | "miss" | null when the response doesn't say
+  function cacheVerdict(headers) {
+    const map = {};
+    if (Array.isArray(headers)) {
+      headers.forEach(function (h) {
+        if (h && h.name) {
+          map[String(h.name).toLowerCase()] = String(h.value == null ? "" : h.value);
+        }
+      });
+    } else if (headers && typeof headers === "object") {
+      Object.keys(headers).forEach(function (k) { map[k.toLowerCase()] = String(headers[k]); });
+    }
+    const status = map["eo-cache-status"] || map["x-cache"] || map["x-cache-status"] || map["cf-cache-status"];
+    if (status) {
+      const token = status.trim().split(/[\s,;]+/)[0].toUpperCase();
+      if (/MISS|EXPIRED|BYPASS|DYNAMIC/.test(token)) {
+        return "miss";
+      }
+      if (/HIT|STALE|REVALIDATED|UPDATING/.test(token)) {
+        return "hit";
+      }
+    }
+    const via = (map.via || "").toUpperCase();
+    if (/TCP_[A-Z_]*HIT/.test(via)) {
+      return "hit";
+    }
+    if (/TCP_[A-Z_]*MISS/.test(via)) {
+      return "miss";
+    }
+    if (map["nginx-hit"] === "1") {
+      return "hit";
+    }
+    return null;
+  }
+
   // ---- choosing -------------------------------------------------------------
 
-  function historyScore(history, host) {
+  // night 00-08, day 08-18, peak 18-24, Beijing time, for a wall-clock time.
+  function beijingBand(epochMs) {
+    if (typeof epochMs !== "number" || !isFinite(epochMs)) {
+      return null;
+    }
+    const hour = ((Math.floor(epochMs / 3600000) + BEIJING_UTC_OFFSET_H) % 24 + 24) % 24;
+    return hour >= 18 ? "peak" : (hour >= 8 ? "day" : "night");
+  }
+
+  // A host's expected rate. Given a band, the band's own record pulls the
+  // all-hours one toward it as it gathers samples.
+  function historyScore(history, host, band) {
     const rec = history && history.hosts && history.hosts[host];
-    return rec && rec.n > 0 ? rec.mbps : null;
+    const all = rec && rec.n > 0 ? rec.mbps : null;
+    const b = band && rec && rec.bands && rec.bands[band];
+    if (!b || !(b.n > 0)) {
+      return all;
+    }
+    if (all == null) {
+      return b.mbps;
+    }
+    return (b.mbps * b.n + all * BAND_PRIOR) / (b.n + BAND_PRIOR);
   }
 
   function recentlyFailed(history, host, now) {
@@ -390,15 +471,16 @@
     if (!pool.length) {
       return [];
     }
+    const band = beijingBand(i.now);
     const failedLately = function (h) { return recentlyFailed(i.history, h, now) ? 1 : 0; };
     // An unknown host counts as the lower median of the measured ones, so it
     // never outranks a host already measured as good.
     const known = pool.filter(function (h) { return !failedLately(h); })
-      .map(function (h) { return historyScore(i.history, h); })
+      .map(function (h) { return historyScore(i.history, h, band); })
       .filter(function (s) { return s != null; }).sort(function (a, b) { return a - b; });
     const typical = known.length ? known[Math.floor((known.length - 1) / 2)] : UNKNOWN_HOST_MBPS;
     const score = function (h) {
-      const s = historyScore(i.history, h);
+      const s = historyScore(i.history, h, band);
       return s == null ? typical : s;
     };
     const overseas = function (h) { return describeHost(h).region === "overseas" ? 1 : 0; };
@@ -474,17 +556,68 @@
     return Math.min(MAX_COOLDOWN_MS, previousMs ? previousMs * 2 : NO_SWITCH_COOLDOWN_MS);
   }
 
+  // ---- multi-source fragments ------------------------------------------------
+  //
+  // One fragment fetched from several hosts at once (the page's multiSend).
+  // Each UPOS host speaks HTTP/2, so a browser keeps one connection per host
+  // and splitting a range on a single host gains nothing; spreading it across
+  // hosts adds connections. A host that joins takes the back half of the
+  // largest unfinished piece, so it takes over the tail of a slow host's work
+  // instead of waiting for it.
+
+  const MULTI_MIN_SPLIT_BYTES = 128 * 1024;
+
+  // "bytes 0-1023/78081346" -> { start, end, total }.
+  function parseContentRange(value) {
+    const m = /^\s*bytes\s+(\d+)-(\d+)\/(\d+|\*)\s*$/i.exec(String(value || ""));
+    if (!m) {
+      return null;
+    }
+    return { start: Number(m[1]), end: Number(m[2]), total: m[3] === "*" ? NaN : Number(m[3]) };
+  }
+
+  // The chunk an idle host should take half of: the in-progress chunk with
+  // the most bytes still to come, if halving it leaves both halves worth a
+  // request. chunks: [{ pos, end, busy, done }]; returns { chunk, at } or null,
+  // where `at` is the first byte of the half that moves.
+  function pickSplit(chunks) {
+    let best = null;
+    (chunks || []).forEach(function (c) {
+      if (!c || c.done || !c.busy) {
+        return;
+      }
+      const remaining = c.end - c.pos + 1;
+      if (remaining >= 2 * MULTI_MIN_SPLIT_BYTES && (!best || remaining > best.end - best.pos + 1)) {
+        best = c;
+      }
+    });
+    if (!best) {
+      return null;
+    }
+    return { chunk: best, at: best.pos + Math.floor((best.end - best.pos + 1) / 2) };
+  }
+
   // ---- history --------------------------------------------------------------
+
+  // Folds one sample into a decaying average { mbps, n, at }.
+  function decayedAverage(rec, mbps, now, halfLifeMs) {
+    const age = Math.max(0, now - (rec.at || now));
+    const nEff = rec.n * Math.pow(0.5, age / halfLifeMs);
+    rec.mbps = (rec.mbps * nEff + mbps) / (nEff + 1);
+    rec.n = nEff + 1;
+    rec.at = now;
+    return rec;
+  }
 
   function recordSample(history, host, mbps, now) {
     const h = history && typeof history === "object" ? history : {};
     h.hosts = h.hosts || {};
-    const rec = h.hosts[host] || { mbps: 0, n: 0, at: now };
-    const age = Math.max(0, now - (rec.at || now));
-    const nEff = rec.n * Math.pow(0.5, age / HISTORY_HALF_LIFE_MS);
-    rec.mbps = (rec.mbps * nEff + mbps) / (nEff + 1);
-    rec.n = nEff + 1;
-    rec.at = now;
+    const rec = decayedAverage(h.hosts[host] || { mbps: 0, n: 0, at: now }, mbps, now, HISTORY_HALF_LIFE_MS);
+    const band = beijingBand(now);
+    if (band) {
+      rec.bands = rec.bands && typeof rec.bands === "object" ? rec.bands : {};
+      rec.bands[band] = decayedAverage(rec.bands[band] || { mbps: 0, n: 0, at: now }, mbps, now, BAND_HALF_LIFE_MS);
+    }
     h.hosts[host] = rec;
     return h;
   }
@@ -538,12 +671,16 @@
     createEstimator,
     recentRate,
     stuckVerdict,
+    cacheVerdict,
     evaluate,
     pickChallengers,
     raceVerdict,
     stuckRaceVerdict,
     nextCooldown,
     historyScore,
+    beijingBand,
+    parseContentRange,
+    pickSplit,
     recentlyFailed,
     recordSample,
     recordFailure,

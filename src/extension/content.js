@@ -33,6 +33,16 @@
   document.addEventListener("DOMContentLoaded", pushConfig);
   setTimeout(pushConfig, 800);
 
+  // Cache status of the page's media responses, from the background worker,
+  // for the page engine (see background.js).
+  if (runtime.onMessage) {
+    runtime.onMessage.addListener(function (message) {
+      if (message && message.__biliAccel === "cache" && typeof message.url === "string") {
+        window.postMessage({ __biliAccel: "cache", url: message.url, verdict: message.verdict }, window.location.origin);
+      }
+    });
+  }
+
   if (api.storage && api.storage.onChanged) {
     api.storage.onChanged.addListener(function (changes, area) {
       if (area === "sync" && changes[STORE_KEY] && changes[STORE_KEY].newValue) {

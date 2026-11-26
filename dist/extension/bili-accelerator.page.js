@@ -81,6 +81,7 @@
     portHeuristic: true,                           // non-default port ⇒ PCDN
     stallRecovery: true,                           // auto mode: switch servers on evidence
     p2pGuard: false,                               // opt-in WebRTC/PCDN neutralizer
+    multiSource: false,                            // experimental: fetch fragments from several hosts at once
     maxDepth: 20,
     schemaVersion: SCHEMA_VERSION
   });
@@ -161,6 +162,7 @@
     if (THEME_MODES.indexOf(merged.theme) === -1) {
       merged.theme = DEFAULT_CONFIG.theme;
     }
+    merged.multiSource = merged.multiSource === true;
     merged.schemaVersion = SCHEMA_VERSION;
     return merged;
   }
@@ -629,8 +631,113 @@
     };
   }
 
+  // ---- floating badge geometry ---------------------------------------------
+  //
+  // Where the ⚡ badge sits is per-device layout, not a routing setting, so the
+  // page keeps it under its own storage key rather than in the config. `side`
+  // names the viewport edge `x` is measured from, which keeps a badge parked
+  // on the left on the left when the window is resized; `y` is measured from
+  // the bottom. `docked` tucks half of it past that edge, and `hidden` takes it
+  // off the page until Alt+B. `custom` false means the stock corner, which the
+  // stylesheet places (and lifts clear of the player controls).
+
+  const BADGE_SIZE = 40;
+  // A drop this close to a side edge docks the badge there.
+  const BADGE_DOCK_SNAP = 16;
+  // The panel's near edge sits this far from the badge's far edge (the
+  // stylesheet's bottom:48px), and stays this far inside the viewport.
+  const PANEL_GAP = 48;
+  const PANEL_MARGIN = 18;
+  const PANEL_MIN_HEIGHT = 160;
+
+  const DEFAULT_BADGE = Object.freeze({
+    custom: false,
+    side: "right",
+    x: 18,
+    y: 18,
+    docked: false,
+    hidden: false
+  });
+
+  function finiteOr(value, fallback) {
+    return typeof value === "number" && isFinite(value) ? value : fallback;
+  }
+
+  function normalizeBadge(raw) {
+    const b = Object.assign({}, DEFAULT_BADGE, raw && typeof raw === "object" ? raw : {});
+    const custom = b.custom === true;
+    return {
+      custom,
+      side: b.side === "left" ? "left" : "right",
+      x: Math.max(0, finiteOr(b.x, DEFAULT_BADGE.x)),
+      y: Math.max(0, finiteOr(b.y, DEFAULT_BADGE.y)),
+      docked: custom && b.docked === true,
+      hidden: b.hidden === true
+    };
+  }
+
+  // The same badge, kept whole inside a viewport of vw × vh. A viewport that
+  // reports no size leaves it as stored.
+  function clampBadge(badge, vw, vh) {
+    const b = normalizeBadge(badge);
+    if (vw > 0) {
+      b.x = Math.min(b.x, Math.max(0, vw - BADGE_SIZE));
+    }
+    if (vh > 0) {
+      b.y = Math.min(b.y, Math.max(0, vh - BADGE_SIZE));
+    }
+    if (b.docked) {
+      b.x = 0;
+    }
+    return b;
+  }
+
+  // Where a badge dropped with its top-left corner at (left, top) ends up: on
+  // the edge it was dropped against, docked, or else measured from whichever
+  // side its centre is nearer.
+  function badgeDrop(left, top, vw, vh) {
+    const right = vw - left - BADGE_SIZE;
+    const placed = { custom: true, hidden: false, y: vh - top - BADGE_SIZE };
+    if (left <= BADGE_DOCK_SNAP) {
+      Object.assign(placed, { side: "left", x: 0, docked: true });
+    } else if (right <= BADGE_DOCK_SNAP) {
+      Object.assign(placed, { side: "right", x: 0, docked: true });
+    } else if (left + BADGE_SIZE / 2 < vw / 2) {
+      Object.assign(placed, { side: "left", x: left, docked: false });
+    } else {
+      Object.assign(placed, { side: "right", x: right, docked: false });
+    }
+    return clampBadge(placed, vw, vh);
+  }
+
+  // Where the panel opens for a badge at `rect` (viewport coordinates): toward
+  // the middle of the screen on both axes, shifted to stay inside it. offsetX
+  // is the panel's left edge relative to the badge's; maxHeight is the room
+  // left between the badge and the far viewport edge.
+  function panelPlacement(rect, vw, vh, panelWidth) {
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+    const wanted = centerX < vw / 2 ? rect.left : rect.left + rect.width - panelWidth;
+    const left = Math.max(PANEL_MARGIN, Math.min(wanted, vw - panelWidth - PANEL_MARGIN));
+    const up = centerY >= vh / 2;
+    const room = up
+      ? rect.top + rect.height - PANEL_GAP - PANEL_MARGIN
+      : vh - rect.top - PANEL_GAP - PANEL_MARGIN;
+    return {
+      offsetX: Math.round(left - rect.left),
+      up,
+      maxHeight: Math.max(PANEL_MIN_HEIGHT, Math.floor(room))
+    };
+  }
+
   return {
     SCHEMA_VERSION,
+    BADGE_SIZE,
+    DEFAULT_BADGE,
+    normalizeBadge,
+    clampBadge,
+    badgeDrop,
+    panelPlacement,
     CDN_HOSTS,
     CANDIDATE_POOL,
     ACCENT_KEYS,
@@ -693,6 +800,15 @@
   const STUCK_RATE_FACTOR = 1.3;
   const STUCK_MIN_REMAINING_MS = 1000;
   const STUCK_MARGIN_MS = 2000;
+  // On a cache miss the edge relays the fragment from origin, which on an
+  // overseas edge is where cold-video delivery runs at 1-8 Mbps. A miss is no
+  // proof of slowness (that can still carry a 3.75 Mbps stream), so it starts
+  // nothing by itself: it only lets the rate check below judge sooner. Only
+  // the extension can see cache status; the CDN exposes no such header to
+  // page scripts.
+  const MISS_MIN_TRANSFER_MS = 200;
+  const MISS_MIN_FRAGMENT_BYTES = 32 * 1024;
+  const MISS_NO_FIRST_BYTE_MS = 500;
 
   // Sustained shortfall: measured goodput can't grow the buffer, and the
   // buffer is low enough that it matters.
@@ -716,6 +832,14 @@
   const LOST_RACE_REST_MS = 60000;
 
   const HISTORY_HALF_LIFE_MS = 3 * 24 * 60 * 60 * 1000;
+  // Host speed follows the hour in China: the same overseas edge moved one
+  // file at 1.1 Mbps at 18:40 Beijing and 10-19 Mbps at 03:50. History also
+  // keeps a record per Beijing time band. A band sees about a third of the
+  // samples, so it decays more slowly, and until it holds a few samples it is
+  // blended with the all-hours record, which counts as BAND_PRIOR samples.
+  const BAND_HALF_LIFE_MS = 7 * 24 * 60 * 60 * 1000;
+  const BAND_PRIOR = 1;
+  const BEIJING_UTC_OFFSET_H = 8;
   const RECENT_FAILURE_MS = 60 * 60 * 1000;
   const EXPLORE_RATE = 0.2;
   const UNKNOWN_HOST_MBPS = 10;
@@ -957,21 +1081,25 @@
   // ---- when to act ----------------------------------------------------------
 
   // A fragment request in flight, judged against the buffer it has to beat.
-  //   req: { total, loaded, startedAt, firstByteAt, rateBps }
+  //   req: { total, loaded, startedAt, firstByteAt, rateBps, cache }
+  //   cache: "hit" | "miss" | undefined, as the extension read it off the response
   function stuckVerdict(req, now, requiredBps, bufferAheadS) {
     if (!req || !(req.total >= STUCK_MIN_FRAGMENT_BYTES) || !(requiredBps > 0)) {
       return null;
     }
+    const miss = req.cache === "miss";
     const bufferMs = Math.max(0, bufferAheadS || 0) * 1000;
     if (!req.firstByteAt) {
       const waited = now - req.startedAt;
-      if (waited >= STUCK_NO_FIRST_BYTE_MS && bufferAheadS < STUCK_URGENT_BUFFER_S) {
+      if (waited >= (miss ? MISS_NO_FIRST_BYTE_MS : STUCK_NO_FIRST_BYTE_MS) &&
+          bufferAheadS < STUCK_URGENT_BUFFER_S) {
         return { reason: "no-first-byte", waitedMs: waited };
       }
       return null;
     }
     const transferMs = now - req.firstByteAt;
-    if (transferMs < STUCK_MIN_TRANSFER_MS && req.loaded < STUCK_MIN_FRAGMENT_BYTES) {
+    if (transferMs < (miss ? MISS_MIN_TRANSFER_MS : STUCK_MIN_TRANSFER_MS) &&
+        req.loaded < (miss ? MISS_MIN_FRAGMENT_BYTES : STUCK_MIN_FRAGMENT_BYTES)) {
       return null;
     }
     const rate = req.rateBps > 0 ? req.rateBps : (transferMs > 0 ? 8000 * req.loaded / transferMs : 0);
@@ -1008,11 +1136,71 @@
     return null;
   }
 
+  // Whether a CDN response came from the edge's cache, read from the headers
+  // each vendor uses. Seen on Bilibili's hosts: EdgeOne (mirrorcosov) sends
+  // eo-cache-status: HIT; Alibaba sends x-cache: HIT TCP_MEM_HIT ...; Huawei
+  // marks each cache hop in via: ...CACHE20[33,TCP_MISS,37]... and sends
+  // nginx-hit: 1 on a hit.
+  //   headers: [{ name, value }] (webRequest's shape) or { name: value }
+  //   returns "hit" | "miss" | null when the response doesn't say
+  function cacheVerdict(headers) {
+    const map = {};
+    if (Array.isArray(headers)) {
+      headers.forEach(function (h) {
+        if (h && h.name) {
+          map[String(h.name).toLowerCase()] = String(h.value == null ? "" : h.value);
+        }
+      });
+    } else if (headers && typeof headers === "object") {
+      Object.keys(headers).forEach(function (k) { map[k.toLowerCase()] = String(headers[k]); });
+    }
+    const status = map["eo-cache-status"] || map["x-cache"] || map["x-cache-status"] || map["cf-cache-status"];
+    if (status) {
+      const token = status.trim().split(/[\s,;]+/)[0].toUpperCase();
+      if (/MISS|EXPIRED|BYPASS|DYNAMIC/.test(token)) {
+        return "miss";
+      }
+      if (/HIT|STALE|REVALIDATED|UPDATING/.test(token)) {
+        return "hit";
+      }
+    }
+    const via = (map.via || "").toUpperCase();
+    if (/TCP_[A-Z_]*HIT/.test(via)) {
+      return "hit";
+    }
+    if (/TCP_[A-Z_]*MISS/.test(via)) {
+      return "miss";
+    }
+    if (map["nginx-hit"] === "1") {
+      return "hit";
+    }
+    return null;
+  }
+
   // ---- choosing -------------------------------------------------------------
 
-  function historyScore(history, host) {
+  // night 00-08, day 08-18, peak 18-24, Beijing time, for a wall-clock time.
+  function beijingBand(epochMs) {
+    if (typeof epochMs !== "number" || !isFinite(epochMs)) {
+      return null;
+    }
+    const hour = ((Math.floor(epochMs / 3600000) + BEIJING_UTC_OFFSET_H) % 24 + 24) % 24;
+    return hour >= 18 ? "peak" : (hour >= 8 ? "day" : "night");
+  }
+
+  // A host's expected rate. Given a band, the band's own record pulls the
+  // all-hours one toward it as it gathers samples.
+  function historyScore(history, host, band) {
     const rec = history && history.hosts && history.hosts[host];
-    return rec && rec.n > 0 ? rec.mbps : null;
+    const all = rec && rec.n > 0 ? rec.mbps : null;
+    const b = band && rec && rec.bands && rec.bands[band];
+    if (!b || !(b.n > 0)) {
+      return all;
+    }
+    if (all == null) {
+      return b.mbps;
+    }
+    return (b.mbps * b.n + all * BAND_PRIOR) / (b.n + BAND_PRIOR);
   }
 
   function recentlyFailed(history, host, now) {
@@ -1046,15 +1234,16 @@
     if (!pool.length) {
       return [];
     }
+    const band = beijingBand(i.now);
     const failedLately = function (h) { return recentlyFailed(i.history, h, now) ? 1 : 0; };
     // An unknown host counts as the lower median of the measured ones, so it
     // never outranks a host already measured as good.
     const known = pool.filter(function (h) { return !failedLately(h); })
-      .map(function (h) { return historyScore(i.history, h); })
+      .map(function (h) { return historyScore(i.history, h, band); })
       .filter(function (s) { return s != null; }).sort(function (a, b) { return a - b; });
     const typical = known.length ? known[Math.floor((known.length - 1) / 2)] : UNKNOWN_HOST_MBPS;
     const score = function (h) {
-      const s = historyScore(i.history, h);
+      const s = historyScore(i.history, h, band);
       return s == null ? typical : s;
     };
     const overseas = function (h) { return describeHost(h).region === "overseas" ? 1 : 0; };
@@ -1130,17 +1319,68 @@
     return Math.min(MAX_COOLDOWN_MS, previousMs ? previousMs * 2 : NO_SWITCH_COOLDOWN_MS);
   }
 
+  // ---- multi-source fragments ------------------------------------------------
+  //
+  // One fragment fetched from several hosts at once (the page's multiSend).
+  // Each UPOS host speaks HTTP/2, so a browser keeps one connection per host
+  // and splitting a range on a single host gains nothing; spreading it across
+  // hosts adds connections. A host that joins takes the back half of the
+  // largest unfinished piece, so it takes over the tail of a slow host's work
+  // instead of waiting for it.
+
+  const MULTI_MIN_SPLIT_BYTES = 128 * 1024;
+
+  // "bytes 0-1023/78081346" -> { start, end, total }.
+  function parseContentRange(value) {
+    const m = /^\s*bytes\s+(\d+)-(\d+)\/(\d+|\*)\s*$/i.exec(String(value || ""));
+    if (!m) {
+      return null;
+    }
+    return { start: Number(m[1]), end: Number(m[2]), total: m[3] === "*" ? NaN : Number(m[3]) };
+  }
+
+  // The chunk an idle host should take half of: the in-progress chunk with
+  // the most bytes still to come, if halving it leaves both halves worth a
+  // request. chunks: [{ pos, end, busy, done }]; returns { chunk, at } or null,
+  // where `at` is the first byte of the half that moves.
+  function pickSplit(chunks) {
+    let best = null;
+    (chunks || []).forEach(function (c) {
+      if (!c || c.done || !c.busy) {
+        return;
+      }
+      const remaining = c.end - c.pos + 1;
+      if (remaining >= 2 * MULTI_MIN_SPLIT_BYTES && (!best || remaining > best.end - best.pos + 1)) {
+        best = c;
+      }
+    });
+    if (!best) {
+      return null;
+    }
+    return { chunk: best, at: best.pos + Math.floor((best.end - best.pos + 1) / 2) };
+  }
+
   // ---- history --------------------------------------------------------------
+
+  // Folds one sample into a decaying average { mbps, n, at }.
+  function decayedAverage(rec, mbps, now, halfLifeMs) {
+    const age = Math.max(0, now - (rec.at || now));
+    const nEff = rec.n * Math.pow(0.5, age / halfLifeMs);
+    rec.mbps = (rec.mbps * nEff + mbps) / (nEff + 1);
+    rec.n = nEff + 1;
+    rec.at = now;
+    return rec;
+  }
 
   function recordSample(history, host, mbps, now) {
     const h = history && typeof history === "object" ? history : {};
     h.hosts = h.hosts || {};
-    const rec = h.hosts[host] || { mbps: 0, n: 0, at: now };
-    const age = Math.max(0, now - (rec.at || now));
-    const nEff = rec.n * Math.pow(0.5, age / HISTORY_HALF_LIFE_MS);
-    rec.mbps = (rec.mbps * nEff + mbps) / (nEff + 1);
-    rec.n = nEff + 1;
-    rec.at = now;
+    const rec = decayedAverage(h.hosts[host] || { mbps: 0, n: 0, at: now }, mbps, now, HISTORY_HALF_LIFE_MS);
+    const band = beijingBand(now);
+    if (band) {
+      rec.bands = rec.bands && typeof rec.bands === "object" ? rec.bands : {};
+      rec.bands[band] = decayedAverage(rec.bands[band] || { mbps: 0, n: 0, at: now }, mbps, now, BAND_HALF_LIFE_MS);
+    }
     h.hosts[host] = rec;
     return h;
   }
@@ -1194,12 +1434,16 @@
     createEstimator,
     recentRate,
     stuckVerdict,
+    cacheVerdict,
     evaluate,
     pickChallengers,
     raceVerdict,
     stuckRaceVerdict,
     nextCooldown,
     historyScore,
+    beijingBand,
+    parseContentRange,
+    pickSplit,
     recentlyFailed,
     recordSample,
     recordFailure,
@@ -1217,7 +1461,7 @@
   }
   root.__BILI_ACCELERATOR_INSTALLED__ = true;
 
-  const VERSION = "0.5.1";
+  const VERSION = "0.5.2";
   const STORAGE_KEY = "biliAccelerator.config.v2";
   const LEGACY_KEY = "biliAccelerator.config.v1";
   // Per-host history of measured delivery, per region. It only orders the
@@ -1229,6 +1473,15 @@
   const PANEL_ID = "bili-accelerator-panel";
   const IMMERSED_CLASS = "ba-immersed";
   const LIFTED_CLASS = "ba-lifted";
+  // Where the viewer dragged the badge, and whether they hid it (core.normalizeBadge).
+  const BADGE_KEY = "biliAccelerator.badge.v1";
+  const OPEN_CLASS = "ba-open";
+  const DRAGGING_CLASS = "ba-dragging";
+  const DOCK_LEFT_CLASS = "ba-dock-left";
+  const DOCK_RIGHT_CLASS = "ba-dock-right";
+  const USER_HIDDEN_CLASS = "ba-user-hidden";
+  // A press that travels less than this is a click, not a drag.
+  const DRAG_THRESHOLD = 5;
   const REVEAL_HOTZONE = 150;
   const REVEAL_TIMEOUT = 2600;
   const STALL_GRACE_MS = 2500;
@@ -1366,10 +1619,14 @@
       return;
     }
     const accent = ACCENT_PRESETS[config.accent] || ACCENT_PRESETS.bili;
-    const surface = SURFACES[resolveTheme()] || SURFACES.light;
+    const theme = resolveTheme() === "dark" ? "dark" : "light";
+    const surface = SURFACES[theme];
     Object.keys(surface).forEach(function (name) {
       host.style.setProperty(name, surface[name]);
     });
+    // Native parts the panel doesn't draw itself (a scrollbar, a <select>'s
+    // open list) follow the panel's theme rather than the page's.
+    host.style.setProperty("color-scheme", theme);
     const rgb = hexToRgb(accent.hex);
     host.style.setProperty("--ba-accent", accent.hex);
     host.style.setProperty("--ba-accent-strong", accent.strong);
@@ -1799,6 +2056,27 @@
 
       // Count downloaded bytes for media segments (free via loadend.loaded) and
       // time send→loadend as the transfer duration for the throughput window.
+      // A large video fragment fetched from several hosts at once completes
+      // this XHR without it ever being sent (see multiSend).
+      let multi = null;
+      if (config.enabled && isMedia) {
+        try {
+          multi = multiPlan(xhr, meta);
+        } catch (_) {
+          multi = null;
+        }
+      }
+      if (multi) {
+        const multiStart = nowMs();
+        xhr.addEventListener("loadend", function onMultiEnd(event) {
+          if (event && typeof event.loaded === "number") {
+            recordTransfer(multiStart, nowMs(), event.loaded);
+          }
+        });
+        multiSend(xhr, multi);
+        return undefined;
+      }
+
       if (config.enabled && isMedia) {
         const startTs = nowMs();
         xhr.addEventListener("loadend", function onLoadEnd(event) {
@@ -1976,7 +2254,10 @@
     } catch (_) {
       path = "";
     }
-    return /^\/(?:video|bangumi\/play|list|medialist\/play|festival|cheese\/play)\//.test(path || "");
+    // Bilibili now serves pages under a language prefix too (/zh-Hans/video/...,
+    // /zh-Hant/...); without it here the engine stood aside on every such page.
+    return /^\/(?:[a-z]{2,3}(?:-[A-Za-z0-9]{2,8})?\/)?(?:video|bangumi\/play|list|medialist\/play|festival|cheese\/play)\//
+      .test(path || "");
   }
 
   function newSession(cid) {
@@ -2005,7 +2286,13 @@
       races: [],
       switches: [],
       stalls: 0,
-      verdict: null
+      verdict: null,
+      multiFailed: {},       // "file|start" -> a multi-source attempt failed; the retry goes out as itself
+      sizes: {},             // file -> total size, from the Content-Range of its responses
+      multi: {
+        active: false, sources: [], fragments: 0, helped: 0, fallbacks: 0, splits: 0, stalls: 0, bytes: {},
+        est: routing.createEstimator()
+      }
     };
   }
 
@@ -2050,7 +2337,8 @@
   function hostStats(session, host) {
     if (!session.hosts[host]) {
       session.hosts[host] = {
-        est: routing.createEstimator(), requests: 0, bytes: 0, errors: [], ttfbs: []
+        est: routing.createEstimator(), requests: 0, bytes: 0, errors: [], ttfbs: [],
+        cache: { hit: 0, miss: 0 }
       };
     }
     return session.hosts[host];
@@ -2062,6 +2350,44 @@
     } catch (_) {
       return "";
     }
+  }
+
+  function absoluteUrl(value) {
+    try {
+      return new URL(value, root.location.href).href;
+    } catch (_) {
+      return String(value);
+    }
+  }
+
+  // The extension's background worker reads the CDN's cache status, which
+  // page scripts can't (the CDN exposes only Content-Length and
+  // Content-Range), and relays it per response. It goes on the oldest video
+  // request in flight for that URL that has no verdict yet.
+  function noteCacheVerdict(url, verdict) {
+    if (verdict !== "hit" && verdict !== "miss") {
+      return false;
+    }
+    const href = absoluteUrl(url);
+    let found = null;
+    engine.sessions.forEach(function (session) {
+      if (found) {
+        return;
+      }
+      for (let i = 0; i < session.inflight.length; i += 1) {
+        const req = session.inflight[i];
+        if (!req.cache && req.href === href) {
+          found = req;
+          return;
+        }
+      }
+    });
+    if (!found) {
+      return false;
+    }
+    found.cache = verdict;
+    hostStats(found.session, found.host).cache[verdict] += 1;
+    return true;
   }
 
   function beginRequest(xhr, meta) {
@@ -2080,6 +2406,8 @@
     const req = {
       xhr,
       session,
+      href: absoluteUrl(url),
+      cache: null,
       key,
       kind,
       host: hostOfUrl(url),
@@ -2133,6 +2461,14 @@
   function endRequest(req, status, loaded) {
     const session = req.session;
     req.ended = true;
+    if (status === 206 && !session.sizes[req.key]) {
+      try {
+        const got = routing.parseContentRange(req.xhr.getResponseHeader("Content-Range"));
+        if (got && got.total > 0) {
+          session.sizes[req.key] = got.total;
+        }
+      } catch (_) {}
+    }
     const index = session.inflight.indexOf(req);
     if (index !== -1) {
       session.inflight.splice(index, 1);
@@ -2267,7 +2603,7 @@
             .map(function (r) {
               return {
                 total: r.total, loaded: r.loaded, startedAt: r.startedAt, firstByteAt: r.firstByteAt,
-                rateBps: routing.recentRate(r.samples, now, 1000), ref: r
+                rateBps: routing.recentRate(r.samples, now, 1000), cache: r.cache, ref: r
               };
             }),
           estimateBps: stats.est.estimate(),
@@ -2446,6 +2782,524 @@
         });
       });
     });
+  }
+
+  // ---- multi-source fragments (experimental) ------------------------------
+  //
+  // With multiSource on, a large video fragment the player asks for is not
+  // sent as its own XHR. The page fetches it itself and completes the
+  // player's XHR with the bytes: readyState, status and response are set on
+  // the instance, and loadstart, progress, load and loadend are dispatched on
+  // it, so the player sees one 206.
+  //
+  // The whole range first goes to the host the player asked, as one request,
+  // so a host that keeps up costs nothing extra. Splitting from the start
+  // lost on 2026-11-26: the assigned edge delivered 2 MB at a median 25 Mbps
+  // on its own, while every chunk on a mainland mirror at an uncached offset
+  // waited 1-2 s for a first byte, which held a three-way split to 9 Mbps.
+  // Only when the host falls behind (MULTI_HELP_MS) do up to two more hosts
+  // join, each taking the back half of the largest unfinished piece
+  // (routing.pickSplit), until the range is done.
+  //
+  // Every response must carry exactly the bytes asked for, out of a file of
+  // the size the player's own requests reported. Anything off (a host that
+  // ignores the range, a size that disagrees, every host failing, the
+  // player's own timeout) fails the request as a network error would, and
+  // the player's retry of that range goes out as a normal request.
+
+  const MULTI_MIN_BYTES = 512 * 1024;
+  const MULTI_SOURCES = 3;
+  // One request per host at a time: every request on a host that doesn't hold
+  // the bytes pays a first byte of 1-2 s, so fewer, larger pieces win.
+  const MULTI_PER_HOST = 1;
+  // Helpers join when the first host is on course to need more than
+  // MULTI_HELP_MS for the rest of the range, judged once it has been sending
+  // for MULTI_HELP_SAMPLE_MS, or when it has sent nothing for
+  // MULTI_HELP_NO_BYTE_MS (the engine's own no-first-byte wait). Judging any
+  // sooner called helpers onto hosts that were merely between request and
+  // first byte, and their own 1-2 s first byte slowed the fragment down.
+  const MULTI_HELP_MS = 1500;
+  const MULTI_HELP_SAMPLE_MS = 250;
+  const MULTI_HELP_NO_BYTE_MS = 1000;
+  // Measured on 2026-11-26: a mainland mirror took 1.4-2.1 s to a first byte
+  // at an uncached offset. A connection that delivered nothing for this long
+  // after asking, or stopped for MULTI_STALL_MS once bytes flowed, gives its
+  // chunk back.
+  const MULTI_FIRST_BYTE_MS = 3000;
+  const MULTI_STALL_MS = 1500;
+  const MULTI_STALLS_TO_DROP = 3;
+  // An idle helper takes over a piece that has had no first byte this long.
+  const MULTI_TAKEOVER_MS = 800;
+  const MULTI_TICK_MS = 200;
+  const MULTI_PROGRESS_MS = 100;
+
+  const UPOS_HOST_RE = /^upos-[a-z0-9-]+\.bilivideo\.com$/;
+
+  function swapHost(url, host) {
+    try {
+      const u = new URL(url);
+      u.host = host;
+      return u.href;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function multiActive(session) {
+    return !!(config.multiSource && session && session.multi.active);
+  }
+
+  function multiPlan(xhr, meta) {
+    if (!config.multiSource || !autoRouting() || !isPlayerPage() ||
+        typeof nativeFetch !== "function" || typeof AbortController !== "function") {
+      return null;
+    }
+    if (xhr.responseType !== "arraybuffer") {
+      return null;
+    }
+    const url = meta.finalUrl || meta.url;
+    if (String(url).indexOf("/live-bvc/") !== -1) {
+      return null;
+    }
+    const key = routing.fileKey(url);
+    const cid = key ? routing.cidOf(key) : null;
+    const session = cid ? engine.sessions.get(cid) : null;
+    if (!session) {
+      return null;
+    }
+    const rep = session.table.reps[key] || null;
+    if (rep ? rep.kind !== "video" : routing.AUDIO_ID_RE.test(routing.repIdOf(key) || "")) {
+      return null;
+    }
+    const primary = hostOfUrl(url);
+    // A representation the page saw no playurl for (the logged-out preview
+    // streams arrive that way) has no table entry. A UPOS URL still carries to
+    // any pool mirror with only the host swapped, as urlFor does.
+    if (!rep && !UPOS_HOST_RE.test(primary)) {
+      return null;
+    }
+    const range = routing.parseRange(meta.range);
+    if (!range || isNaN(range.end) || !(range.length >= MULTI_MIN_BYTES)) {
+      return null;
+    }
+    const slot = key + "|" + range.start;
+    if (session.multiFailed[slot]) {
+      return null;
+    }
+    const others = routing.pickChallengers({
+      candidates: rep ? routing.candidatesFor(rep, config.candidatePool) : [primary].concat(config.candidatePool),
+      current: primary,
+      issued: rep ? rep.issued : [primary],
+      measured: session.measured,
+      failed: session.failed,
+      lost: {},
+      history: engine.history,
+      now: Date.now()
+    });
+    const sources = [{ host: primary, url }].concat(others.map(function (host) {
+      return { host, url: rep ? routing.urlFor(rep, host) : swapHost(url, host) };
+    })).filter(function (s) { return s.url; }).slice(0, MULTI_SOURCES);
+    if (sources.length < 2) {
+      return null;
+    }
+    return { session, rep, key, slot, range, url, primary, sources };
+  }
+
+  function multiSend(xhr, plan) {
+    const session = plan.session;
+    const rangeStart = plan.range.start;
+    const rangeEnd = plan.range.end;
+    const size = rangeEnd - rangeStart + 1;
+    const buf = new Uint8Array(size);
+    const startedAt = nowMs();
+    const timeoutMs = xhr.timeout > 0 ? xhr.timeout : 0;
+    const sources = plan.sources.map(function (s) {
+      return { host: s.host, url: s.url, busy: 0, dead: false, errors: 0, stalls: 0, bytes: 0 };
+    });
+    const first = sources[0];
+    const chunks = [{ start: rangeStart, end: rangeEnd, pos: rangeStart, busy: false, done: false, attempt: null }];
+    const attempts = [];
+    // The file size the player's own requests reported; every host must agree.
+    let total = session.sizes[plan.key] || NaN;
+    let helping = false;
+    let readyState = 1;
+    let status = 0;
+    let finished = false;
+    let lastProgressAt = 0;
+    let ticker = null;
+
+    // What the player reads off the request, now answered here.
+    const define = function (name, get) {
+      try { Object.defineProperty(xhr, name, { configurable: true, get }); } catch (_) {}
+    };
+    define("readyState", function () { return readyState; });
+    define("status", function () { return status; });
+    define("statusText", function () { return status === 206 ? "Partial Content" : ""; });
+    define("response", function () { return readyState === 4 && status === 206 ? buf.buffer : null; });
+    define("responseURL", function () { return readyState >= 2 ? plan.url : ""; });
+    const responseHeaders = function () {
+      return {
+        "content-type": "video/mp4",
+        "content-length": String(size),
+        "content-range": "bytes " + rangeStart + "-" + rangeEnd + "/" + (isNaN(total) ? "*" : total)
+      };
+    };
+    xhr.getResponseHeader = function (name) {
+      const value = readyState >= 2 ? responseHeaders()[String(name).toLowerCase()] : undefined;
+      return value === undefined ? null : value;
+    };
+    xhr.getAllResponseHeaders = function () {
+      if (readyState < 2) {
+        return "";
+      }
+      const h = responseHeaders();
+      return Object.keys(h).map(function (k) { return k + ": " + h[k] + "\r\n"; }).join("");
+    };
+    xhr.abort = function () { finish("abort"); };
+
+    function loadedBytes() {
+      let n = 0;
+      chunks.forEach(function (c) { n += c.pos - c.start; });
+      return n;
+    }
+
+    // Events go through dispatchEvent, which runs both the player's on*
+    // properties and every listener, the page's own measurement included.
+    function fire(type, plain) {
+      if (typeof xhr.dispatchEvent !== "function") {
+        return;
+      }
+      let event;
+      try {
+        event = plain || typeof ProgressEvent !== "function"
+          ? new Event(type)
+          : new ProgressEvent(type, { lengthComputable: true, loaded: loadedBytes(), total: size });
+      } catch (_) {
+        return;
+      }
+      try { xhr.dispatchEvent(event); } catch (_) {}
+    }
+
+    function setState(next) {
+      if (readyState < next) {
+        readyState = next;
+        fire("readystatechange", true);
+      }
+    }
+
+    function release(a) {
+      if (a.ended) {
+        return false;
+      }
+      a.ended = true;
+      a.src.busy -= 1;
+      a.chunk.busy = false;
+      a.chunk.attempt = null;
+      const i = attempts.indexOf(a);
+      if (i !== -1) {
+        attempts.splice(i, 1);
+      }
+      // Stops the rest of a body that ran past a chunk shortened by a split.
+      try { a.ctl.abort(); } catch (_) {}
+      return true;
+    }
+
+    function measure(a) {
+      if (!(a.bytes > 0)) {
+        return;
+      }
+      const stats = hostStats(session, a.src.host);
+      stats.requests += 1;
+      stats.bytes += a.bytes;
+      stats.est.sample(nowMs() - a.startedAt, a.bytes);
+      session.multi.bytes[a.src.host] = (session.multi.bytes[a.src.host] || 0) + a.bytes;
+      if (a.bytes >= 128 * 1024) {
+        session.measured[a.src.host] = true;
+      }
+    }
+
+    function settle(a) {
+      if (!release(a)) {
+        return;
+      }
+      measure(a);
+      if (!a.chunk.done) {
+        // The body ended before the chunk did: the host cut it short.
+        a.src.errors += 1;
+        if (a.src.errors >= 2) {
+          a.src.dead = true;
+        }
+      }
+      schedule();
+    }
+
+    function fail(a, permanent) {
+      if (!release(a)) {
+        return;
+      }
+      measure(a);
+      const host = a.src.host;
+      a.src.errors += 1;
+      if (permanent || a.src.errors >= 2) {
+        a.src.dead = true;
+      }
+      if (a.src === first) {
+        startHelping();
+      }
+      hostStats(session, host).errors.push(nowMs());
+      session.failed[host] = (session.failed[host] || 0) + 1;
+      engine.history = routing.recordFailure(engine.history, host, Date.now());
+      schedule();
+    }
+
+    function take(a, bytes) {
+      const c = a.chunk;
+      const n = Math.min(bytes.length, Math.max(0, c.end - c.pos + 1));
+      if (n > 0) {
+        buf.set(n === bytes.length ? bytes : bytes.subarray(0, n), c.pos - rangeStart);
+        c.pos += n;
+        a.bytes += n;
+        a.src.bytes += n;
+        a.lastByteAt = nowMs();
+        if (!a.firstByteAt) {
+          a.firstByteAt = a.lastByteAt;
+        }
+      }
+      setState(3);
+      const now = nowMs();
+      if (now - lastProgressAt >= MULTI_PROGRESS_MS) {
+        lastProgressAt = now;
+        fire("progress");
+      }
+      if (c.pos > c.end) {
+        c.done = true;
+        settle(a);
+      }
+    }
+
+    function launch(src, chunk) {
+      const ctl = new AbortController();
+      const a = { src, chunk, ctl, from: chunk.pos, startedAt: nowMs(), lastByteAt: nowMs(), firstByteAt: 0, bytes: 0, ended: false };
+      attempts.push(a);
+      src.busy += 1;
+      chunk.busy = true;
+      chunk.attempt = a;
+      nativeFetch.call(root, src.url, {
+        method: "GET",
+        mode: "cors",
+        credentials: "omit",
+        cache: "no-store",
+        headers: { Range: "bytes=" + chunk.pos + "-" + chunk.end },
+        signal: ctl.signal
+      }).then(function (response) {
+        if (a.ended) {
+          return null;
+        }
+        const got = routing.parseContentRange(response.headers && typeof response.headers.get === "function"
+          ? response.headers.get("content-range") : null);
+        // Every host must hand back exactly the bytes asked for, out of a file
+        // of the same size. One that doesn't is out for this fragment.
+        if (response.status !== 206 || !got || got.start !== a.from ||
+            (!isNaN(total) && got.total !== total)) {
+          fail(a, true);
+          return null;
+        }
+        if (isNaN(total) && a.src === first && got.total > rangeEnd) {
+          total = got.total;
+          session.sizes[plan.key] = total;
+        }
+        status = 206;
+        setState(2);
+        const body = response.body;
+        if (!body || typeof body.getReader !== "function") {
+          return response.arrayBuffer().then(function (b) {
+            if (!a.ended) {
+              take(a, new Uint8Array(b));
+              settle(a);
+            }
+          });
+        }
+        const reader = body.getReader();
+        const pump = function () {
+          return reader.read().then(function (r) {
+            if (a.ended) {
+              try { reader.cancel(); } catch (_) {}
+              return null;
+            }
+            if (r.done) {
+              settle(a);
+              return null;
+            }
+            take(a, r.value);
+            return a.ended ? null : pump();
+          });
+        };
+        return pump();
+      }).catch(function () {
+        if (!a.ended) {
+          fail(a, false);
+        }
+      });
+    }
+
+    function schedule() {
+      if (finished) {
+        return;
+      }
+      if (chunks.every(function (c) { return c.done; })) {
+        finish("load");
+        return;
+      }
+      sources.forEach(function (src) {
+        // Helpers wait for a reason to join, and for a file size to hold them to.
+        if (src !== first && !(helping && !isNaN(total))) {
+          return;
+        }
+        while (!finished && !src.dead && src.busy < MULTI_PER_HOST) {
+          const next = chunks.filter(function (c) { return !c.done && !c.busy; })[0];
+          if (next) {
+            launch(src, next);
+            continue;
+          }
+          // Nothing left to hand out: take half of the largest chunk another
+          // host is still working on.
+          const split = routing.pickSplit(chunks.filter(function (c) {
+            return c.attempt && c.attempt.src !== src;
+          }));
+          if (!split) {
+            // Nothing worth halving, but a piece whose host has sent nothing
+            // yet is taken over by one that has: on a cold edge that first
+            // byte can be seconds away, and the rest of the range waits on it.
+            const now = nowMs();
+            const silent = !(src.bytes > 0) ? null : chunks.filter(function (c) {
+              const a = c.attempt;
+              return a && a.src !== src && a.bytes === 0 && now - a.startedAt >= MULTI_TAKEOVER_MS;
+            })[0];
+            if (!silent) {
+              break;
+            }
+            const loser = silent.attempt;
+            release(loser);
+            session.multi.stalls += 1;
+            loser.src.stalls += 1;
+            if (loser.src.stalls >= MULTI_STALLS_TO_DROP) {
+              loser.src.dead = true;
+            }
+            launch(src, silent);
+            continue;
+          }
+          const piece = { start: split.at, end: split.chunk.end, pos: split.at, busy: false, done: false, attempt: null };
+          split.chunk.end = split.at - 1;
+          chunks.push(piece);
+          session.multi.splits += 1;
+          launch(src, piece);
+        }
+      });
+      if (!finished && !attempts.length) {
+        finish("error");
+      }
+    }
+
+    function tick() {
+      if (finished) {
+        return;
+      }
+      const now = nowMs();
+      if (timeoutMs && now - startedAt > timeoutMs) {
+        finish("timeout");
+        return;
+      }
+      if (!helping) {
+        const a = attempts.filter(function (x) { return x.src === first; })[0];
+        if (a && !a.firstByteAt) {
+          if (now - a.startedAt >= MULTI_HELP_NO_BYTE_MS) {
+            startHelping();
+          }
+        } else if (a && now - a.firstByteAt >= MULTI_HELP_SAMPLE_MS) {
+          const rate = a.bytes * 8000 / (now - a.firstByteAt);
+          const remaining = a.chunk.end - a.chunk.pos + 1;
+          if (remaining * 8000 / rate > MULTI_HELP_MS) {
+            startHelping();
+          }
+        }
+      }
+      // A connection that stops delivering gives its chunk back, keeping the
+      // bytes it brought, as long as another host is in play.
+      attempts.slice().forEach(function (a) {
+        const othersAlive = helping && sources.some(function (s) { return s !== a.src && !s.dead; });
+        const silent = now - a.lastByteAt > (a.bytes > 0 ? MULTI_STALL_MS : MULTI_FIRST_BYTE_MS);
+        if (othersAlive && silent && release(a)) {
+          measure(a);
+          session.multi.stalls += 1;
+          a.src.stalls += 1;
+          if (a.src.stalls >= MULTI_STALLS_TO_DROP) {
+            a.src.dead = true;
+          }
+        }
+      });
+      schedule();
+    }
+
+    function startHelping() {
+      if (!helping) {
+        helping = true;
+        session.multi.helped += 1;
+      }
+    }
+
+    function finish(kind) {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      if (ticker) {
+        clearInterval(ticker);
+      }
+      attempts.slice().forEach(release);
+      if (kind === "load") {
+        session.multi.fragments += 1;
+        session.multi.est.sample(nowMs() - startedAt, size);
+        session.ends[plan.key] = Math.max(session.ends[plan.key] == null ? -1 : session.ends[plan.key], rangeEnd);
+        status = 206;
+        setState(4);
+        fire("progress");
+        fire("load");
+        fire("loadend");
+        return;
+      }
+      if (kind !== "abort") {
+        // The player retries this range; that retry goes out as itself.
+        session.multiFailed[plan.slot] = true;
+        session.multi.fallbacks += 1;
+      }
+      status = 0;
+      setState(4);
+      fire(kind === "abort" ? "abort" : (kind === "timeout" ? "timeout" : "error"));
+      fire("loadend");
+      if (kind === "abort") {
+        readyState = 0;
+      }
+    }
+
+    // What the routing engine records for a video request, minus the in-flight
+    // tracking it uses for races.
+    startEngine();
+    engine.current = session;
+    session.lastVideoKey = plan.key;
+    session.lastHost = plan.primary;
+    if (!session.assigned) {
+      session.assigned = plan.primary;
+    }
+    if (plan.rep && plan.rep.bandwidth > session.requiredBps) {
+      session.requiredBps = plan.rep.bandwidth;
+    }
+    session.requested[plan.slot] = true;
+    session.multi.active = true;
+    session.multi.sources = sources.map(function (s) { return s.host; });
+
+    fire("loadstart");
+    ticker = setInterval(tick, MULTI_TICK_MS);
+    schedule();
   }
 
   function fetchRange(url, start, end, ctl, onBytes) {
@@ -2791,7 +3645,10 @@
         mb: round1(s.bytes / 1e6),
         mbps: est === null ? null : round1(est / 1e6),
         firstByteMs: median(s.ttfbs),
-        errors: s.errors.length
+        errors: s.errors.length,
+        // Video fragments the CDN said it served from cache or relayed from
+        // origin; only the extension sees this.
+        cache: s.cache.hit + s.cache.miss > 0 ? { hit: s.cache.hit, miss: s.cache.miss } : undefined
       };
     });
     const issued = {};
@@ -2808,7 +3665,20 @@
       hosts,
       issued,
       races: session.races.slice(),
-      switches: session.switches.slice()
+      switches: session.switches.slice(),
+      multi: session.multi.active ? {
+        sources: session.multi.sources.slice(),
+        fragments: session.multi.fragments,
+        helped: session.multi.helped,
+        mbps: session.multi.est.estimate() === null ? null : round1(session.multi.est.estimate() / 1e6),
+        mbByHost: Object.keys(session.multi.bytes).reduce(function (o, h) {
+          o[h] = round1(session.multi.bytes[h] / 1e6);
+          return o;
+        }, {}),
+        splits: session.multi.splits,
+        stalls: session.multi.stalls,
+        fallbacks: session.multi.fallbacks
+      } : undefined
     };
   }
 
@@ -3433,15 +4303,142 @@
     watchVideo();
   }
 
+  // The badge can be dragged anywhere, so the hot zone that brings it back is
+  // measured from wherever it is rather than from the bottom-right corner.
   function handlePointerMove(event) {
-    if (!immersive) {
+    if (!immersive || badge.hidden) {
       return;
     }
-    const nearRight = (root.innerWidth - event.clientX) < REVEAL_HOTZONE;
-    const nearBottom = (root.innerHeight - event.clientY) < REVEAL_HOTZONE;
-    if (nearRight && nearBottom) {
+    const host = document.getElementById(BUTTON_ID);
+    if (!host || typeof host.getBoundingClientRect !== "function") {
+      return;
+    }
+    const r = host.getBoundingClientRect();
+    const dx = Math.max(r.left - event.clientX, 0, event.clientX - r.right);
+    const dy = Math.max(r.top - event.clientY, 0, event.clientY - r.bottom);
+    if (dx < REVEAL_HOTZONE && dy < REVEAL_HOTZONE) {
       revealBadge();
     }
+  }
+
+  // ---- badge position, docking and hiding --------------------------------
+
+  function loadBadge() {
+    try {
+      const stored = root.localStorage.getItem(BADGE_KEY);
+      return core.normalizeBadge(stored ? JSON.parse(stored) : null);
+    } catch (_) {
+      return core.normalizeBadge();
+    }
+  }
+
+  let badge = loadBadge();
+  // installUi() points this at the panel's own close.
+  let closeBadgePanel = function () {};
+
+  function saveBadge(next) {
+    badge = core.normalizeBadge(next);
+    try {
+      root.localStorage.setItem(BADGE_KEY, JSON.stringify(badge));
+    } catch (_) {
+      // storage may be unavailable; the position still holds for this page.
+    }
+  }
+
+  // The box position:fixed offsets are measured in: the window less its
+  // scrollbars. innerWidth counts the scrollbar, and measuring `right` from it
+  // shifted a badge dropped on the right half by the scrollbar's width.
+  function viewportSize() {
+    const el = document.documentElement;
+    return {
+      w: (el && el.clientWidth) || root.innerWidth || 0,
+      h: (el && el.clientHeight) || root.innerHeight || 0
+    };
+  }
+
+  // Inline offsets on the host beat the stylesheet's :host rules, so a badge
+  // the viewer placed stays put in every screen mode; one they never moved is
+  // left to the stylesheet, which lifts it clear of the player controls.
+  function applyBadgePosition() {
+    const host = document.getElementById(BUTTON_ID);
+    if (!host || !host.style) {
+      return;
+    }
+    const vp = viewportSize();
+    const b = core.clampBadge(badge, vp.w, vp.h);
+    host.classList.toggle(USER_HIDDEN_CLASS, b.hidden);
+    host.classList.toggle(DOCK_LEFT_CLASS, b.docked && b.side === "left");
+    host.classList.toggle(DOCK_RIGHT_CLASS, b.docked && b.side === "right");
+    if (!b.custom) {
+      host.style.left = "";
+      host.style.right = "";
+      host.style.top = "";
+      host.style.bottom = "";
+      return;
+    }
+    host.style.top = "auto";
+    host.style.bottom = b.y + "px";
+    host.style.left = b.side === "left" ? b.x + "px" : "auto";
+    host.style.right = b.side === "right" ? b.x + "px" : "auto";
+  }
+
+  function placePanel(panel, host) {
+    const vp = viewportSize();
+    if (!vp.w || !vp.h || !panel.style || typeof host.getBoundingClientRect !== "function") {
+      return;
+    }
+    const place = core.panelPlacement(host.getBoundingClientRect(), vp.w, vp.h,
+      Math.min(340, vp.w - 36));
+    panel.style.left = place.offsetX + "px";
+    panel.style.right = "auto";
+    panel.style.top = place.up ? "auto" : "48px";
+    panel.style.bottom = place.up ? "48px" : "auto";
+    panel.style.maxHeight = place.maxHeight + "px";
+  }
+
+  function setBadgeUserHidden(hidden) {
+    if (hidden) {
+      closeBadgePanel();
+    }
+    saveBadge(Object.assign({}, badge, { hidden: !!hidden }));
+    applyBadgePosition();
+    if (!hidden) {
+      if (immersive) {
+        revealBadge();
+      }
+      zapBadge();
+    }
+  }
+
+  // Alt+B (Option+B) brings a hidden badge back, and hides a shown one. Read
+  // off event.code because Option+B types a symbol on a Mac keyboard.
+  function handleBadgeHotkey(event) {
+    if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey ||
+        event.code !== "KeyB" || event.repeat) {
+      return;
+    }
+    const target = event.target;
+    if (target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName || ""))) {
+      return;
+    }
+    event.preventDefault();
+    setBadgeUserHidden(!badge.hidden);
+  }
+
+  function installBadgeWatch() {
+    if (typeof root.addEventListener !== "function") {
+      return;
+    }
+    // Capture, so a player that swallows key events can't keep it hidden.
+    root.addEventListener("keydown", handleBadgeHotkey, true);
+    root.addEventListener("resize", function () {
+      applyBadgePosition();
+      const host = document.getElementById(BUTTON_ID);
+      const panel = host && host.shadowRoot && host.shadowRoot.querySelector(".ba-panel.open");
+      if (panel) {
+        placePanel(panel, host);
+      }
+    });
   }
 
   function installImmersiveWatch() {
@@ -3468,6 +4465,7 @@
       },
       notes: {
         native: function (server) { return "Native server · " + server; },
+        multi: function (n) { return "Downloading from " + n + " servers at once"; },
         switched: function (server) { return "Switched to " + server; },
         fixed: function (server) { return "Fixed server · " + server; },
         short: "The current server is too slow for this video",
@@ -3495,6 +4493,9 @@
       advShow: "Advanced settings",
       advHide: "Hide advanced",
       fAccent: "Accent",
+      fBadge: "⚡ button",
+      badgeReset: "Reset",
+      badgeHide: "Hide · Alt+B",
       themeLight: "Light theme", themeDark: "Dark theme",
       accents: {
         bili: "Bilibili Blue", teal: "Teal", emerald: "Emerald", violet: "Violet",
@@ -3507,6 +4508,7 @@
       mcdnAll: "Proxy all MCDN", mcdnV1: "Proxy /v1 only", mcdnReplace: "Replace host",
       portTitle: "Catch hidden PCDN", portNote: "Treat odd ports as slow (recommended)",
       stallTitle: "Auto-switch servers", stallNote: "Switch when a server can't keep up",
+      multiTitle: "Multi-server download", multiNote: "Experimental: fetch from several servers at once",
       akamaiTitle: "Rewrite Akamai", akamaiNote: "Only if Akamai is slow on your network",
       p2pTitle: "Stop bandwidth sharing", p2pNote: "Block Bilibili's P2P upload (reload to apply)",
       diag: "Copy report", diagCopied: "Copied ✓", diagConsole: "See console",
@@ -3524,6 +4526,7 @@
       },
       notes: {
         native: function (server) { return "原生线路 · " + server; },
+        multi: function (n) { return "多线路并行下载 · " + n + " 条线路"; },
         switched: function (server) { return "已切换到 " + server; },
         fixed: function (server) { return "固定线路 · " + server; },
         short: "当前线路速度不足",
@@ -3551,6 +4554,9 @@
       advShow: "高级设置",
       advHide: "收起高级设置",
       fAccent: "主题色",
+      fBadge: "悬浮球",
+      badgeReset: "复位",
+      badgeHide: "隐藏 · Alt+B",
       themeLight: "浅色", themeDark: "深色",
       accents: {
         bili: "哔哩蓝", teal: "青碧", emerald: "翠绿", violet: "星紫",
@@ -3563,6 +4569,7 @@
       mcdnAll: "代理所有 MCDN", mcdnV1: "仅代理 /v1", mcdnReplace: "替换域名",
       portTitle: "抓取隐藏 PCDN", portNote: "把奇怪端口的服务器当作慢节点（推荐）",
       stallTitle: "自动切换线路", stallNote: "线路速度不足时，自动切换到更快的线路",
+      multiTitle: "多线路并行下载", multiNote: "实验功能：同时从几条线路分段下载",
       akamaiTitle: "改写 Akamai", akamaiNote: "仅当 Akamai 在你的网络上很慢时使用",
       p2pTitle: "停止带宽共享", p2pNote: "阻止 B 站的 P2P 上传（刷新后生效）",
       diag: "复制诊断报告", diagCopied: "已复制 ✓", diagConsole: "见控制台",
@@ -3595,11 +4602,14 @@
     }
     const host = session.active || session.lastHost;
     const stats = host ? session.hosts[host] : null;
-    const rateBps = stats ? stats.est.estimate() : null;
+    const multi = multiActive(session);
+    // Several hosts share each fragment, so the rate that matters is theirs together.
+    const rateBps = multi ? session.multi.est.estimate() : (stats ? stats.est.estimate() : null);
     const info = {
       key: "smooth",
       session,
       host,
+      multi,
       rateBps,
       // Below what the stream needs, by the same margin a shortfall race uses.
       short: rateBps !== null && session.requiredBps > 0 &&
@@ -3665,6 +4675,9 @@
     }
     if (config.selection !== "auto") {
       return n.fixed(server);
+    }
+    if (info.multi) {
+      return n.multi(info.session.multi.sources.length);
     }
     return info.switched ? n.switched(server) : n.native(server);
   }
@@ -3916,14 +4929,21 @@
       ":host{position:fixed;right:18px;bottom:18px;z-index:2147483647;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:var(--ba-ink);transition:opacity .25s ease}",
       ":host(.ba-immersed){opacity:0;pointer-events:none}",
       ":host(.ba-lifted){bottom:84px}",
+      ":host(.ba-user-hidden){display:none}",
       "*{box-sizing:border-box}",
       "button,input,select{font:inherit}",
       // The rim is an inset shadow of one width all the way round. It used to
       // be a translucent border plus a highlight along the top edge only, which
       // left the ring bright and thick on top and faint at the bottom.
-      ".ba-toggle{position:relative;display:grid;place-items:center;width:40px;height:40px;border:none;border-radius:50%;background:linear-gradient(135deg,var(--ba-grad-a),var(--ba-grad-b));color:#fff;box-shadow:0 8px 22px var(--ba-accent-shadow),0 0 0 1px rgba(255,255,255,.34) inset;cursor:pointer;padding:0;transition:transform .16s ease,box-shadow .16s ease}",
+      ".ba-toggle{position:relative;display:grid;place-items:center;width:40px;height:40px;border:none;border-radius:50%;background:linear-gradient(135deg,var(--ba-grad-a),var(--ba-grad-b));color:#fff;box-shadow:0 8px 22px var(--ba-accent-shadow),0 0 0 1px rgba(255,255,255,.34) inset;cursor:pointer;padding:0;touch-action:none;transition:transform .22s ease,box-shadow .16s ease,opacity .22s ease}",
       ".ba-toggle:hover{transform:translateY(-1px);box-shadow:0 10px 28px var(--ba-accent-shadow),0 0 0 1px rgba(255,255,255,.34) inset}",
       ".ba-toggle:active{transform:scale(.93)}",
+      // Docked against a side edge, half the badge waits past it, faded, and
+      // slides back out under the pointer or while the panel is open.
+      ":host(.ba-dock-left:not(.ba-open)) .ba-toggle:not(:hover):not(:focus-visible){transform:translateX(-22px);opacity:.55}",
+      ":host(.ba-dock-right:not(.ba-open)) .ba-toggle:not(:hover):not(:focus-visible){transform:translateX(22px);opacity:.55}",
+      ":host(.ba-dragging) .ba-toggle{cursor:grabbing;transition:none;transform:scale(1.06)}",
+      ":host(.ba-dragging) .ba-toggle svg{animation:none}",
       ".ba-toggle svg{width:20px;height:20px;display:block}",
       // The badge sits beside the video on every page, so it never loops. The
       // bolt flickers once on hover, and once with a ring when zapBadge() marks
@@ -3935,7 +4955,13 @@
       "@keyframes ba-burst{0%{opacity:.75;transform:scale(1)}100%{opacity:0;transform:scale(1.8)}}",
       ".ba-panel{display:none;flex-direction:column;position:absolute;right:0;bottom:48px;width:min(340px,calc(100vw - 36px));max-height:calc(100vh - 96px);padding:16px;border:1px solid var(--ba-border);border-radius:14px;background:var(--ba-surface);box-shadow:0 18px 46px var(--ba-panel-shadow);backdrop-filter:saturate(180%) blur(18px);-webkit-backdrop-filter:saturate(180%) blur(18px)}",
       ".ba-panel.open{display:flex}",
-      ".ba-body{overflow-y:auto;min-height:0}",
+      // A thin scrollbar in the panel's own colours. The body reaches 12px into
+      // the panel's right padding and pads it back, so the scrollbar (Advanced
+      // open) sits near the panel's edge instead of against the cards.
+      ".ba-body{overflow-y:auto;min-height:0;margin-right:-12px;padding-right:12px;scrollbar-width:thin;scrollbar-color:var(--ba-border-in) transparent}",
+      ".ba-body::-webkit-scrollbar{width:8px}",
+      ".ba-body::-webkit-scrollbar-track{background:transparent}",
+      ".ba-body::-webkit-scrollbar-thumb{background:var(--ba-border-in);border-radius:4px}",
       ".ba-head{display:flex;align-items:center;gap:8px;margin-bottom:14px}",
       ".ba-head>svg{width:18px;height:18px;color:var(--ba-accent);flex:0 0 auto}",
       ".ba-seg{position:relative;display:inline-grid;grid-template-columns:32px 32px;height:24px;border:1px solid var(--ba-border-in);border-radius:8px;background:var(--ba-dot-bg);overflow:hidden;flex:0 0 auto}",
@@ -4010,12 +5036,17 @@
       // Chromium, 8px in WebKit), so its text never lined up with a text input.
       // Dropping the native appearance removes the inset; the chevron is ours.
       ".ba-field select{-webkit-appearance:none;appearance:none;padding-right:26px;background-image:var(--ba-chevron);background-repeat:no-repeat;background-position:right 8px center;background-size:8px 5px}",
+      // Seven swatches take 182px, which fits beside the 96px caption even
+      // when a classic 17px scrollbar narrows the panel; at 22px the last one
+      // wrapped to a line of its own whenever Advanced was open.
       ".ba-swatches{display:flex;align-items:center;gap:7px;min-height:32px;flex-wrap:wrap}",
-      ".ba-sw{width:22px;height:22px;border-radius:50%;padding:0;border:none;cursor:pointer;box-shadow:0 0 0 1px var(--ba-border-in) inset;transition:transform .12s ease}",
+      ".ba-sw{width:20px;height:20px;border-radius:50%;padding:0;border:none;cursor:pointer;box-shadow:0 0 0 1px var(--ba-border-in) inset;transition:transform .12s ease}",
       ".ba-sw:hover{transform:scale(1.12)}",
       ".ba-sw[aria-pressed=\"true\"]{box-shadow:0 0 0 2px var(--ba-card),0 0 0 4px var(--ba-accent)}",
       ".ba-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}",
       ".ba-actions button{height:32px;border:1px solid var(--ba-border-in);border-radius:8px;background:var(--ba-card);color:var(--ba-ink);padding:0 11px;cursor:pointer;font-size:12px;font-weight:700}",
+      ".ba-badge-actions{justify-content:flex-start;margin-top:0}",
+      ".ba-badge-actions button{white-space:nowrap;flex:none}",
       ".ba-actions button.primary{border-color:var(--ba-accent);background:var(--ba-accent);color:#fff}",
       ".ba-mini{font-size:11px;color:var(--ba-ink-soft);margin:8px 0 0;line-height:1.4}"
     ].join("");
@@ -4032,6 +5063,68 @@
         toggle.classList.remove("ba-zap");
       }
     });
+
+    // Press and drag moves the badge; a press that barely moves is a click and
+    // opens the panel as before. The drop decides where it stays (core.badgeDrop).
+    let drag = null;
+    let swallowClick = false;
+    toggle.addEventListener("pointerdown", function (event) {
+      swallowClick = false;
+      if (event.button !== 0 || !event.isPrimary || typeof host.getBoundingClientRect !== "function") {
+        return;
+      }
+      const rect = host.getBoundingClientRect();
+      drag = {
+        id: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        grabX: event.clientX - rect.left,
+        grabY: event.clientY - rect.top,
+        left: rect.left,
+        top: rect.top,
+        moved: false
+      };
+      try { toggle.setPointerCapture(event.pointerId); } catch (_) { /* not supported */ }
+    });
+    toggle.addEventListener("pointermove", function (event) {
+      if (!drag || event.pointerId !== drag.id) {
+        return;
+      }
+      if (!drag.moved) {
+        if (Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < DRAG_THRESHOLD) {
+          return;
+        }
+        drag.moved = true;
+        closePanel();
+        host.classList.add(DRAGGING_CLASS);
+        host.classList.remove(DOCK_LEFT_CLASS);
+        host.classList.remove(DOCK_RIGHT_CLASS);
+      }
+      const vp = viewportSize();
+      drag.left = Math.max(0, Math.min(event.clientX - drag.grabX, vp.w - core.BADGE_SIZE));
+      drag.top = Math.max(0, Math.min(event.clientY - drag.grabY, vp.h - core.BADGE_SIZE));
+      host.style.left = drag.left + "px";
+      host.style.top = drag.top + "px";
+      host.style.right = "auto";
+      host.style.bottom = "auto";
+    });
+    function endDrag(event) {
+      if (!drag || event.pointerId !== drag.id) {
+        return;
+      }
+      const done = drag;
+      drag = null;
+      if (!done.moved) {
+        return;
+      }
+      host.classList.remove(DRAGGING_CLASS);
+      swallowClick = true;
+      const vp = viewportSize();
+      saveBadge(core.badgeDrop(done.left, done.top, vp.w, vp.h));
+      applyBadgePosition();
+    }
+    toggle.addEventListener("pointerup", endDrag);
+    toggle.addEventListener("pointercancel", endDrag);
 
     const panel = document.createElement("section");
     panel.className = "ba-panel";
@@ -4215,6 +5308,13 @@
 
     // Show the host in use. Only fixed mode displays these rows, and in fixed
     // mode nothing but these two controls changes pcdnHost.
+    const multiRow = createSwitchRow("multiTitle", "multiNote",
+      config.multiSource, function (checked) {
+        saveConfig(Object.assign({}, config, { multiSource: checked }));
+        renderStatus();
+      });
+    multiRow.querySelector("input").id = "ba-multi";
+
     function syncHostControls() {
       const fixed = config.selection === "fixed";
       const listed = core.CANDIDATE_POOL.indexOf(config.pcdnHost) !== -1;
@@ -4224,6 +5324,7 @@
       customHostField.hidden = !fixed || listed;
       modeField.hidden = !fixed;
       akamaiRow.hidden = !fixed;
+      multiRow.hidden = fixed;
     }
     syncHostControls();
 
@@ -4273,16 +5374,28 @@
     diag.type = "button";
     diag.dataset.i18n = "diag";
     diag.textContent = t("diag");
+    let diagTimer = null;
+    function showDiagResult(key, ms) {
+      diag.textContent = t(key);
+      clearTimeout(diagTimer);
+      diagTimer = setTimeout(function () { diag.textContent = t("diag"); }, ms);
+    }
     diag.addEventListener("click", function () {
       const text = JSON.stringify(buildDiagnostics(), null, 2);
+      // writeText() reports failure by rejecting (permission denied, page not
+      // focused), not by throwing, so "Copied" waits until it has resolved.
+      let copying;
       try {
-        root.navigator.clipboard.writeText(text);
-        diag.textContent = t("diagCopied");
-        setTimeout(function () { diag.textContent = t("diag"); }, 1500);
-      } catch (_) {
-        console.info("[BiliAccelerator] diagnostics", text);
-        diag.textContent = t("diagConsole");
+        copying = Promise.resolve(root.navigator.clipboard.writeText(text));
+      } catch (error) {
+        copying = Promise.reject(error);
       }
+      copying.then(function () {
+        showDiagResult("diagCopied", 1500);
+      }, function () {
+        console.info("[BiliAccelerator] diagnostics", text);
+        showDiagResult("diagConsole", 4000);
+      });
     });
 
     const reload = document.createElement("button");
@@ -4297,7 +5410,31 @@
     actions.appendChild(diag);
     actions.appendChild(reload);
 
+    const badgeReset = document.createElement("button");
+    badgeReset.type = "button";
+    badgeReset.id = "ba-badge-reset";
+    badgeReset.dataset.i18n = "badgeReset";
+    badgeReset.textContent = t("badgeReset");
+    badgeReset.addEventListener("click", function () {
+      saveBadge(Object.assign({}, badge, { custom: false, docked: false }));
+      applyBadgePosition();
+      placePanel(panel, host);
+    });
+
+    const badgeHide = document.createElement("button");
+    badgeHide.type = "button";
+    badgeHide.id = "ba-badge-hide";
+    badgeHide.dataset.i18n = "badgeHide";
+    badgeHide.textContent = t("badgeHide");
+    badgeHide.addEventListener("click", function () { setBadgeUserHidden(true); });
+
+    const badgeActions = document.createElement("div");
+    badgeActions.className = "ba-actions ba-badge-actions";
+    badgeActions.appendChild(badgeReset);
+    badgeActions.appendChild(badgeHide);
+
     adv.appendChild(createSwatchField("fAccent", createAccentPicker()));
+    adv.appendChild(createSwatchField("fBadge", badgeActions));
     adv.appendChild(createField("fServer", selection));
     adv.appendChild(fixedHostField);
     adv.appendChild(customHostField);
@@ -4305,6 +5442,7 @@
     adv.appendChild(createField("fMcdn", mcdn));
     adv.appendChild(portRow);
     adv.appendChild(stallRow);
+    adv.appendChild(multiRow);
     adv.appendChild(akamaiRow);
     adv.appendChild(p2pRow);
     adv.appendChild(actions);
@@ -4328,15 +5466,22 @@
         return;
       }
       panel.classList.remove("open");
+      host.classList.remove(OPEN_CLASS);
       if (immersive) {
         revealBadge();
       }
     }
+    closeBadgePanel = closePanel;
 
     toggle.addEventListener("click", function () {
-      panel.classList.toggle("open");
+      if (swallowClick) {
+        swallowClick = false;
+        return;
+      }
+      host.classList.toggle(OPEN_CLASS, panel.classList.toggle("open"));
       renderStatus();
       if (panel.classList.contains("open")) {
+        placePanel(panel, host);
         drawSpeed();
         updateSpeedReadouts();
       }
@@ -4369,6 +5514,7 @@
     shadow.appendChild(panel);
     shadow.appendChild(toggle);
     document.documentElement.appendChild(host);
+    applyBadgePosition();
     applyLang();
     applyTheme();
     watchSystemTheme();
@@ -4389,17 +5535,26 @@
         saveConfig(Object.assign({}, config, data.config));
         applyLang();
         applyTheme();
+      } else if (data && data.__biliAccel === "cache" && typeof data.url === "string") {
+        noteCacheVerdict(data.url, data.verdict);
       }
     });
   }
 
   root.BiliAccelerator = {
     getConfig: function () { return Object.assign({}, config); },
-    setConfig: function (next) { saveConfig(Object.assign({}, config, next || {})); renderStatus(); applyTheme(); return this.getConfig(); },
+    // applyLang() re-renders the status too, and re-translates the panel when
+    // `lang` changed; the panel's own 中/EN toggle would otherwise see the
+    // language already set and leave it half translated.
+    setConfig: function (next) { saveConfig(Object.assign({}, config, next || {})); applyLang(); applyTheme(); return this.getConfig(); },
     getStats: function () { return JSON.parse(JSON.stringify(state)); },
     getDiagnostics: function () { return buildDiagnostics(); },
     rewriteUrl: function (url) { return core.rewriteUrl(url, rewriteConfig()); },
-    retest: function () { return retest(); }
+    retest: function () { return retest(); },
+    // A way back for a viewer who hid the badge and forgot Alt+B.
+    showBadge: function () { setBadgeUserHidden(false); },
+    hideBadge: function () { setBadgeUserHidden(true); },
+    resetBadge: function () { saveBadge(core.DEFAULT_BADGE); applyBadgePosition(); }
   };
 
   dropLegacyRankings();
@@ -4414,6 +5569,7 @@
 
   function bootstrapUi() {
     installUi();
+    installBadgeWatch();
     installImmersiveWatch();
     installSpeedMeter();
   }

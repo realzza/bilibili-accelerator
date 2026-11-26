@@ -176,6 +176,14 @@ A session is one video on one page: a playurl payload for one `cid`, plus any la
 
 **Race**, only when a trigger fires. Fetch the first 768 KB of the fragment in flight (all of it if shorter), or of the bytes right after the last completed fragment if nothing is in flight, from two challengers in parallel, with the page's native `fetch` so the request carries the page's `Referer`. The race is decided as soon as its outcome is known: when the first challenger finishes. Contenders still running get another second so their numbers reach history, then are cancelled; one that finishes in that second becomes the fallback. Each race costs at most 1.5 MB. The requests use `credentials: "omit"`, like the player's own, which should let the browser reuse the connection for the player's retry; the winner's edge will also hold the start of the range by then. The race is timed from request start to completion, which is what the player pays, not from the headers.
 
+### Cache status (extension only)
+
+Every UPOS host says in its response whether the edge served the bytes from cache: EdgeOne (`mirrorcosov`) sends `eo-cache-status`, Alibaba sends `x-cache`, Huawei marks each cache hop with `TCP_HIT` or `TCP_MISS` in `via`. None of it reaches a page script: the hosts send `Access-Control-Expose-Headers: Content-Length,Content-Range` (Huawei adds `x-service-module`), so the userscript can't see it.
+
+The extension can. A background worker reads it with `webRequest.onHeadersReceived` for each `.m4s` response on a Bilibili tab (`routing.cacheVerdict`) and passes `hit` or `miss` through the content script into the page, where it is attached to the video request in flight for that URL. A miss is no proof of slowness, since a relaying edge can still carry the stream, so it starts nothing by itself. It shortens how long the stuck-fragment check waits before judging the rate: 200 ms of transfer or 32 KB instead of 500 ms or 128 KB, and 0.5 s instead of 1 s without a first byte. The rate still has to fall short as before. The report counts hits and misses per host (`session.hosts[host].cache`).
+
+The gain is bounded. On a cold edge the headers themselves often arrive late, after the 1 s no-first-byte trigger has fired, so the miss helps mainly when an edge answers at once and then relays slowly; there it saves up to about 300 ms. On 2026-11-26 the relay was checked end to end in headless Edge on real pages: verdicts arrived for the player's fragments, and on a fresh upload random 256 KB ranges took 0.9–2.1 s on misses against 0.6–0.7 s on hits. Akamai sends no cache status and gets no verdict.
+
 ### Initial selection
 
 A session starts native: requests go wherever the player sends them, with nothing rewritten. The one exception is a PCDN or MCDN base URL: if Bilibili issued a proper CDN URL as its backup, that URL is used as issued; otherwise `classify()` rewrites it as before (PCDN to the default target, MCDN by `mcdnStrategy`).
@@ -232,6 +240,8 @@ Per region (by time zone), in `localStorage` under `biliAccelerator.hosts.v1.`: 
 
 History only orders challengers. It never picks the active host without a race, and a host with no history still gets tried (see [Choosing](#choosing-the-next-host)).
 
+Each host record also keeps one average per Beijing time band: night (00–08), day (08–18) and peak (18–24), with a seven-day half-life because a band sees about a third of the samples. Challengers are scored for the band the race falls in: the band's average, weighted by its sample count, blended with the all-hours average counted as one sample. A host that is fast in the small hours and slow at the evening peak is then ranked low at peak after a few evenings of samples. Records saved before bands existed score as before.
+
 ### Settings
 
 - **Selection: auto** runs the engine above. `mode` has no effect in auto and its row (适用范围, was 何时) is hidden, the same treatment PR #35 gave the fixed-host picker. A saved `mode: "force"` stays in storage and applies again if the viewer picks fixed.
@@ -281,6 +291,27 @@ Hosts are named by region and cloud, not by hostname, and the host Bilibili assi
 | signed URLs expire | the player fetches a new playurl, and the session table is rebuilt from it |
 | every path is congested | the race finds nothing clearly faster, and nothing changes |
 | background tab | no races or switches while hidden; samples that overlap a hidden period are dropped |
+
+## Multi-source fragments (experimental, off by default)
+
+**多线路并行下载 / Multi-server download** in the advanced settings. With it on, a video fragment of 512 KB or more is not sent as the player's own XHR. The page fetches the range itself and completes the player's XHR with the bytes: `readyState`, `status`, `response` and the response headers are set on the instance, and `loadstart`, `progress`, `load` and `loadend` are dispatched on it, so the player sees one 206.
+
+- **The assigned host first, alone.** The whole range goes to the host the player asked, as one request. Helpers (up to two more hosts, picked like race challengers) join only when that host is on course to need more than 1.5 s for the rest of the range, judged after 250 ms of transfer, or when it has sent no first byte after 1 s.
+- **Splitting.** A helper takes the back half of the largest unfinished piece (`routing.pickSplit`). A piece whose host has sent nothing for 0.8 s is taken over by a host that has delivered bytes in this fragment.
+- **Checks.** Every response must be a 206 whose `Content-Range` starts at the byte asked for, out of a file of the size the player's own responses reported (init and index requests are below the threshold and go out normally). Helpers don't join until that size is known. A host that fails a check is out for the fragment.
+- **Failure.** Every host failing, or the player's own `xhr.timeout` running out, ends the request as a network error or timeout would; the player's retry of that range then goes out as a normal request. The player aborting the request cancels every piece.
+- The routing engine keeps running; a fragment its helpers rescued doesn't stop it from moving the video to a faster host.
+
+What was measured, 2026-11-26, headless Edge on a real video page, logged out, 2 MB ranges at random offsets of one file, the same XHR through the page with the setting on and off in alternating order:
+
+| run | single host, median | multi-source, median | single-host requests that hung (20 s) | multi-source requests that failed |
+| --- | --- | --- | --- | --- |
+| helpers from the start, 3 hosts × 2 chunks | 9.4 Mbps | 7.3 Mbps | 0 / 6 | 0 / 6 |
+| helpers from the start, 1 chunk per host | 25.4 | 8.9 | 0 / 10 | 0 / 10 |
+| assigned host first, help judged at 0.4 s | 21.6 | 15.3 | 2 / 10 | 0 / 10 |
+| as shipped | 58.8 | 54.2 | 1 / 14 | 0 / 14 |
+
+Splitting from the start lost because every chunk on a mainland mirror at an uncached offset waited 1–2 s for its first byte, while the assigned edge, once warm, delivered 20–90 Mbps on its own. Judging the host at 0.4 s called helpers onto hosts that were only between request and first byte. As shipped, throughput is within the run-to-run noise of a single host, and each request that hung on a single host completed through the others. The logged-out player only plays low-quality preview streams with fragments of about 100 KB, so the real player was checked accepting assembled responses with the thresholds lowered in a local copy: six fragments from four hosts, no player error, playback and buffer advancing normally. Not yet checked: logged-in playback at high quality, Safari, and Firefox.
 
 ## Not doing
 

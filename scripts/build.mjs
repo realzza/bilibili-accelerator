@@ -1,7 +1,8 @@
 import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-const root = path.resolve(new URL("..", import.meta.url).pathname);
+const root = fileURLToPath(new URL("..", import.meta.url));
 const dist = path.join(root, "dist");
 const extensionDist = path.join(dist, "extension");
 
@@ -10,6 +11,7 @@ const core = await readFile(path.join(root, "src/core/rewrite.js"), "utf8");
 const routing = await readFile(path.join(root, "src/core/routing.js"), "utf8");
 const page = await readFile(path.join(root, "src/page/bili-accelerator.page.js"), "utf8");
 const content = await readFile(path.join(root, "src/extension/content.js"), "utf8");
+const background = await readFile(path.join(root, "src/extension/background.js"), "utf8");
 const manifest = JSON.parse(await readFile(path.join(root, "src/extension/manifest.json"), "utf8"));
 const popupHtml = await readFile(path.join(root, "src/extension/popup.html"), "utf8");
 const popupJs = await readFile(path.join(root, "src/extension/popup.js"), "utf8");
@@ -47,6 +49,9 @@ await mkdir(extensionDist, { recursive: true });
 await writeFile(path.join(dist, "bilibili-accelerator.user.js"), `${userscriptHeader}\n${core}\n${routing}\n${page}\n`);
 await writeFile(path.join(extensionDist, "bili-accelerator.page.js"), `${core}\n${routing}\n${page}\n`);
 await writeFile(path.join(extensionDist, "content.js"), content);
+// The background worker reads cache status with routing.cacheVerdict.
+await writeFile(path.join(extensionDist, "background.js"), `${routing}
+${background}`);
 await writeFile(path.join(extensionDist, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
 await writeFile(path.join(extensionDist, "popup.html"), popupHtml);
 await writeFile(path.join(extensionDist, "popup.js"), popupJs);
