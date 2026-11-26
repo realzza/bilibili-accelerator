@@ -3737,8 +3737,8 @@
       advHide: "Hide advanced",
       fAccent: "Accent",
       fBadge: "⚡ button",
-      badgeReset: "Reset position",
-      badgeHide: "Hide (Alt+B shows)",
+      badgeReset: "Reset",
+      badgeHide: "Hide · Alt+B",
       themeLight: "Light theme", themeDark: "Dark theme",
       accents: {
         bili: "Bilibili Blue", teal: "Teal", emerald: "Emerald", violet: "Violet",
@@ -3797,7 +3797,7 @@
       fAccent: "主题色",
       fBadge: "悬浮球",
       badgeReset: "复位",
-      badgeHide: "隐藏（Alt+B 唤回）",
+      badgeHide: "隐藏 · Alt+B",
       themeLight: "浅色", themeDark: "深色",
       accents: {
         bili: "哔哩蓝", teal: "青碧", emerald: "翠绿", violet: "星紫",
@@ -4271,6 +4271,7 @@
       ".ba-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}",
       ".ba-actions button{height:32px;border:1px solid var(--ba-border-in);border-radius:8px;background:var(--ba-card);color:var(--ba-ink);padding:0 11px;cursor:pointer;font-size:12px;font-weight:700}",
       ".ba-badge-actions{justify-content:flex-start;margin-top:0}",
+      ".ba-badge-actions button{white-space:nowrap;flex:none}",
       ".ba-actions button.primary{border-color:var(--ba-accent);background:var(--ba-accent);color:#fff}",
       ".ba-mini{font-size:11px;color:var(--ba-ink-soft);margin:8px 0 0;line-height:1.4}"
     ].join("");

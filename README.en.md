@@ -49,7 +49,7 @@ Open `chrome://extensions`, turn on Developer mode, and load `dist/extension`.
 - If the video has stalled or the server is short, **Test other servers** compares a few servers right away and switches only to one that is clearly faster. It saves nothing and doesn't reload the page.
 - The bandwidth guard is off by default. Turning it on limits the page's use of your upload bandwidth; reload the page afterwards.
 - In web fullscreen the ⚡ badge fades out. Move the pointer near it to bring it back.
-- Press and drag ⚡ to put it anywhere; the spot is remembered. Drop it against the left or right edge and it tucks half away, sliding back out under the pointer. Advanced settings → ⚡ button → Reset position puts it back in the corner.
+- Press and drag ⚡ to put it anywhere; the spot is remembered. Drop it against the left or right edge and it tucks half away, sliding back out under the pointer. Advanced settings → ⚡ button → Reset puts it back in the corner.
 - Advanced settings → Hide removes ⚡ entirely. Alt+B (Option+B on a Mac) toggles it, and `BiliAccelerator.showBadge()` in the console brings it back too.
 
 ## Releases
